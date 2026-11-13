@@ -41,7 +41,7 @@ const ICONS = {
 
 export function renderIcon(name, className = 'icon') {
   const svg = ICONS[name] || ICONS.activity;
-  return svg.replace('<svg ', `<svg class="${className}" aria-hidden="true" `);
+  return svg.replace('<svg ', `<svg class="${className}" width="16" height="16" aria-hidden="true" `);
 }
 
 export default ICONS;

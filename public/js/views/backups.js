@@ -12,8 +12,62 @@ import { renderDiff } from '../utils/diff-viewer.js';
 import { formatBytes, formatRelativeTime, escapeHtml } from '../utils/formatters.js';
 import { renderIcon } from '../utils/icons.js';
 
+const CRON_PRESETS = [
+  { value: '0 3 * * *', label: 'Daily at 03:00 UTC (Recommended)', desc: 'Every day at 03:00 UTC' },
+  { value: '0 0 * * *', label: 'Daily at 00:00 UTC (Midnight)', desc: 'Every day at 00:00 UTC' },
+  { value: '0 */12 * * *', label: 'Twice Daily (Every 12 hours)', desc: 'Every 12 hours at :00' },
+  { value: '0 */6 * * *', label: 'Every 6 Hours', desc: 'Every 6 hours at :00' },
+  { value: '0 * * * *', label: 'Hourly (Every hour)', desc: 'Every hour at :00' },
+  { value: '0 4 * * 0', label: 'Weekly (Sundays at 04:00 UTC)', desc: 'Sundays at 04:00 UTC' }
+];
+
+function describeCron(cronExpr) {
+  const clean = String(cronExpr || '0 3 * * *').trim();
+  const preset = CRON_PRESETS.find((p) => p.value === clean);
+  if (preset) return preset.desc;
+
+  const parts = clean.split(/\s+/);
+  if (parts.length >= 5) {
+    const [min, hour, dom, month, dow] = parts;
+    if (dom === '*' && month === '*' && dow === '*') {
+      if (hour.startsWith('*/')) return `Every ${hour.slice(2)} hours`;
+      if (hour === '*' && min.startsWith('*/')) return `Every ${min.slice(2)} minutes`;
+      if (/^\d+$/.test(hour) && /^\d+$/.test(min)) {
+        return `Every day at ${hour.padStart(2, '0')}:${min.padStart(2, '0')} UTC`;
+      }
+    }
+  }
+  return `Custom schedule (${clean})`;
+}
+
+function formatNextRunText(nextRunIso) {
+  if (!nextRunIso) return 'Scheduled';
+  const diffMs = new Date(nextRunIso).getTime() - Date.now();
+  if (Number.isNaN(diffMs)) return 'Scheduled';
+  if (diffMs <= 60000) return 'Next run due Within 1 minute';
+  const mins = Math.round(diffMs / 60000);
+  if (mins < 60) return `Next run in ~${mins} min${mins === 1 ? '' : 's'}`;
+  const hours = Math.round(mins / 60);
+  if (hours < 48) return `Next run in ~${hours} hour${hours === 1 ? '' : 's'}`;
+  const days = Math.round(hours / 24);
+  return `Next run in ~${days} day${days === 1 ? '' : 's'}`;
+}
+
 export function renderBackups(container) {
-  const { backups, health } = store.state;
+  const { backups, schedules, settings, health } = store.state;
+  const activeSched = (schedules && schedules[0]) || {
+    id: 'sched-nightly-fleet',
+    name: 'Nightly Fleet Backup',
+    cron: '0 3 * * *',
+    enabled: true,
+    targets: ['all'],
+    retentionMaxBackups: settings?.retention?.maxBackupsPerHost || 14,
+    lastRun: null,
+    nextRun: null
+  };
+  const isScheduleEnabled = activeSched.enabled !== false;
+  const retentionCount = activeSched.retentionMaxBackups || settings?.retention?.maxBackupsPerHost || 14;
+  const backupDirPath = health?.storage?.backupDir || '/backups';
 
   container.innerHTML = `
     <div class="view-header">
@@ -23,7 +77,7 @@ export function renderBackups(container) {
       </div>
       <div class="view-actions">
         <button type="button" class="btn btn-secondary" id="backup-config-sched-btn">
-          ${renderIcon('settings', 'icon')} Configure Schedule
+          ${renderIcon('clock', 'icon')} Configure Schedule
         </button>
         <button type="button" class="btn btn-primary" id="backup-run-all-btn">
           ${renderIcon('database', 'icon')} Backup All Fleet Now
@@ -34,12 +88,12 @@ export function renderBackups(container) {
     <!-- Storage Status Bar -->
     <div style="display: flex; align-items: center; justify-content: space-between; background: var(--color-surface); border: 1px solid var(--color-border); padding: 14px 18px; border-radius: var(--radius-lg); flex-wrap: wrap; gap: 12px;">
       <div style="display: flex; align-items: center; gap: 12px;">
-        <div style="width: 36px; height: 36px; border-radius: var(--radius-md); background: var(--color-primary-light); color: var(--color-primary); display: flex; align-items: center; justify-content: center;">
-          ${renderIcon('database', 'icon')}
+        <div style="width: 36px; height: 36px; border-radius: var(--radius-md); background: var(--color-primary-light); color: var(--color-primary); display: flex; align-items: center; justify-content: center; flex-shrink: 0;">
+          ${renderIcon('database', 'icon icon-md')}
         </div>
         <div>
-          <div style="font-weight: 600; font-size: 14px;">Storage Target: <span class="font-mono">/backups</span> (TrueNAS ZFS Mount)</div>
-          <div style="font-size: 12px; color: var(--color-text-secondary);">Retention Policy: Retain last 30 daily archives per host</div>
+          <div style="font-weight: 600; font-size: 14px;">Storage Target: <span class="font-mono">${escapeHtml(backupDirPath)}</span> (TrueNAS ZFS Mount)</div>
+          <div style="font-size: 12px; color: var(--color-text-secondary);">Retention Policy: Retain last <strong>${retentionCount}</strong> archives per host (min 2 protected)</div>
         </div>
       </div>
       <div style="display: flex; align-items: center; gap: 16px; font-size: 13px;">
@@ -56,11 +110,14 @@ export function renderBackups(container) {
       <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px;">
         <div>
           <div style="display: flex; align-items: center; gap: 8px;">
-            <span class="status-pill online">Active Schedule</span>
-            <span style="font-weight: 600; font-size: 14px;">Nightly Fleet Snapshot</span>
+            <span class="status-pill ${isScheduleEnabled ? 'online' : 'warning'}">
+              <span class="status-dot ${isScheduleEnabled ? 'online' : 'warning'}"></span>
+              ${isScheduleEnabled ? 'Active Schedule' : 'Schedule Paused'}
+            </span>
+            <span style="font-weight: 600; font-size: 14px;">${escapeHtml(activeSched.name || 'Nightly Fleet Backup')}</span>
           </div>
-          <div style="font-size: 12.5px; color: var(--color-text-secondary); margin-top: 4px;">
-            Cron: <code style="background:var(--color-surface-elevated); padding:2px 6px; border-radius:4px; font-family:var(--font-mono);">0 3 * * *</code> (Every day at 03:00 UTC) • Next run in ~13 hours
+          <div style="font-size: 12.5px; color: var(--color-text-secondary); margin-top: 6px;">
+            Cron: <code style="background:var(--color-surface-elevated); padding:2px 6px; border-radius:4px; font-family:var(--font-mono);">${escapeHtml(activeSched.cron)}</code> (${escapeHtml(describeCron(activeSched.cron))}) • ${isScheduleEnabled ? formatNextRunText(activeSched.nextRun) : 'Automated runs paused'}${activeSched.lastRun ? ` • Last run ${formatRelativeTime(activeSched.lastRun)}` : ''}
           </div>
         </div>
         <button type="button" class="btn btn-secondary" id="backup-run-sched-now">
@@ -93,6 +150,7 @@ export function renderBackups(container) {
               <tr>
                 <td colspan="7" style="text-align: center; padding: 32px;">
                   <div class="empty-state">
+                    <div class="empty-state-icon">${renderIcon('database', 'icon')}</div>
                     <div class="empty-state-title">No Backup Archives Found</div>
                     <div class="empty-state-desc">Click "Backup All Fleet Now" above to create your first configuration snapshots.</div>
                   </div>
@@ -105,7 +163,7 @@ export function renderBackups(container) {
     </div>
 
     <!-- Global Modals for Backups View -->
-    ${renderBackupModals()}
+    ${renderBackupModals(activeSched, retentionCount)}
   `;
 
   // Attach Backup All
@@ -114,7 +172,7 @@ export function renderBackups(container) {
       toast.info('Backup Queued', 'Creating snapshots for all fleet nodes...');
       await api.runBackup('all');
       toast.success('Backup Successful', 'New configuration archives generated in /backups.');
-      store.poll();
+      await store.poll(true);
     } catch (err) {
       toast.error('Backup Failed', err.message);
     }
@@ -123,10 +181,10 @@ export function renderBackups(container) {
   // Attach Run Schedule
   container.querySelector('#backup-run-sched-now')?.addEventListener('click', async () => {
     try {
-      toast.info('Running Schedule', 'Executing nightly backup schedule...');
-      await api.runBackup('all');
+      toast.info('Running Schedule', `Executing "${activeSched.name || 'Nightly Fleet Backup'}"...`);
+      await api.runBackupSchedule(activeSched.id || 'sched-nightly-fleet');
       toast.success('Schedule Finished', 'Automated backups completed and validated.');
-      store.poll();
+      await store.poll(true);
     } catch (err) {
       toast.error('Execution Failed', err.message);
     }
@@ -134,29 +192,56 @@ export function renderBackups(container) {
 
   // Attach Schedule Configuration Modal
   container.querySelector('#backup-config-sched-btn')?.addEventListener('click', () => {
+    const presetSelect = container.querySelector('#sched-preset-select');
+    const nameInput = container.querySelector('#sched-name-input');
+    const retentionInput = container.querySelector('#sched-retention-input');
+    const enabledCheckbox = container.querySelector('#sched-enabled-checkbox');
+    if (presetSelect) presetSelect.value = activeSched.cron || '0 3 * * *';
+    if (nameInput) nameInput.value = activeSched.name || 'Nightly Fleet Backup';
+    if (retentionInput) retentionInput.value = String(retentionCount);
+    if (enabledCheckbox) enabledCheckbox.checked = isScheduleEnabled;
     openModal('schedule-config-dialog');
   });
 
   // Attach Save Schedule Handler
   container.querySelector('#sched-save-btn')?.addEventListener('click', async () => {
     const cron = container.querySelector('#sched-preset-select')?.value || '0 3 * * *';
+    const name = (container.querySelector('#sched-name-input')?.value || 'Nightly Fleet Backup').trim();
     const retention = parseInt(container.querySelector('#sched-retention-input')?.value || '14', 10);
+    const enabled = container.querySelector('#sched-enabled-checkbox')
+      ? Boolean(container.querySelector('#sched-enabled-checkbox').checked)
+      : true;
+
     try {
-      await api.updateBackupSchedules({
+      const res = await api.updateBackupSchedules({
         schedules: [
           {
-            id: 'sched-nightly-fleet',
-            name: 'Nightly Fleet Backup',
+            id: activeSched.id || 'sched-nightly-fleet',
+            name: name || 'Nightly Fleet Backup',
             cron,
-            enabled: true,
-            targets: ['all'],
-            retentionMaxBackups: retention
+            enabled,
+            targets: activeSched.targets || ['all'],
+            retentionMaxBackups: Number.isFinite(retention) ? retention : 14
           }
         ]
       });
       closeModal('schedule-config-dialog');
-      toast.success('Schedule Saved', `Automated backup schedule updated (${cron})`);
-      store.poll();
+      const updatedSchedules = res?.schedules || [];
+      store.setState({
+        schedules: updatedSchedules,
+        settings: store.state.settings
+          ? {
+              ...store.state.settings,
+              retention: {
+                ...(store.state.settings.retention || {}),
+                maxBackupsPerHost: updatedSchedules[0]?.retentionMaxBackups || retention
+              }
+            }
+          : store.state.settings
+      });
+      renderBackups(container);
+      toast.success('Schedule Saved', `Automated backup schedule updated (${describeCron(cron)})`);
+      await store.poll(true);
     } catch (err) {
       toast.error('Failed to Save Schedule', err.message);
     }
@@ -233,37 +318,49 @@ function renderBackupRow(b) {
         <span class="font-mono">${formatBytes(b.sizeBytes || 42000)}</span>
       </td>
       <td>
-        <div style="display: flex; align-items: center; gap: 6px;">
-          <code class="font-mono" style="font-size: 11px; background: var(--color-surface-elevated); padding: 2px 4px; border-radius: 4px;">${shortSha}</code>
-          <button type="button" class="btn-icon btn-copy-sha" data-sha="${b.sha256}" style="width: 22px; height: 22px;" title="Copy SHA-256">
-            ${renderIcon('copy', 'icon')}
+        <div style="display: inline-flex; align-items: center; gap: 6px;">
+          <code class="font-mono" style="font-size: 11px; background: var(--color-surface-elevated); padding: 2px 5px; border-radius: 4px;">${shortSha}</code>
+          <button type="button" class="btn-icon btn-copy-sha" data-sha="${escapeHtml(b.sha256 || '')}" style="width: 24px; height: 24px;" title="Copy SHA-256" aria-label="Copy SHA-256 checksum">
+            ${renderIcon('copy', 'icon icon-sm')}
           </button>
         </div>
       </td>
       <td>
         <span class="status-pill ${b.status === 'success' ? 'success' : 'danger'}">
+          <span class="status-dot ${b.status === 'success' ? 'success' : 'danger'}"></span>
           ${b.status === 'success' ? 'Verified' : 'Failed'}
         </span>
       </td>
       <td style="text-align: right; white-space: nowrap;">
-        <button type="button" class="btn btn-secondary btn-inspect-files" data-backup-id="${b.id}" style="padding: 4px 8px; font-size: 11.5px;">
-          ${renderIcon('fileText', 'icon')} Files
-        </button>
-        <button type="button" class="btn btn-secondary btn-diff-backup" data-backup-id="${b.id}" style="padding: 4px 8px; font-size: 11.5px;">
-          ${renderIcon('diff', 'icon')} Diff
-        </button>
-        <a href="${api.getBackupDownloadUrl(b.id)}" download class="btn btn-secondary" style="padding: 4px 8px; font-size: 11.5px;" title="Download .tar.gz">
-          ${renderIcon('download', 'icon')}
-        </a>
-        <button type="button" class="btn-icon btn-delete-backup" data-backup-id="${b.id}" style="width: 26px; height: 26px; color: var(--color-danger);" title="Delete archive">
-          ${renderIcon('trash', 'icon')}
-        </button>
+        <div style="display: inline-flex; align-items: center; justify-content: flex-end; gap: 6px;">
+          <button type="button" class="btn btn-secondary btn-inspect-files" data-backup-id="${escapeHtml(b.id)}" style="height: 28px; padding: 0 10px; font-size: 12px;" title="Inspect UCI configuration files">
+            ${renderIcon('fileText', 'icon icon-sm')} Files
+          </button>
+          <button type="button" class="btn btn-secondary btn-diff-backup" data-backup-id="${escapeHtml(b.id)}" style="height: 28px; padding: 0 10px; font-size: 12px;" title="Compare UCI configuration diff">
+            ${renderIcon('diff', 'icon icon-sm')} Diff
+          </button>
+          <a href="${api.getBackupDownloadUrl(b.id)}" download class="btn-icon" style="width: 28px; height: 28px; text-decoration: none;" title="Download .tar.gz archive" aria-label="Download backup archive">
+            ${renderIcon('download', 'icon icon-sm')}
+          </a>
+          <button type="button" class="btn-icon btn-delete-backup" data-backup-id="${escapeHtml(b.id)}" style="width: 28px; height: 28px; color: var(--color-danger);" title="Delete archive" aria-label="Delete backup archive">
+            ${renderIcon('trash', 'icon icon-sm')}
+          </button>
+        </div>
       </td>
     </tr>
   `;
 }
 
-function renderBackupModals() {
+function renderBackupModals(activeSched = {}, retentionCount = 14) {
+  const currentCron = activeSched.cron || '0 3 * * *';
+  const currentName = activeSched.name || 'Nightly Fleet Backup';
+  const isEnabled = activeSched.enabled !== false;
+  const hasCustomCron = !CRON_PRESETS.some((p) => p.value === currentCron);
+  const presetOptions = [
+    ...CRON_PRESETS,
+    ...(hasCustomCron ? [{ value: currentCron, label: `Custom (${currentCron})` }] : [])
+  ];
+
   return `
     <!-- UCI Config Files Inspector Modal -->
     <dialog id="backup-files-dialog" aria-labelledby="files-modal-title">
@@ -325,17 +422,23 @@ function renderBackupModals() {
       </div>
       <div class="modal-body">
         <div class="form-group">
-          <label class="form-label">Schedule Preset</label>
+          <label class="form-label" for="sched-name-input">Schedule Name</label>
+          <input type="text" id="sched-name-input" class="form-input" value="${escapeHtml(currentName)}" />
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="sched-preset-select">Schedule Frequency</label>
           <select id="sched-preset-select" class="form-select">
-            <option value="0 3 * * *">Daily at 03:00 UTC (Recommended)</option>
-            <option value="0 4 * * 0">Weekly (Sundays at 04:00 UTC)</option>
-            <option value="0 */12 * * *">Twice Daily (Every 12 hours)</option>
+            ${presetOptions.map((opt) => `<option value="${escapeHtml(opt.value)}" ${opt.value === currentCron ? 'selected' : ''}>${escapeHtml(opt.label)}</option>`).join('')}
           </select>
         </div>
         <div class="form-group">
-          <label class="form-label">Retention Count (Max archives per host)</label>
-          <input type="number" id="sched-retention-input" class="form-input" min="2" max="100" value="14" />
+          <label class="form-label" for="sched-retention-input">Retention Count (Max archives per host)</label>
+          <input type="number" id="sched-retention-input" class="form-input" min="2" max="100" value="${retentionCount}" />
           <span class="form-hint">TrueNAS will automatically prune archives older than this limit while protecting the 2 most recent snapshots.</span>
+        </div>
+        <div class="form-group" style="flex-direction: row; align-items: center; gap: 8px; margin-top: 4px;">
+          <input type="checkbox" id="sched-enabled-checkbox" ${isEnabled ? 'checked' : ''} style="width: 16px; height: 16px; accent-color: var(--color-primary);" />
+          <label class="form-label" for="sched-enabled-checkbox" style="margin: 0; cursor: pointer;">Enable Automated Scheduled Backups</label>
         </div>
       </div>
       <div class="modal-footer">

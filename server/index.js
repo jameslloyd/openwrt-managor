@@ -10,6 +10,7 @@ import { serveStatic } from './static.js';
 export async function createServer() {
   await db.init();
   await backupEngine.init();
+  backupEngine.startScheduler();
   await hostManager.init();
   hostManager.startPolling(config.pollIntervalMs);
 
@@ -51,6 +52,7 @@ if (isMain) {
       const shutdown = () => {
         console.log('[openwrt-managor] Graceful shutdown initiated...');
         hostManager.stopPolling();
+        backupEngine.stopScheduler();
         server.close(() => {
           console.log('[openwrt-managor] Server closed.');
           process.exit(0);

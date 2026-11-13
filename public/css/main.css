@@ -338,9 +338,11 @@ a:focus-visible {
   display: inline-block;
 }
 
-.status-dot.online { background-color: var(--color-success); }
+.status-dot.online,
+.status-dot.success { background-color: var(--color-success); }
 .status-dot.warning { background-color: var(--color-warning); }
-.status-dot.offline { background-color: var(--color-danger); }
+.status-dot.offline,
+.status-dot.danger { background-color: var(--color-danger); }
 
 /* Mode Pill (Demo Mode / Live Mode) */
 .mode-pill {
@@ -396,7 +398,31 @@ a:focus-visible {
   transition: width var(--transition-normal);
 }
 
-/* Buttons */
+/* Icons & Buttons */
+.icon {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  pointer-events: none;
+  display: inline-block;
+  vertical-align: middle;
+}
+
+.icon-sm {
+  width: 13px;
+  height: 13px;
+}
+
+.icon-md {
+  width: 18px;
+  height: 18px;
+}
+
+.icon-lg {
+  width: 22px;
+  height: 22px;
+}
+
 .btn {
   display: inline-flex;
   align-items: center;
@@ -413,6 +439,13 @@ a:focus-visible {
   transition: all var(--transition-fast);
   text-decoration: none;
   white-space: nowrap;
+}
+
+.btn svg {
+  width: 15px;
+  height: 15px;
+  flex: none;
+  pointer-events: none;
 }
 
 .btn:disabled {
@@ -489,8 +522,10 @@ a:focus-visible {
 }
 
 .btn-icon svg {
-  width: 16px;
-  height: 16px;
+  width: 15px;
+  height: 15px;
+  flex: none;
+  pointer-events: none;
 }
 
 /* View Header */

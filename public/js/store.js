@@ -86,21 +86,28 @@ class Store {
     }
   }
 
-  async poll() {
-    if (this.state.isFetching) return;
+  async poll(force = false) {
+    if (this.state.isFetching && !force) return;
     this.state.isFetching = true;
     this.emit('fetch-start');
 
     try {
-      const [health, hosts, topology, clients, wifiChannels, wifiInterference, backups] = await Promise.all([
+      const [health, hosts, topology, clients, wifiChannels, wifiInterference, backups, schedulesRes, settings] = await Promise.all([
         api.getHealth().catch(() => null),
         api.getHosts().catch(() => []),
         api.getTopology().catch(() => ({ nodes: [], links: [] })),
         api.getClients().catch(() => []),
         api.getWifiChannels().catch(() => ({ bands: {} })),
         api.getWifiInterference().catch(() => ({ summary: { healthScore: 100 }, warnings: [] })),
-        api.getBackups().catch(() => [])
+        api.getBackups().catch(() => []),
+        api.getBackupSchedules().catch(() => ({ schedules: [] })),
+        api.getSettings().catch(() => null)
       ]);
+      const schedules = Array.isArray(schedulesRes?.schedules)
+        ? schedulesRes.schedules
+        : Array.isArray(schedulesRes)
+          ? schedulesRes
+          : this.state.schedules || [];
 
       // Calculate aggregated WAN throughput for the sparkline
       let wanRxBps = 0;
@@ -136,12 +143,14 @@ class Store {
 
       this.setState({
         health,
+        settings: settings || this.state.settings,
         hosts,
         topology,
         clients,
         wifiChannels,
         wifiInterference,
         backups,
+        schedules,
         selectedNode,
         selectedClient,
         throughputHistory: history,

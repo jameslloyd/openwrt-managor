@@ -11,6 +11,117 @@ import { execSshCommand } from './realUbus.js';
 export class BackupEngine {
   constructor(backupDir = config.backupDir) {
     this.backupDir = backupDir;
+    this.schedulerTimer = null;
+    this.isRunningSchedule = false;
+  }
+
+  /**
+   * Matches a single cron field (minute, hour, day-of-month, month, day-of-week).
+   */
+  matchCronField(fieldExpr, value) {
+    if (!fieldExpr || fieldExpr === '*') return true;
+    const parts = String(fieldExpr).split(',');
+    for (const part of parts) {
+      const trimmed = part.trim();
+      if (trimmed === '*') return true;
+      if (trimmed.startsWith('*/')) {
+        const step = parseInt(trimmed.slice(2), 10);
+        if (Number.isFinite(step) && step > 0 && value % step === 0) return true;
+      } else {
+        const num = parseInt(trimmed, 10);
+        if (Number.isFinite(num) && num === value) return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Computes the next UTC run timestamp for a 5-field cron expression (min hour dom month dow).
+   */
+  computeNextRun(cronExpr = '0 3 * * *', fromDate = new Date()) {
+    const fields = String(cronExpr || '0 3 * * *').trim().split(/\s+/);
+    if (fields.length < 5) {
+      return new Date(fromDate.getTime() + 24 * 3600 * 1000).toISOString();
+    }
+    const [minField, hourField, domField, monthField, dowField] = fields;
+
+    // Start searching at the next whole UTC minute
+    const startMs = Math.floor(fromDate.getTime() / 60000) * 60000 + 60000;
+    const maxMinutes = 8 * 24 * 60; // Search up to 8 days ahead
+
+    for (let i = 0; i < maxMinutes; i++) {
+      const candidate = new Date(startMs + i * 60000);
+      const min = candidate.getUTCMinutes();
+      if (!this.matchCronField(minField, min)) continue;
+
+      const hour = candidate.getUTCHours();
+      if (!this.matchCronField(hourField, hour)) continue;
+
+      const dom = candidate.getUTCDate();
+      if (!this.matchCronField(domField, dom)) continue;
+
+      const month = candidate.getUTCMonth() + 1;
+      if (!this.matchCronField(monthField, month)) continue;
+
+      const dow = candidate.getUTCDay();
+      if (!this.matchCronField(dowField, dow)) continue;
+
+      return candidate.toISOString();
+    }
+
+    return new Date(fromDate.getTime() + 24 * 3600 * 1000).toISOString();
+  }
+
+  startScheduler(checkIntervalMs = 30000) {
+    this.stopScheduler();
+    this.schedulerTimer = setInterval(() => {
+      this.checkDueSchedules().catch(() => {});
+    }, checkIntervalMs);
+    if (this.schedulerTimer.unref) {
+      this.schedulerTimer.unref();
+    }
+  }
+
+  stopScheduler() {
+    if (this.schedulerTimer) {
+      clearInterval(this.schedulerTimer);
+      this.schedulerTimer = null;
+    }
+  }
+
+  async checkDueSchedules(now = new Date()) {
+    if (this.isRunningSchedule) return [];
+    this.isRunningSchedule = true;
+    const executed = [];
+    try {
+      const schedules = (await db.getSchedules()) || [];
+      let modified = false;
+
+      for (const sched of schedules) {
+        if (sched.enabled === false) continue;
+        const nextRunMs = sched.nextRun ? new Date(sched.nextRun).getTime() : 0;
+        if (!nextRunMs || Number.isNaN(nextRunMs)) {
+          sched.nextRun = this.computeNextRun(sched.cron, now);
+          modified = true;
+          continue;
+        }
+        if (now.getTime() >= nextRunMs) {
+          const target = sched.targets && sched.targets.length === 1 ? sched.targets[0] : 'all';
+          await this.runBackup(target, 'scheduled');
+          sched.lastRun = now.toISOString();
+          sched.nextRun = this.computeNextRun(sched.cron, now);
+          modified = true;
+          executed.push(sched.id);
+        }
+      }
+
+      if (modified) {
+        await db.saveSchedules(schedules);
+      }
+    } finally {
+      this.isRunningSchedule = false;
+    }
+    return executed;
   }
 
   async init(seedDemo = false) {
@@ -312,10 +423,17 @@ export class BackupEngine {
 
   async applyRetention(hostId) {
     const settings = (await db.getSettings()) || {};
-    const retention = settings.retention || {
-      maxBackupsPerHost: 10,
-      maxAgeDays: 30,
-      minRetainedPerHost: 2,
+    const schedules = (await db.getSchedules()) || [];
+    const primarySched = schedules[0];
+    const schedRetention = Number(primarySched?.retentionMaxBackups);
+
+    const retention = {
+      maxBackupsPerHost:
+        Number.isFinite(schedRetention) && schedRetention >= 2
+          ? schedRetention
+          : Number(settings.retention?.maxBackupsPerHost) || 10,
+      maxAgeDays: Number(settings.retention?.maxAgeDays) || 30,
+      minRetainedPerHost: Number(settings.retention?.minRetainedPerHost) || 2,
     };
 
     const hostBackups = await this.listBackups(hostId);
@@ -336,6 +454,19 @@ export class BackupEngine {
       if (exceedsCount || exceedsAge) {
         await this.deleteBackup(b.id);
       }
+    }
+  }
+
+  async applyAllRetention() {
+    try {
+      const hostDirs = await fs.readdir(this.backupDir, { withFileTypes: true });
+      for (const entry of hostDirs) {
+        if (entry.isDirectory() && /^[a-zA-Z0-9_-]+$/.test(entry.name)) {
+          await this.applyRetention(entry.name);
+        }
+      }
+    } catch {
+      // ignore if backupDir doesn't exist yet
     }
   }
 }

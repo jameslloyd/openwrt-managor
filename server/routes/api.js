@@ -143,6 +143,17 @@ export async function handleApiRequest(req, res, pathname, searchParams) {
           alerts: { ...current.alerts, ...(body.alerts || {}) },
         };
         await db.saveSettings(updated);
+
+        // Keep primary backup schedule retention in sync with settings
+        if (updated.retention?.maxBackupsPerHost) {
+          const schedules = (await db.getSchedules()) || [];
+          if (schedules.length > 0) {
+            schedules[0].retentionMaxBackups = Number(updated.retention.maxBackupsPerHost);
+            await db.saveSchedules(schedules);
+          }
+          await backupEngine.applyAllRetention();
+        }
+
         sendJson(res, 200, updated);
         return true;
       }
@@ -346,11 +357,54 @@ export async function handleApiRequest(req, res, pathname, searchParams) {
         sendJson(res, 200, { schedules: schedules || [] });
         return true;
       }
-      if (req.method === 'PUT') {
+      if (req.method === 'PUT' || req.method === 'POST') {
         const body = await parseJsonBody(req);
-        const list = Array.isArray(body.schedules) ? body.schedules : (body || []);
-        await db.saveSchedules(list);
-        sendJson(res, 200, { schedules: list });
+        const existing = (await db.getSchedules()) || [];
+        const rawList = Array.isArray(body.schedules)
+          ? body.schedules
+          : Array.isArray(body)
+            ? body
+            : body && typeof body === 'object'
+              ? [body]
+              : [];
+
+        const now = new Date();
+        const normalizedList = rawList.map((item, idx) => {
+          const prev = existing.find((s) => s.id === item.id) || existing[idx] || {};
+          const cron = String(item.cron || prev.cron || '0 3 * * *').trim();
+          const enabled = item.enabled !== undefined ? Boolean(item.enabled) : prev.enabled !== false;
+          const rawRet = Number(item.retentionMaxBackups ?? prev.retentionMaxBackups ?? 14);
+          const retentionMaxBackups = Number.isFinite(rawRet) ? Math.max(2, Math.min(100, Math.round(rawRet))) : 14;
+
+          return {
+            id: item.id || prev.id || 'sched-nightly-fleet',
+            name: item.name || prev.name || 'Nightly Fleet Backup',
+            cron,
+            enabled,
+            targets: Array.isArray(item.targets) && item.targets.length > 0 ? item.targets : prev.targets || ['all'],
+            retentionMaxBackups,
+            lastRun: item.lastRun !== undefined ? item.lastRun : prev.lastRun || null,
+            nextRun: enabled ? backupEngine.computeNextRun(cron, now) : null,
+          };
+        });
+
+        await db.saveSchedules(normalizedList);
+
+        // Sync primary schedule retention count with settings.retention.maxBackupsPerHost
+        if (normalizedList.length > 0) {
+          const currentSettings = (await db.getSettings()) || {};
+          const updatedSettings = {
+            ...currentSettings,
+            retention: {
+              ...(currentSettings.retention || { maxAgeDays: 30, minRetainedPerHost: 2 }),
+              maxBackupsPerHost: normalizedList[0].retentionMaxBackups,
+            },
+          };
+          await db.saveSettings(updatedSettings);
+          await backupEngine.applyAllRetention();
+        }
+
+        sendJson(res, 200, { schedules: normalizedList });
         return true;
       }
     }
@@ -367,14 +421,16 @@ export async function handleApiRequest(req, res, pathname, searchParams) {
       const target = sched.targets && sched.targets.length === 1 ? sched.targets[0] : 'all';
       const runResult = await backupEngine.runBackup(target, 'scheduled');
 
-      // Update schedule lastRun and nextRun
-      sched.lastRun = new Date().toISOString();
-      sched.nextRun = new Date(Date.now() + 24 * 3600 * 1000).toISOString();
+      // Update schedule lastRun and nextRun based on its cron expression
+      const now = new Date();
+      sched.lastRun = now.toISOString();
+      sched.nextRun = sched.enabled === false ? null : backupEngine.computeNextRun(sched.cron, now);
       await db.saveSchedules(schedules);
 
       sendJson(res, 200, {
         scheduleId: schedId,
         status: 'completed',
+        schedule: sched,
         job: runResult,
       });
       return true;

@@ -32,6 +32,7 @@ test.before(async () => {
 
 test.after(async () => {
   hostManager.stopPolling();
+  backupEngine.stopScheduler();
   await db.saveHosts([]);
   await backupEngine.removeDemoBackups(['node-gw-01', 'node-ap-01', 'node-ap-02', 'node-ap-03']);
   await new Promise((resolve) => server.close(resolve));
@@ -767,4 +768,55 @@ test('Manufacturer Resolution: identifies manufacturer from BSSID OUI, virtual l
   assert.equal(lookupVendor('a4:83:e7:11:22:33', 'unknown'), 'Apple, Inc.');
   assert.equal(lookupVendor('da:a1:19:22:33:44', 'Jan-iPhone-16'), 'Apple, Inc.');
   assert.equal(lookupVendor('da:a1:19:22:33:44', 'shellyplus1pm-a8032a'), 'Shelly / Allterco');
+});
+
+test('Backup Schedules: updating schedule persists cron, computes nextRun, syncs retention settings, and executes when due', async () => {
+  // 1. Update schedule via PUT /api/backups/schedules
+  const updateRes = await fetch(`${baseUrl}/api/backups/schedules`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      schedules: [
+        {
+          id: 'sched-nightly-fleet',
+          name: 'Twice Daily ZFS Snapshot',
+          cron: '0 */12 * * *',
+          enabled: true,
+          targets: ['all'],
+          retentionMaxBackups: 7,
+        },
+      ],
+    }),
+  });
+  assert.equal(updateRes.status, 200);
+  const updateData = await updateRes.json();
+  assert.equal(updateData.schedules.length, 1);
+  assert.equal(updateData.schedules[0].name, 'Twice Daily ZFS Snapshot');
+  assert.equal(updateData.schedules[0].cron, '0 */12 * * *');
+  assert.equal(updateData.schedules[0].retentionMaxBackups, 7);
+  assert.ok(updateData.schedules[0].nextRun);
+
+  // Verify nextRun aligns to :00 minute and an even 12-hour boundary (00:00 or 12:00 UTC)
+  const nextRunDate = new Date(updateData.schedules[0].nextRun);
+  assert.equal(nextRunDate.getUTCMinutes(), 0);
+  assert.equal(nextRunDate.getUTCHours() % 12, 0);
+
+  // 2. Verify GET /api/backups/schedules and GET /api/settings reflect the saved schedule & retention
+  const getSchedRes = await fetch(`${baseUrl}/api/backups/schedules`);
+  const getSchedData = await getSchedRes.json();
+  assert.equal(getSchedData.schedules[0].cron, '0 */12 * * *');
+  assert.equal(getSchedData.schedules[0].retentionMaxBackups, 7);
+
+  const settingsRes = await fetch(`${baseUrl}/api/settings`);
+  const settingsData = await settingsRes.json();
+  assert.equal(settingsData.retention.maxBackupsPerHost, 7);
+
+  // 3. Verify checkDueSchedules executes a due schedule and advances nextRun
+  const futureDate = new Date(nextRunDate.getTime() + 5000);
+  const executedIds = await backupEngine.checkDueSchedules(futureDate);
+  assert.deepEqual(executedIds, ['sched-nightly-fleet']);
+
+  const afterSchedules = await db.getSchedules();
+  assert.equal(afterSchedules[0].lastRun, futureDate.toISOString());
+  assert.ok(new Date(afterSchedules[0].nextRun).getTime() > futureDate.getTime());
 });
