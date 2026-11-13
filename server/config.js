@@ -7,16 +7,17 @@ const rootDir = process.cwd();
 function resolveDirectory(envPath, fallbackRelPath) {
   if (envPath) {
     try {
-      if (!fs.existsSync(envPath)) {
-        fs.mkdirSync(envPath, { recursive: true });
+      const resolved = path.resolve(envPath);
+      if (!fs.existsSync(resolved)) {
+        fs.mkdirSync(resolved, { recursive: true });
       }
       // Test write permissions
-      const testFile = path.join(envPath, `.write_test_${Date.now()}`);
+      const testFile = path.join(resolved, `.write_test_${Date.now()}_${Math.random().toString(36).slice(2)}`);
       fs.writeFileSync(testFile, 'test');
       fs.unlinkSync(testFile);
-      return path.resolve(envPath);
-    } catch {
-      // Fall through to local fallback
+      return resolved;
+    } catch (err) {
+      console.error(`[openwrt-managor] Warning: Cannot write to configured directory "${envPath}" (${err.message}). Falling back to "./${fallbackRelPath}".`);
     }
   }
   const localFallback = path.resolve(rootDir, fallbackRelPath);

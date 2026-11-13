@@ -13,10 +13,10 @@ export async function writeJsonAtomic(filePath, data) {
   const tmpPath = `${filePath}.tmp.${Date.now()}_${Math.random().toString(36).slice(2)}`;
   const payload = JSON.stringify(data, null, 2);
 
-  const fileHandle = await fs.open(tmpPath, 'w', 0o600);
+  const fileHandle = await fs.open(tmpPath, 'w', 0o644);
   try {
     await fileHandle.writeFile(payload, 'utf8');
-    await fileHandle.chmod(0o600);
+    await fileHandle.chmod(0o644).catch(() => {});
     await fileHandle.sync(); // Force write to physical disk
   } finally {
     await fileHandle.close();

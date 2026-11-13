@@ -22,12 +22,6 @@ RUN npm install --omit=dev || true
 COPY server/ ./server/
 COPY public/ ./public/
 
-# Ensure appropriate permissions for persistent directories
-RUN chown -R node:node /app /data /backups
-
-# Switch to unprivileged node user
-USER node
-
 EXPOSE 8080
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
