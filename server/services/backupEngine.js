@@ -98,8 +98,8 @@ export class BackupEngine {
     let filesCount = 0;
     let filesList = [];
 
-    // Try pulling a real backup archive over SSH if host is a real router
-    if (host && !host.isSimulated && host.ip) {
+    // Try pulling a real backup archive over SSH if host is a real router with SSH credentials
+    if (host && !host.isSimulated && host.ip && (host.password || host.sshPrivateKey)) {
       try {
         const { stdout } = await execSshCommand(
           host,

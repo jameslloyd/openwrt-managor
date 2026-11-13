@@ -21,6 +21,9 @@ export class HostManager {
     this.liveClientsByHost = new Map(); // hostId -> array of client objects
     this.liveRadiosByHost = new Map(); // hostId -> array of radio objects
     this.signalHistoryByMac = new Map(); // mac -> array of { timestamp, signalDbm }
+    this.dhcpByHost = new Map(); // hostId -> { [mac]: { ip, hostname, expiresEpoch } }
+    this.arpByHost = new Map(); // hostId -> { [mac]: ip }
+    this.rdnsByHost = new Map(); // hostId -> { [ip]: hostname }
   }
 
   async init() {
@@ -121,6 +124,15 @@ export class HostManager {
         }
       }
     }
+    if (telemetry.dhcpMap) {
+      this.dhcpByHost.set(host.id, telemetry.dhcpMap);
+    }
+    if (telemetry.arpMap) {
+      this.arpByHost.set(host.id, telemetry.arpMap);
+    }
+    if (telemetry.rdnsMap) {
+      this.rdnsByHost.set(host.id, telemetry.rdnsMap);
+    }
     if (telemetry.sample) {
       this.prevSamples.set(host.id, telemetry.sample);
     }
@@ -198,17 +210,98 @@ export class HostManager {
   }
 
   getLiveClients() {
+    // Build a fleet-wide merged DHCP / ARP / reverse-DNS lookup across all gateways and APs
+    const globalDhcp = {};
+    for (const dhcpMap of this.dhcpByHost.values()) {
+      for (const [mac, info] of Object.entries(dhcpMap)) {
+        const existing = globalDhcp[mac];
+        if (!existing || (!existing.ip && info.ip) || (existing.hostname === '*' && info.hostname && info.hostname !== '*')) {
+          globalDhcp[mac] = { ...existing, ...info };
+        }
+      }
+    }
+
+    const globalArp = {};
+    for (const arpMap of this.arpByHost.values()) {
+      for (const [mac, entry] of Object.entries(arpMap)) {
+        const ip = typeof entry === 'string' ? entry : entry?.ip;
+        if (ip && ip !== '0.0.0.0' && !globalArp[mac]) {
+          globalArp[mac] = ip;
+        }
+      }
+    }
+
+    const globalRdns = {};
+    for (const rdnsMap of this.rdnsByHost.values()) {
+      for (const [mac, entry] of Object.entries(rdnsMap)) {
+        if (entry && typeof entry === 'object' && !globalRdns[mac]) {
+          globalRdns[mac] = entry;
+        }
+      }
+    }
+
     // Deduplicate clients across APs and gateways (prefer WiFi station entry over wired DHCP lease entry)
     const byMac = new Map();
+
     for (const clients of this.liveClientsByHost.values()) {
       for (const c of clients) {
-        const existing = byMac.get(c.mac);
+        const macLower = (c.mac || '').toLowerCase();
+        const existing = byMac.get(macLower);
+
+        // Preserve any known IP/hostname from a wired DHCP entry if a wireless AP entry lacks it
+        const dhcp = globalDhcp[macLower] || {};
+        const arpIp = globalArp[macLower];
+        const rdns = globalRdns[macLower] || {};
+        const resolvedIp =
+          c.ip && c.ip !== '0.0.0.0'
+            ? c.ip
+            : dhcp.ip || arpIp || rdns.ip || (existing && existing.ip !== '0.0.0.0' ? existing.ip : '0.0.0.0');
+        let resolvedHostname = c.hostname;
+        const isGenericHostname =
+          !resolvedHostname ||
+          resolvedHostname === '*' ||
+          resolvedHostname.toLowerCase() === macLower ||
+          resolvedHostname === c.ip ||
+          resolvedHostname === '0.0.0.0';
+        if (isGenericHostname) {
+          resolvedHostname =
+            (dhcp.hostname && dhcp.hostname !== '*' && dhcp.hostname !== dhcp.ip ? dhcp.hostname : null) ||
+            rdns.hostname ||
+            (dhcp.hostname && dhcp.hostname !== '*' ? dhcp.hostname : null) ||
+            (existing && existing.hostname && existing.hostname !== existing.mac.toLowerCase() ? existing.hostname : null) ||
+            (resolvedIp && resolvedIp !== '0.0.0.0' ? resolvedIp : null) ||
+            resolvedHostname ||
+            macLower;
+        }
+        const resolvedLeaseRemaining =
+          c.dhcpLeaseRemainingSec ||
+          dhcp.dhcpLeaseRemainingSec ||
+          (existing ? existing.dhcpLeaseRemainingSec || 0 : 0);
+
         if (!existing || (existing.connectionType === 'wired' && c.connectionType !== 'wired')) {
-          byMac.set(c.mac, {
+          byMac.set(macLower, {
             ...c,
-            signalHistory: this.signalHistoryByMac.get(c.mac) || [],
+            ip: resolvedIp,
+            hostname: resolvedHostname,
+            dhcpLeaseRemainingSec: resolvedLeaseRemaining,
+            signalHistory: this.signalHistoryByMac.get(c.mac) || this.signalHistoryByMac.get(macLower) || [],
             roamingLog: [],
           });
+        } else if (existing.connectionType !== 'wired' && c.connectionType === 'wired') {
+          // Enrich existing wireless client with wired/DHCP server IP & hostname if missing
+          if ((!existing.ip || existing.ip === '0.0.0.0') && resolvedIp !== '0.0.0.0') {
+            existing.ip = resolvedIp;
+          }
+          if (
+            (!existing.hostname || existing.hostname.toLowerCase() === macLower || existing.hostname === '0.0.0.0') &&
+            resolvedHostname &&
+            resolvedHostname.toLowerCase() !== macLower
+          ) {
+            existing.hostname = resolvedHostname;
+          }
+          if (!existing.dhcpLeaseRemainingSec && resolvedLeaseRemaining) {
+            existing.dhcpLeaseRemainingSec = resolvedLeaseRemaining;
+          }
         }
       }
     }
@@ -339,6 +432,9 @@ export class HostManager {
     this.prevSamples.delete(id);
     this.liveClientsByHost.delete(id);
     this.liveRadiosByHost.delete(id);
+    this.dhcpByHost.delete(id);
+    this.arpByHost.delete(id);
+    this.rdnsByHost.delete(id);
     await db.saveHosts(hosts);
 
     if (deleteBackups) {

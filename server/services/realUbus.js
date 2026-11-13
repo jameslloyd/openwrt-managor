@@ -323,13 +323,24 @@ export async function pollRealHost(hostConfig, prevSample = null) {
     'echo "===STATIONS==="',
     'for iface in $(iw dev 2>/dev/null | awk \'$1=="Interface"{print $2}\'); do echo "---IFACE:$iface---"; iw dev "$iface" station dump 2>/dev/null; done',
     'echo "===DHCP==="',
-    'cat /tmp/dhcp.leases 2>/dev/null',
+    'cat /tmp/dhcp.leases 2>/dev/null; lf=$(uci -q get dhcp.@dnsmasq[0].leasefile 2>/dev/null); [ -n "$lf" ] && [ "$lf" != "/tmp/dhcp.leases" ] && cat "$lf" 2>/dev/null',
+    'echo "===UCI_DHCP==="',
+    "uci show dhcp 2>/dev/null | grep -E '^dhcp\\.[^.=]+\\.(mac|ip|name)='",
+    'echo "===UBUS_DHCP==="',
+    'ubus call dhcp ipv4leases 2>/dev/null',
+    'echo "===ETHERS==="',
+    'cat /etc/ethers 2>/dev/null',
+    // If any associated WiFi station is missing from local dhcp.leases and /proc/net/arp, sweep the br-lan subnet so ARP resolves its IP
+    'missing_arp=0; for smac in $(iw dev 2>/dev/null | awk \'$1=="Interface"{print $2}\' | while read iface; do iw dev "$iface" station dump 2>/dev/null | awk \'/^Station/{print tolower($2)}\'; done); do if ! grep -qi "$smac" /tmp/dhcp.leases 2>/dev/null && ! awk \'tolower($4)=="\'$smac\'" && $3!="0x0"{found=1} END{exit !found}\' /proc/net/arp 2>/dev/null; then missing_arp=1; break; fi; done',
+    'if [ "$missing_arp" = "1" ]; then subnet=$(ip -4 addr show br-lan 2>/dev/null | awk \'/inet /{print $2; exit}\' | cut -d. -f1-3); [ -z "$subnet" ] && subnet=$(ip -4 addr show 2>/dev/null | awk \'/inet / && !/127\\.0\\.0\\.1/{print $2; exit}\' | cut -d. -f1-3); if [ -n "$subnet" ]; then for b in 0 64 128 192; do i=$((b + 1)); while [ $i -le $((b + 64)) ] && [ $i -le 254 ]; do ping -c 1 -W 1 "$subnet.$i" >/dev/null 2>&1 & i=$((i + 1)); done; wait; done; fi; fi',
     'echo "===ARP==="',
-    'cat /proc/net/arp 2>/dev/null',
+    'cat /proc/net/arp 2>/dev/null; echo "---IPNEIGH---"; ip -4 neigh show 2>/dev/null',
+    'echo "===RDNS==="',
+    'gw=$(ip route show default 2>/dev/null | awk \'/default/{print $3; exit}\'); [ -z "$gw" ] && gw=$(uci -q get network.lan.gateway 2>/dev/null); for smac in $(iw dev 2>/dev/null | awk \'$1=="Interface"{print $2}\' | while read iface; do iw dev "$iface" station dump 2>/dev/null | awk \'/^Station/{print tolower($2)}\'; done); do sip=$(awk \'tolower($4)=="\'$smac\'" && $3!="0x0"{print $1; exit}\' /proc/net/arp 2>/dev/null); if [ -n "$sip" ]; then rname=$(nslookup "$sip" ${gw:+"$gw"} 2>/dev/null | awk \'/name =/{print $NF; exit} /^Address 1:/ && NF>=4{print $4; exit}\'); echo "$smac $sip $rname"; fi; done',
   ].join('; ');
 
   try {
-    const { stdout } = await execSshCommand(hostConfig, remoteScript, { timeoutMs: 12000 });
+    const { stdout } = await execSshCommand(hostConfig, remoteScript, { timeoutMs: 18000 });
     return parseSshTelemetryOutput(hostConfig, stdout, prevSample);
   } catch (sshErr) {
     // If protocol is ubus_http or ubus_https, try HTTP ubus RPC
@@ -414,7 +425,11 @@ export function parseSshTelemetryOutput(hostConfig, stdout, prevSample = null) {
   const iwdevTxt = getSectionText('IWDEV');
   const stationsTxt = getSectionText('STATIONS');
   const dhcpTxt = getSectionText('DHCP');
+  const uciDhcpTxt = getSectionText('UCI_DHCP');
+  const ubusDhcpJson = getSectionJson('UBUS_DHCP');
+  const ethersTxt = getSectionText('ETHERS');
   const arpTxt = getSectionText('ARP');
+  const rdnsTxt = getSectionText('RDNS');
 
   // 1. Identity, Model & Firmware
   let hostname = board?.hostname || hostConfig.hostname || hostConfig.name;
@@ -582,16 +597,84 @@ export function parseSshTelemetryOutput(hostConfig, stdout, prevSample = null) {
     }
   }
 
-  // 8. Parse DHCP leases & ARP table
+  // 8. Parse DHCP leases, UCI static reservations, ubus dhcp ipv4leases, /etc/ethers, ARP & ip neigh, and Reverse DNS
   const dhcpByMac = new Map();
   const nowEpoch = Math.floor(nowMs / 1000);
+
+  // 8a. Static /etc/ethers (mac ip)
+  if (ethersTxt) {
+    for (const line of ethersTxt.split('\n')) {
+      const clean = line.replace(/#.*$/, '').trim();
+      if (!clean) continue;
+      const parts = clean.split(/\s+/);
+      if (parts.length >= 2 && /^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$/.test(parts[0])) {
+        const eMac = parts[0].toLowerCase();
+        const eIp = parts[1];
+        dhcpByMac.set(eMac, {
+          ip: eIp,
+          hostname: eIp,
+          dhcpLeaseRemainingSec: 86400,
+        });
+      }
+    }
+  }
+
+  // 8b. UCI static host reservations (`uci show dhcp`)
+  if (uciDhcpTxt) {
+    const uciHosts = new Map();
+    for (const line of uciDhcpTxt.split('\n')) {
+      const m = line.trim().match(/^dhcp\.([^.=]+)\.(mac|ip|name)=(.+)$/);
+      if (!m) continue;
+      const [, sec, key, rawVal] = m;
+      const val = rawVal.replace(/^['"]|['"]$/g, '').trim();
+      if (!uciHosts.has(sec)) uciHosts.set(sec, {});
+      uciHosts.get(sec)[key] = val;
+    }
+    for (const hObj of uciHosts.values()) {
+      if (!hObj.mac || !hObj.ip) continue;
+      const macList = hObj.mac.split(/[\s,]+/).map((s) => s.replace(/^['"]|['"]$/g, '').toLowerCase());
+      for (const sMac of macList) {
+        if (/^([0-9a-f]{2}:){5}[0-9a-f]{2}$/.test(sMac)) {
+          dhcpByMac.set(sMac, {
+            ip: hObj.ip,
+            hostname: hObj.name || hObj.ip,
+            dhcpLeaseRemainingSec: 86400,
+          });
+        }
+      }
+    }
+  }
+
+  // 8c. ubus call dhcp ipv4leases
+  if (ubusDhcpJson?.device && typeof ubusDhcpJson.device === 'object') {
+    for (const devObj of Object.values(ubusDhcpJson.device)) {
+      const leases = Array.isArray(devObj?.leases) ? devObj.leases : [];
+      for (const l of leases) {
+        if (!l.mac || !l.address) continue;
+        let normMac = String(l.mac).toLowerCase();
+        if (/^[0-9a-f]{12}$/.test(normMac)) {
+          normMac = normMac.match(/.{2}/g).join(':');
+        }
+        if (/^([0-9a-f]{2}:){5}[0-9a-f]{2}$/.test(normMac)) {
+          dhcpByMac.set(normMac, {
+            ip: l.address,
+            hostname: l.hostname || l.address,
+            dhcpLeaseRemainingSec: Number(l.valid) > 0 ? Number(l.valid) : 36000,
+          });
+        }
+      }
+    }
+  }
+
+  // 8d. dnsmasq /tmp/dhcp.leases (and custom leasefile)
   for (const line of dhcpTxt.split('\n')) {
     const parts = line.trim().split(/\s+/);
-    if (parts.length >= 4) {
+    if (parts.length >= 4 && /^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$/.test(parts[1])) {
       const expiry = Number(parts[0]);
       const lMac = parts[1].toLowerCase();
       const lIp = parts[2];
-      const lHost = parts[3] && parts[3] !== '*' ? parts[3] : lIp;
+      const existing = dhcpByMac.get(lMac);
+      const lHost = parts[3] && parts[3] !== '*' ? parts[3] : existing?.hostname || lIp;
       dhcpByMac.set(lMac, {
         ip: lIp,
         hostname: lHost,
@@ -600,17 +683,55 @@ export function parseSshTelemetryOutput(hostConfig, stdout, prevSample = null) {
     }
   }
 
+  // 8e. /proc/net/arp and `ip -4 neigh show`
   const arpByMac = new Map();
-  for (const line of arpTxt.split('\n').slice(1)) {
-    const parts = line.trim().split(/\s+/);
-    if (parts.length >= 6 && /^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$/.test(parts[3])) {
-      const aMac = parts[3].toLowerCase();
-      if (aMac !== '00:00:00:00:00:00') {
-        arpByMac.set(aMac, {
-          ip: parts[0],
-          flags: parts[2],
-          device: parts[5],
-        });
+  let inIpNeigh = false;
+  for (const rawLine of arpTxt.split('\n')) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    if (line === '---IPNEIGH---') {
+      inIpNeigh = true;
+      continue;
+    }
+    if (!inIpNeigh) {
+      if (line.startsWith('IP address')) continue;
+      const parts = line.split(/\s+/);
+      if (parts.length >= 6 && /^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$/.test(parts[3])) {
+        const aMac = parts[3].toLowerCase();
+        if (aMac !== '00:00:00:00:00:00' && parts[2] !== '0x0') {
+          arpByMac.set(aMac, {
+            ip: parts[0],
+            flags: parts[2],
+            device: parts[5],
+          });
+        }
+      }
+    } else {
+      // e.g. 192.168.1.142 dev br-lan lladdr a4:83:e7:11:22:33 REACHABLE
+      const m = line.match(/^(\d+\.\d+\.\d+\.\d+)\s+dev\s+(\S+)\s+lladdr\s+(([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2})\s+(\S+)/);
+      if (m) {
+        const [, nIp, nDev, nMac, nState] = m;
+        if (nState !== 'FAILED' && nState !== 'INCOMPLETE') {
+          arpByMac.set(nMac.toLowerCase(), {
+            ip: nIp,
+            flags: '0x2',
+            device: nDev,
+          });
+        }
+      }
+    }
+  }
+
+  // 8f. Reverse DNS results from the router/DHCP server (`===RDNS===`)
+  const rdnsByMac = new Map();
+  if (rdnsTxt) {
+    for (const line of rdnsTxt.split('\n')) {
+      const parts = line.trim().split(/\s+/);
+      if (parts.length >= 2 && /^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$/.test(parts[0])) {
+        const rMac = parts[0].toLowerCase();
+        const rIp = parts[1];
+        const rawHost = parts[2] ? parts[2].replace(/\.$/, '').replace(/\.(lan|local|home\.arpa|localdomain)$/i, '') : null;
+        rdnsByMac.set(rMac, { ip: rIp, hostname: rawHost || null });
       }
     }
   }
@@ -627,6 +748,13 @@ export function parseSshTelemetryOutput(hostConfig, stdout, prevSample = null) {
     const ifaceInfo = iwInterfaces.get(currentStation.iface) || {};
     const dhcp = dhcpByMac.get(sMac);
     const arp = arpByMac.get(sMac);
+    const rdns = rdnsByMac.get(sMac);
+    const resolvedIp = dhcp?.ip || arp?.ip || rdns?.ip || '0.0.0.0';
+    const resolvedHostname =
+      (dhcp?.hostname && dhcp.hostname !== dhcp.ip ? dhcp.hostname : null) ||
+      rdns?.hostname ||
+      dhcp?.hostname ||
+      (resolvedIp !== '0.0.0.0' ? resolvedIp : sMac);
     const band = ifaceInfo.band || '5GHz';
     const connType = band === '2.4GHz' ? 'wifi_2g' : band === '6GHz' ? 'wifi_6g' : 'wifi_5g';
     const signalDbm = currentStation.signalDbm ?? -60;
@@ -649,8 +777,8 @@ export function parseSshTelemetryOutput(hostConfig, stdout, prevSample = null) {
 
     clients.push({
       mac: sMac,
-      ip: dhcp?.ip || arp?.ip || '0.0.0.0',
-      hostname: dhcp?.hostname || arp?.ip || sMac,
+      ip: resolvedIp,
+      hostname: resolvedHostname,
       vendor: lookupVendor(sMac),
       connectionType: connType,
       connectedTo: {
@@ -808,6 +936,9 @@ export function parseSshTelemetryOutput(hostConfig, stdout, prevSample = null) {
     wan: wanInfo,
     radios,
     clients,
+    dhcpMap: Object.fromEntries(dhcpByMac),
+    arpMap: Object.fromEntries(arpByMac),
+    rdnsMap: Object.fromEntries(rdnsByMac),
     sample: {
       timestamp: nowMs,
       cpuStat: stat2 || stat1,

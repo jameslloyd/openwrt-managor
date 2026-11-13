@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { createServer } from '../server/index.js';
+import { db } from '../server/storage/db.js';
+import { backupEngine } from '../server/services/backupEngine.js';
 import { hostManager } from '../server/services/hostManager.js';
 import { parseSshTelemetryOutput } from '../server/services/realUbus.js';
 
@@ -9,6 +11,8 @@ let server;
 let baseUrl;
 
 test.before(async () => {
+  await db.saveHosts([]);
+  await backupEngine.removeDemoBackups(['node-gw-01', 'node-ap-01', 'node-ap-02', 'node-ap-03']);
   server = await createServer();
   await new Promise((resolve) => {
     server.listen(0, '127.0.0.1', () => {
@@ -21,6 +25,8 @@ test.before(async () => {
 
 test.after(async () => {
   hostManager.stopPolling();
+  await db.saveHosts([]);
+  await backupEngine.removeDemoBackups(['node-gw-01', 'node-ap-01', 'node-ap-02', 'node-ap-03']);
   await new Promise((resolve) => server.close(resolve));
 });
 
@@ -429,4 +435,76 @@ test('SSH Telemetry Parser: extracts real uptime, CPU%, RAM%, model, firmware, r
   assert.equal(parsed.clients[0].ip, '192.168.1.142');
   assert.equal(parsed.clients[0].hostname, 'MacBook-Air');
   assert.equal(parsed.clients[0].signalDbm, -51);
+});
+
+test('Wireless client IP resolution: resolves AP wireless client IPs via DHCP server host or ARP + RDNS', () => {
+  // 1. Gateway / DHCP Server has the DHCP leases for wireless clients
+  const gwOutput = [
+    '===BOARD===',
+    JSON.stringify({ hostname: 'Main-Gateway', model: 'OpenWrt Router' }),
+    '===UPTIME===',
+    '86400.00 100000.00',
+    '===DHCP===',
+    `${Math.floor(Date.now() / 1000) + 3600} b8:27:eb:aa:bb:cc 192.168.1.55 LivingRoom-TV *`,
+  ].join('\n');
+
+  // 2. Dumb AP has two wireless clients, no local /tmp/dhcp.leases, and one discovered via ARP + RDNS against gateway
+  const apOutput = [
+    '===BOARD===',
+    JSON.stringify({ hostname: 'Upstairs-AP', model: 'OpenWrt AP' }),
+    '===UPTIME===',
+    '43200.00 50000.00',
+    '===IWDEV===',
+    'phy#0',
+    '\tInterface phy0-ap0',
+    '\t\tssid HomeWiFi',
+    '\t\tchannel 44 (5220 MHz), width: 80 MHz, center1: 5210 MHz',
+    '===STATIONS===',
+    '---IFACE:phy0-ap0---',
+    'Station b8:27:eb:aa:bb:cc (on phy0-ap0)',
+    '\tsignal:\t\t-58 dBm',
+    '\ttx bitrate:\t866.7 MBit/s 80MHz HE-MCS 9',
+    'Station dc:a6:32:11:22:33 (on phy0-ap0)',
+    '\tsignal:\t\t-62 dBm',
+    '\ttx bitrate:\t780.0 MBit/s 80MHz VHT-MCS 8',
+    '===ARP===',
+    '---IPNEIGH---',
+    '192.168.1.88 dev br-lan lladdr dc:a6:32:11:22:33 REACHABLE',
+    '===RDNS===',
+    'dc:a6:32:11:22:33 192.168.1.88 raspberrypi.lan.',
+  ].join('\n');
+
+  const gwHost = { id: 'gw-1', name: 'Gateway' };
+  const apHost = { id: 'ap-1', name: 'Upstairs AP' };
+
+  const gwTelemetry = parseSshTelemetryOutput(gwHost, gwOutput);
+  const apTelemetry = parseSshTelemetryOutput(apHost, apOutput);
+
+  // Direct ARP + RDNS resolution on the AP itself
+  const piClientOnAp = apTelemetry.clients.find((c) => c.mac === 'dc:a6:32:11:22:33');
+  assert.equal(piClientOnAp.ip, '192.168.1.88');
+  assert.equal(piClientOnAp.hostname, 'raspberrypi');
+
+  // Fleet-wide DHCP resolution across Gateway + AP in hostManager
+  hostManager.applyTelemetryToHost(gwHost, gwTelemetry);
+  hostManager.applyTelemetryToHost(apHost, apTelemetry);
+
+  const liveClients = hostManager.getLiveClients();
+  const tvClient = liveClients.find((c) => c.mac === 'b8:27:eb:aa:bb:cc');
+  assert.ok(tvClient);
+  assert.equal(tvClient.connectionType, 'wifi_5g');
+  assert.equal(tvClient.connectedTo.hostId, 'ap-1');
+  assert.equal(tvClient.ip, '192.168.1.55');
+  assert.equal(tvClient.hostname, 'LivingRoom-TV');
+  assert.ok(tvClient.dhcpLeaseRemainingSec > 0);
+
+  // Clean up test state from hostManager
+  hostManager.liveClientsByHost.delete('gw-1');
+  hostManager.liveClientsByHost.delete('ap-1');
+  hostManager.dhcpByHost.delete('gw-1');
+  hostManager.dhcpByHost.delete('ap-1');
+  hostManager.arpByHost.delete('gw-1');
+  hostManager.arpByHost.delete('ap-1');
+  hostManager.rdnsByHost.delete('gw-1');
+  hostManager.rdnsByHost.delete('ap-1');
 });
