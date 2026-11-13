@@ -320,6 +320,8 @@ export async function pollRealHost(hostConfig, prevSample = null) {
     'ubus call network.wireless status 2>/dev/null',
     'echo "===IWDEV==="',
     'iw dev 2>/dev/null',
+    'echo "===SURVEY==="',
+    'for iface in $(iw dev 2>/dev/null | awk \'$1=="Interface"{print $2}\'); do echo "---IFACE:$iface---"; iw dev "$iface" survey dump 2>/dev/null | awk \'/Survey data from/{if(inuse)exit; next} /\\[in use\\]/{inuse=1; print; next} inuse{print}\'; done',
     'echo "===STATIONS==="',
     'for iface in $(iw dev 2>/dev/null | awk \'$1=="Interface"{print $2}\'); do echo "---IFACE:$iface---"; iw dev "$iface" station dump 2>/dev/null; done',
     'echo "===DHCP==="',
@@ -423,6 +425,7 @@ export function parseSshTelemetryOutput(hostConfig, stdout, prevSample = null) {
   const wanJson = getSectionJson('WAN');
   const wirelessJson = getSectionJson('WIRELESS');
   const iwdevTxt = getSectionText('IWDEV');
+  const surveyTxt = getSectionText('SURVEY');
   const stationsTxt = getSectionText('STATIONS');
   const dhcpTxt = getSectionText('DHCP');
   const uciDhcpTxt = getSectionText('UCI_DHCP');
@@ -895,11 +898,77 @@ export function parseSshTelemetryOutput(hostConfig, stdout, prevSample = null) {
     }
   }
 
-  // 10. Build active radios list for this host
+  // 10. Parse `iw dev <iface> survey dump` for real channel utilization / busy airtime & noise floor
+  const surveyByIface = new Map();
+  let curSurveyIface = null;
+  for (const rawLine of surveyTxt.split('\n')) {
+    const line = rawLine.trim();
+    const hdr = line.match(/^---IFACE:(.+)---$/);
+    if (hdr) {
+      curSurveyIface = hdr[1].trim();
+      if (!surveyByIface.has(curSurveyIface)) {
+        surveyByIface.set(curSurveyIface, { noiseDbm: null, activeMs: 0, busyMs: 0, rxMs: 0, txMs: 0 });
+      }
+      continue;
+    }
+    if (!curSurveyIface) continue;
+    const entry = surveyByIface.get(curSurveyIface);
+    const noiseMatch = line.match(/^noise:\s*(-?\d+)\s*dBm/i);
+    if (noiseMatch) {
+      entry.noiseDbm = Number(noiseMatch[1]);
+      continue;
+    }
+    const activeMatch = line.match(/^channel active time:\s*(\d+)\s*ms/i);
+    if (activeMatch) {
+      entry.activeMs = Number(activeMatch[1]);
+      continue;
+    }
+    const busyMatch = line.match(/^channel busy time:\s*(\d+)\s*ms/i);
+    if (busyMatch) {
+      entry.busyMs = Number(busyMatch[1]);
+      continue;
+    }
+    const rxMatch = line.match(/^channel receive time:\s*(\d+)\s*ms/i);
+    if (rxMatch) {
+      entry.rxMs = Number(rxMatch[1]);
+      continue;
+    }
+    const txMatch = line.match(/^channel transmit time:\s*(\d+)\s*ms/i);
+    if (txMatch) {
+      entry.txMs = Number(txMatch[1]);
+    }
+  }
+
+  // 11. Build active radios list for this host
   const radios = [];
+  const radioSurveyCounters = {};
   for (const ifaceInfo of iwInterfaces.values()) {
     if (!ifaceInfo.band || !ifaceInfo.channel) continue;
     const cCount = stationCountByIface.get(ifaceInfo.ifname) || 0;
+    const survey = surveyByIface.get(ifaceInfo.ifname);
+    let utilizationPct = Math.min(95, Math.max(5, cCount * 6));
+    let noiseDbm = ifaceInfo.band === '2.4GHz' ? -95 : ifaceInfo.band === '6GHz' ? -101 : -98;
+
+    if (survey) {
+      if (typeof survey.noiseDbm === 'number') {
+        noiseDbm = survey.noiseDbm;
+      }
+      radioSurveyCounters[ifaceInfo.ifname] = {
+        activeMs: survey.activeMs,
+        busyMs: survey.busyMs,
+        rxMs: survey.rxMs,
+        txMs: survey.txMs,
+      };
+      const prevSurvey = prevSample?.radioSurvey?.[ifaceInfo.ifname];
+      if (prevSurvey && survey.activeMs > prevSurvey.activeMs) {
+        const dActive = survey.activeMs - prevSurvey.activeMs;
+        const dBusy = Math.max(0, survey.busyMs - prevSurvey.busyMs);
+        utilizationPct = Math.max(1, Math.min(100, Math.round((dBusy / dActive) * 100)));
+      } else if (survey.activeMs > 0 && survey.busyMs >= 0) {
+        utilizationPct = Math.max(1, Math.min(100, Math.round((survey.busyMs / survey.activeMs) * 100)));
+      }
+    }
+
     radios.push({
       id: `radio-${hostConfig.id}-${ifaceInfo.ifname}`,
       hostId: hostConfig.id,
@@ -912,8 +981,9 @@ export function parseSshTelemetryOutput(hostConfig, stdout, prevSample = null) {
       widthMhz: ifaceInfo.widthMhz || 20,
       txPowerDbm: ifaceInfo.txPowerDbm || 20,
       signalDbm: -45,
+      noiseDbm,
       clientCount: cCount,
-      utilizationPct: Math.min(95, Math.max(5, cCount * 6)),
+      utilizationPct,
     });
   }
 
@@ -944,6 +1014,7 @@ export function parseSshTelemetryOutput(hostConfig, stdout, prevSample = null) {
       cpuStat: stat2 || stat1,
       netCounters,
       clientBytes,
+      radioSurvey: radioSurveyCounters,
     },
   };
 }

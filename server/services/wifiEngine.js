@@ -1,5 +1,5 @@
 /**
- * WiFi Spectrum Analyzer and Interference Engine
+ * WiFi Spectrum Analyzer, Fleet-Wide Congestion & Interference Engine
  */
 
 export function getChannelCenterFreq(band, channel) {
@@ -16,42 +16,196 @@ export function getChannelCenterFreq(band, channel) {
   return 0;
 }
 
+const CANDIDATE_CHANNELS = {
+  '2.4GHz': [
+    { channel: 1, widthMhz: 20 },
+    { channel: 6, widthMhz: 20 },
+    { channel: 11, widthMhz: 20 },
+  ],
+  '5GHz': [
+    { channel: 36, widthMhz: 80, centerFreqMhz: 5210, label: 'UNII-1 (Ch 36)' },
+    { channel: 52, widthMhz: 80, centerFreqMhz: 5290, label: 'UNII-2A DFS (Ch 52)' },
+    { channel: 100, widthMhz: 80, centerFreqMhz: 5530, label: 'UNII-2C DFS (Ch 100)' },
+    { channel: 116, widthMhz: 80, centerFreqMhz: 5610, label: 'UNII-2C DFS (Ch 116)' },
+    { channel: 149, widthMhz: 80, centerFreqMhz: 5775, label: 'UNII-3 (Ch 149)' },
+  ],
+  '6GHz': [
+    { channel: 1, widthMhz: 80, centerFreqMhz: 5985, label: 'UNII-5 (Ch 1)' },
+    { channel: 17, widthMhz: 80, centerFreqMhz: 6065, label: 'UNII-5 (Ch 17)' },
+    { channel: 33, widthMhz: 80, centerFreqMhz: 6145, label: 'UNII-5 (Ch 33)' },
+    { channel: 49, widthMhz: 80, centerFreqMhz: 6225, label: 'UNII-5 (Ch 49)' },
+    { channel: 65, widthMhz: 80, centerFreqMhz: 6305, label: 'UNII-5 (Ch 65)' },
+    { channel: 81, widthMhz: 80, centerFreqMhz: 6385, label: 'UNII-5 (Ch 81)' },
+  ],
+};
+
+function getRadioSpan(radio, bandName) {
+  const center = radio.centerFreqMhz || getChannelCenterFreq(bandName, radio.channel);
+  const width = radio.widthMhz || 20;
+  return {
+    center,
+    width,
+    start: center - width / 2,
+    end: center + width / 2,
+  };
+}
+
+function findLeastCongestedChannel(bandName, radios) {
+  const candidates = CANDIDATE_CHANNELS[bandName] || [];
+  let best = null;
+
+  for (const cand of candidates) {
+    const center = cand.centerFreqMhz || getChannelCenterFreq(bandName, cand.channel);
+    const start = center - cand.widthMhz / 2;
+    const end = center + cand.widthMhz / 2;
+
+    let overlappingRadios = 0;
+    let combinedUtil = 0;
+
+    for (const r of radios) {
+      const span = getRadioSpan(r, bandName);
+      if (Math.max(start, span.start) < Math.min(end, span.end)) {
+        overlappingRadios++;
+        combinedUtil += r.utilizationPct || 15;
+      }
+    }
+
+    const score = overlappingRadios * 40 + combinedUtil;
+    if (!best || score < best.score) {
+      best = {
+        channel: cand.channel,
+        centerFreqMhz: center,
+        widthMhz: cand.widthMhz,
+        label: cand.label || `Channel ${cand.channel}`,
+        overlappingRadios,
+        combinedUtilPct: Math.min(100, combinedUtil),
+        score,
+      };
+    }
+  }
+
+  return best;
+}
+
 /**
- * Analyzes active radios across all bands and identifies co-channel and adjacent-channel interference.
+ * Analyzes active radios across all bands and identifies co-channel interference,
+ * adjacent-channel overlap, high airtime utilization, and congested spectrum zones.
  */
 export function analyzeInterference(bandsData) {
   const warnings = [];
+  const bandCongestion = {};
   let scoreDeductions = 0;
 
-  for (const [bandName, bandInfo] of Object.entries(bandsData)) {
-    const radios = bandInfo.radios || [];
-    if (radios.length < 2) continue;
+  for (const [bandName, bandInfo] of Object.entries(bandsData || {})) {
+    const radios = bandInfo?.radios || [];
+    const totalClients = radios.reduce((acc, r) => acc + (r.clientCount || 0), 0);
+    const avgUtilizationPct =
+      radios.length > 0 ? Math.round(radios.reduce((acc, r) => acc + (r.utilizationPct || 0), 0) / radios.length) : 0;
+    const peakUtilizationPct =
+      radios.length > 0 ? Math.max(...radios.map((r) => r.utilizationPct || 0)) : 0;
 
+    const overlappingZones = [];
+    const channelStatsMap = new Map();
+
+    // Build per-channel congestion metrics across all radios on this band
+    for (const r of radios) {
+      const chKey = r.channel;
+      if (!channelStatsMap.has(chKey)) {
+        channelStatsMap.set(chKey, {
+          channel: r.channel,
+          centerFreqMhz: r.centerFreqMhz || getChannelCenterFreq(bandName, r.channel),
+          widthMhz: r.widthMhz || 20,
+          radioCount: 0,
+          clientCount: 0,
+          combinedUtilizationPct: 0,
+          radios: [],
+        });
+      }
+      const stat = channelStatsMap.get(chKey);
+      stat.radioCount += 1;
+      stat.clientCount += r.clientCount || 0;
+      stat.combinedUtilizationPct = Math.min(100, stat.combinedUtilizationPct + (r.utilizationPct || 0));
+      stat.widthMhz = Math.max(stat.widthMhz, r.widthMhz || 20);
+      stat.radios.push({
+        id: r.id,
+        hostId: r.hostId,
+        hostName: r.hostName,
+        ssid: r.ssid,
+        utilizationPct: r.utilizationPct || 0,
+        clientCount: r.clientCount || 0,
+      });
+
+      // Individual radio high airtime congestion warning
+      if ((r.utilizationPct || 0) >= 70) {
+        const bestAlt = findLeastCongestedChannel(bandName, radios);
+        scoreDeductions += 8;
+        warnings.push({
+          id: `warn-util-${r.id}`,
+          type: 'airtime_congestion',
+          severity: (r.utilizationPct || 0) >= 85 ? 'high' : 'medium',
+          band: bandName,
+          channel: r.channel,
+          affectedRadios: [r.id],
+          combinedUtilizationPct: r.utilizationPct,
+          recommendedChannel: bestAlt?.channel || null,
+          message: `High airtime congestion (${r.utilizationPct}% busy, ${r.clientCount || 0} clients) on ${r.hostName} (${bandName} Ch ${r.channel}).${
+            bestAlt && bestAlt.channel !== r.channel ? ` Consider offloading to ${bestAlt.label}.` : ''
+          }`,
+        });
+      }
+    }
+
+    const bestCandidate = findLeastCongestedChannel(bandName, radios);
+
+    // Pairwise RF spectrum overlap & co-channel / adjacent-channel congestion analysis
     for (let i = 0; i < radios.length; i++) {
       for (let j = i + 1; j < radios.length; j++) {
         const r1 = radios[i];
         const r2 = radios[j];
 
-        const f1Start = r1.centerFreqMhz - r1.widthMhz / 2;
-        const f1End = r1.centerFreqMhz + r1.widthMhz / 2;
-        const f2Start = r2.centerFreqMhz - r2.widthMhz / 2;
-        const f2End = r2.centerFreqMhz + r2.widthMhz / 2;
+        const s1 = getRadioSpan(r1, bandName);
+        const s2 = getRadioSpan(r2, bandName);
 
-        const isOverlapping = Math.max(f1Start, f2Start) < Math.min(f1End, f2End);
+        const overlapStart = Math.max(s1.start, s2.start);
+        const overlapEnd = Math.min(s1.end, s2.end);
+        const isOverlapping = overlapStart < overlapEnd;
 
         if (isOverlapping) {
           const isExactChannel = r1.channel === r2.channel;
+          const combinedUtil = Math.min(100, (r1.utilizationPct || 15) + (r2.utilizationPct || 15));
+          const combinedClients = (r1.clientCount || 0) + (r2.clientCount || 0);
           const warningId = `warn-${isExactChannel ? 'cci' : 'aci'}-${r1.id}-${r2.id}`;
 
+          overlappingZones.push({
+            id: `zone-${r1.id}-${r2.id}`,
+            band: bandName,
+            type: isExactChannel ? 'co_channel' : 'adjacent_channel',
+            startFreqMhz: overlapStart,
+            endFreqMhz: overlapEnd,
+            centerFreqMhz: Math.round((overlapStart + overlapEnd) / 2),
+            bandwidthMhz: overlapEnd - overlapStart,
+            channels: isExactChannel ? [r1.channel] : [r1.channel, r2.channel],
+            affectedRadios: [r1.id, r2.id],
+            hostNames: [r1.hostName, r2.hostName],
+            combinedUtilizationPct: combinedUtil,
+            combinedClients,
+            severity: combinedUtil >= 60 || !isExactChannel || bandName !== '2.4GHz' ? 'high' : 'medium',
+          });
+
           if (isExactChannel) {
-            const severity = bandName === '2.4GHz' ? 'medium' : 'high';
+            const severity = bandName === '2.4GHz' && combinedUtil < 60 ? 'medium' : 'high';
             scoreDeductions += bandName === '2.4GHz' ? 10 : 15;
 
             let recommendation = `Recommend moving ${r2.hostName} to a non-overlapping channel.`;
+            const altCh = bestCandidate?.channel;
             if (bandName === '2.4GHz') {
-              recommendation = `${r1.hostName} and ${r2.hostName} share 2.4GHz Channel ${r1.channel}. Recommend moving ${r2.hostName} to Channel 11 or Channel 1.`;
+              const targetCh = altCh && altCh !== r1.channel ? altCh : r1.channel === 6 ? 11 : 6;
+              recommendation = `${r1.hostName} and ${r2.hostName} share 2.4GHz Channel ${r1.channel} (${combinedUtil}% combined airtime, ${combinedClients} clients). Recommend moving ${r2.hostName} to Channel ${targetCh} or Channel 1.`;
             } else if (bandName === '5GHz') {
-              recommendation = `${r1.hostName} and ${r2.hostName} share 5GHz Channel ${r1.channel} (${r1.widthMhz}MHz). Recommend moving ${r2.hostName} to UNII-3 Channel 149 or UNII-2C DFS Channel 100.`;
+              recommendation = `${r1.hostName} and ${r2.hostName} share 5GHz Channel ${r1.channel} (${r1.widthMhz}MHz, ${combinedUtil}% combined airtime). Recommend moving ${r2.hostName} to UNII-3 Channel 149 or UNII-2C DFS Channel 100.`;
+            } else if (bandName === '6GHz') {
+              const targetCh = altCh && altCh !== r1.channel ? altCh : 33;
+              recommendation = `${r1.hostName} and ${r2.hostName} share 6GHz Channel ${r1.channel} (${r1.widthMhz}MHz, ${combinedUtil}% combined airtime). Recommend moving ${r2.hostName} to Channel ${targetCh}.`;
             }
 
             warnings.push({
@@ -60,6 +214,11 @@ export function analyzeInterference(bandsData) {
               severity,
               band: bandName,
               channel: r1.channel,
+              startFreqMhz: overlapStart,
+              endFreqMhz: overlapEnd,
+              combinedUtilizationPct: combinedUtil,
+              combinedClients,
+              recommendedChannel: bestCandidate?.channel || null,
               affectedRadios: [r1.id, r2.id],
               message: recommendation,
             });
@@ -71,13 +230,47 @@ export function analyzeInterference(bandsData) {
               severity: 'high',
               band: bandName,
               channel: `${r1.channel}/${r2.channel}`,
+              startFreqMhz: overlapStart,
+              endFreqMhz: overlapEnd,
+              combinedUtilizationPct: combinedUtil,
+              combinedClients,
+              recommendedChannel: bestCandidate?.channel || null,
               affectedRadios: [r1.id, r2.id],
-              message: `Adjacent channel overlap between ${r1.hostName} (Ch ${r1.channel}) and ${r2.hostName} (Ch ${r2.channel}) on ${bandName}. Causes frame collisions.`,
+              message: `Adjacent channel overlap (${overlapStart}–${overlapEnd} MHz, ${combinedUtil}% combined airtime) between ${r1.hostName} (Ch ${r1.channel}) and ${r2.hostName} (Ch ${r2.channel}) on ${bandName}. Causes frame collisions.`,
             });
           }
         }
       }
     }
+
+    // Calculate overall band congestion score (0-100)
+    const overlapPenalty = overlappingZones.reduce(
+      (acc, z) => acc + (z.type === 'adjacent_channel' ? 25 : 18) + Math.round(z.combinedUtilizationPct * 0.25),
+      0
+    );
+    const congestionScore =
+      radios.length === 0 ? 0 : Math.min(100, Math.round(avgUtilizationPct * 0.55 + overlapPenalty));
+
+    let congestionLevel = 'low';
+    if (congestionScore >= 65 || overlappingZones.some((z) => z.severity === 'high')) {
+      congestionLevel = 'high';
+    } else if (congestionScore >= 35 || overlappingZones.length > 0) {
+      congestionLevel = 'moderate';
+    }
+
+    bandCongestion[bandName] = {
+      band: bandName,
+      radiosCount: radios.length,
+      totalClients,
+      avgUtilizationPct,
+      peakUtilizationPct,
+      overlappingCount: overlappingZones.length,
+      congestionScore,
+      congestionLevel,
+      recommendedChannel: bestCandidate,
+      overlappingZones,
+      channels: Array.from(channelStatsMap.values()).sort((a, b) => a.channel - b.channel),
+    };
   }
 
   const healthScore = Math.max(0, 100 - scoreDeductions);
@@ -86,12 +279,21 @@ export function analyzeInterference(bandsData) {
     status = healthScore < 75 ? 'critical' : 'warning';
   }
 
+  const allRadiosCount = Object.values(bandCongestion).reduce((acc, b) => acc + b.radiosCount, 0);
+  const mostCongestedBand =
+    Object.values(bandCongestion)
+      .filter((b) => b.radiosCount > 0)
+      .sort((a, b) => b.congestionScore - a.congestionScore)[0]?.band || null;
+
   return {
     summary: {
       status,
       warningsCount: warnings.length,
       healthScore,
+      totalRadios: allRadiosCount,
+      mostCongestedBand,
     },
+    bandCongestion,
     warnings,
   };
 }

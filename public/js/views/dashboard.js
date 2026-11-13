@@ -86,9 +86,9 @@ export function renderDashboard(container) {
         icon: 'activity',
         subtextHtml: `
           <span class="status-pill ${warningsCount > 0 ? 'warning' : 'success'}">
-            ${warningsCount > 0 ? `${warningsCount} Conflict Detected` : 'Clean Spectrum'}
+            ${warningsCount > 0 ? `${warningsCount} Congestion Alert${warningsCount === 1 ? '' : 's'}` : 'Clean Spectrum'}
           </span>
-          <a href="#/wifi" style="font-size:11.5px; text-decoration:none; color:var(--color-primary);">Spectrum →</a>
+          <a href="#/wifi" style="font-size:11.5px; text-decoration:none; color:var(--color-primary);">${wifiInterference?.summary?.mostCongestedBand && warningsCount > 0 ? `${escapeHtml(wifiInterference.summary.mostCongestedBand)} Busy →` : 'Spectrum →'}</a>
         `
       })}
 

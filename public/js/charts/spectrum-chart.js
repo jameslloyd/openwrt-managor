@@ -1,7 +1,7 @@
 /**
  * OpenWrt Manager (openwrt-managor)
  * Pure SVG Multi-Band RF Spectrum Visualizer
- * Accurately models 20/40/80/160 MHz channel width curves across 2.4GHz, 5GHz, and 6GHz
+ * Accurately models 20/40/80/160 MHz channel width curves, congested overlap zones, and airtime utilization across 2.4GHz, 5GHz, and 6GHz
  */
 
 import { escapeHtml } from '../utils/formatters.js';
@@ -14,12 +14,14 @@ export class SpectrumChart {
     this.radios = [];
     this.noiseFloorDbm = -95;
     this.conflicts = [];
+    this.overlappingZones = [];
   }
 
-  setData({ radios = [], noiseFloorDbm = -95, conflicts = [] }) {
+  setData({ radios = [], noiseFloorDbm = -95, conflicts = [], overlappingZones = [] }) {
     this.radios = radios;
     this.noiseFloorDbm = noiseFloorDbm;
     this.conflicts = conflicts;
+    this.overlappingZones = overlappingZones;
     this.render();
   }
 
@@ -35,9 +37,7 @@ export class SpectrumChart {
         maxFreq: 2490,
         channels: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13],
         getFreq: (ch) => 2412 + 5 * (ch - 1),
-        subBands: [
-          { name: 'ISM 2.4 GHz', start: 2400, end: 2484 }
-        ]
+        subBands: [{ name: 'ISM 2.4 GHz', start: 2400, end: 2484 }],
       };
     } else if (this.band === '6GHz') {
       return {
@@ -49,8 +49,8 @@ export class SpectrumChart {
           { name: 'UNII-5', start: 5925, end: 6425 },
           { name: 'UNII-6', start: 6425, end: 6525 },
           { name: 'UNII-7', start: 6525, end: 6875 },
-          { name: 'UNII-8', start: 6875, end: 7125 }
-        ]
+          { name: 'UNII-8', start: 6875, end: 7125 },
+        ],
       };
     } else {
       // 5GHz Default
@@ -63,8 +63,8 @@ export class SpectrumChart {
           { name: 'UNII-1 (Indoor)', start: 5170, end: 5250 },
           { name: 'UNII-2A (DFS)', start: 5250, end: 5330 },
           { name: 'UNII-2C (DFS)', start: 5490, end: 5730 },
-          { name: 'UNII-3', start: 5735, end: 5835 }
-        ]
+          { name: 'UNII-3', start: 5735, end: 5835 },
+        ],
       };
     }
   }
@@ -74,8 +74,8 @@ export class SpectrumChart {
 
     const config = this.getBandConfig();
     const width = 960;
-    const height = 280;
-    const padding = { top: 30, right: 30, bottom: 50, left: 55 };
+    const height = 290;
+    const padding = { top: 34, right: 30, bottom: 52, left: 55 };
 
     const chartWidth = width - padding.left - padding.right;
     const chartHeight = height - padding.top - padding.bottom;
@@ -103,6 +103,36 @@ export class SpectrumChart {
       `;
     }
 
+    // Highlight congested overlapping frequency zones across radios
+    let congestionZonesSvg = '';
+    const bandZones = (this.overlappingZones || []).filter((z) => !z.band || z.band === this.band);
+    for (const zone of bandZones) {
+      const zx1 = Math.max(padding.left, freqToX(zone.startFreqMhz));
+      const zx2 = Math.min(width - padding.right, freqToX(zone.endFreqMhz));
+      const zw = Math.max(0, zx2 - zx1);
+      if (zw <= 0) continue;
+      const isHigh = zone.severity === 'high' || (zone.combinedUtilizationPct || 0) >= 65;
+      const strokeColor = isHigh ? 'var(--color-danger)' : 'var(--color-warning)';
+      const badgeLabel = `Congested Ch ${zone.channels.join('/')} • ${zone.combinedUtilizationPct}% Airtime`;
+      congestionZonesSvg += `
+        <g class="spectrum-congestion-zone">
+          <rect x="${zx1}" y="${padding.top}" width="${zw}" height="${chartHeight}"
+                fill="url(#amber-hatch)"
+                stroke="${strokeColor}"
+                stroke-width="1.2"
+                stroke-dasharray="4 3"
+                opacity="0.85" />
+          <text x="${zx1 + zw / 2}" y="${padding.top + 27}"
+                font-size="9.5"
+                font-weight="700"
+                fill="${strokeColor}"
+                text-anchor="middle">
+            ${escapeHtml(badgeLabel)}
+          </text>
+        </g>
+      `;
+    }
+
     // Grid lines & Y-axis dBm ticks
     let yTicksSvg = '';
     const dbmTicks = [-30, -50, -70, -90];
@@ -127,22 +157,31 @@ export class SpectrumChart {
       const freq = config.getFreq(ch);
       if (freq >= config.minFreq && freq <= config.maxFreq) {
         const x = freqToX(freq);
+        const radiosOnCh = this.radios.filter((r) => Number(r.channel) === ch);
+        const isChCongested = radiosOnCh.length > 1 || radiosOnCh.some((r) => (r.utilizationPct || 0) >= 70);
+        const labelColor = isChCongested ? 'var(--color-warning)' : 'var(--color-text-muted)';
         xTicksSvg += `
           <line x1="${x}" y1="${padding.top + chartHeight}" x2="${x}" y2="${padding.top + chartHeight + 6}" class="spectrum-axis" />
-          <text x="${x}" y="${padding.top + chartHeight + 18}" class="spectrum-axis-label" text-anchor="middle" font-weight="600">${ch}</text>
+          <text x="${x}" y="${padding.top + chartHeight + 18}" class="spectrum-axis-label" style="fill: ${labelColor};" text-anchor="middle" font-weight="${radiosOnCh.length > 0 ? '700' : '600'}">${ch}</text>
           <text x="${x}" y="${padding.top + chartHeight + 30}" font-size="9" fill="var(--color-text-muted)" text-anchor="middle">${freq}</text>
         `;
       }
     }
 
-    // Generate RF Bell Curves for active radios
+    // Generate RF Bell Curves for active radios, staggering peak labels when multiple radios share a channel
     let curvesSvg = '';
     const colorPalette = ['#38bdf8', '#a855f7', '#10b981', '#f59e0b', '#ec4899', '#06b6d4'];
+    const channelSlotCount = new Map();
 
     this.radios.forEach((radio, index) => {
       const centerFreq = radio.centerFreqMhz || config.getFreq(radio.channel);
       const widthMhz = radio.widthMhz || 20;
-      const signalDbm = radio.signalDbm ?? -45;
+      const baseSignalDbm = radio.signalDbm ?? -45;
+      const slotIdx = channelSlotCount.get(centerFreq) || 0;
+      channelSlotCount.set(centerFreq, slotIdx + 1);
+
+      // Slightly offset co-channel curves so stacked transmitters remain individually visible
+      const signalDbm = baseSignalDbm - slotIdx * 4;
 
       const fStart = centerFreq - widthMhz / 2;
       const fEnd = centerFreq + widthMhz / 2;
@@ -173,22 +212,30 @@ export class SpectrumChart {
       `;
 
       const color = colorPalette[index % colorPalette.length];
-      const isConflicted = this.conflicts.some(c => c.affectedRadios?.includes(radio.id));
+      const isConflicted = this.conflicts.some((c) => c.affectedRadios?.includes(radio.id));
+      const utilPct = radio.utilizationPct ?? 0;
+      const isHighUtil = utilPct >= 70;
 
-      const tooltipStr = escapeHtml(`${radio.hostName} • ${radio.ssid || 'OpenWrt'} (Ch ${radio.channel}, ${widthMhz}MHz)`);
-      const radioLabel = escapeHtml(radio.hostName || radio.ssid);
+      const strokeColor = isHighUtil ? 'var(--color-danger)' : isConflicted ? 'var(--color-warning)' : color;
+      const fillOpacity = Math.min(0.45, Math.max(0.18, 0.15 + (utilPct / 100) * 0.3));
+
+      const tooltipStr = escapeHtml(
+        `${radio.hostName} • ${radio.ssid || 'OpenWrt'} (Ch ${radio.channel}, ${widthMhz}MHz) • ${utilPct}% Airtime • ${radio.clientCount ?? 0} Clients`
+      );
+      const radioLabel = escapeHtml(`${radio.hostName || radio.ssid} (${utilPct}%)`);
+      const labelY = Math.max(padding.top + 12, yPeak - 6 - slotIdx * 11);
 
       curvesSvg += `
-        <g class="spectrum-radio-group" data-radio-id="${escapeHtml(radio.id)}">
+        <g class="spectrum-radio-group" data-radio-id="${escapeHtml(radio.id)}" role="button" tabindex="0" aria-label="${tooltipStr}">
           <path d="${pathData}"
                 fill="${color}"
-                fill-opacity="0.25"
-                stroke="${isConflicted ? 'var(--color-warning)' : color}"
-                stroke-width="${isConflicted ? 2.5 : 1.8}"
-                class="spectrum-curve ${isConflicted ? 'conflict' : ''}"
+                fill-opacity="${fillOpacity.toFixed(2)}"
+                stroke="${strokeColor}"
+                stroke-width="${isConflicted || isHighUtil ? 2.6 : 1.8}"
+                class="spectrum-curve ${isConflicted || isHighUtil ? 'conflict' : ''}"
                 data-tooltip="${tooltipStr}"
           />
-          <text x="${xCenter}" y="${yPeak - 6}" font-size="11" font-weight="700" fill="${color}" text-anchor="middle">
+          <text x="${xCenter}" y="${labelY}" font-size="10.5" font-weight="700" fill="${color}" text-anchor="middle">
             ${radioLabel}
           </text>
         </g>
@@ -197,14 +244,18 @@ export class SpectrumChart {
 
     const svgHtml = `
       <svg viewBox="0 0 ${width} ${height}" class="spectrum-chart-svg" role="img" aria-label="${this.band} WiFi RF Spectrum Chart">
+        <title>${this.band} WiFi RF Spectrum Allocation and Congestion Chart</title>
         <defs>
           <pattern id="amber-hatch" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
-            <line x1="0" y1="0" x2="0" y2="8" stroke="var(--color-warning)" stroke-width="2" opacity="0.3"/>
+            <line x1="0" y1="0" x2="0" y2="8" stroke="var(--color-warning)" stroke-width="2" opacity="0.35"/>
           </pattern>
         </defs>
 
         <!-- Subbands background -->
         ${subBandsSvg}
+
+        <!-- Highlighted Congestion Overlap Zones -->
+        ${congestionZonesSvg}
 
         <!-- Baseline axes -->
         <line x1="${padding.left}" y1="${padding.top + chartHeight}" x2="${width - padding.right}" y2="${padding.top + chartHeight}" class="spectrum-axis" />
@@ -223,11 +274,11 @@ export class SpectrumChart {
 
     this.container.innerHTML = svgHtml;
 
-    // Attach curve interaction
+    // Attach curve interaction (mouse and keyboard)
     const tooltip = this.container.querySelector('#spectrum-chart-tooltip');
     const curveGroups = this.container.querySelectorAll('.spectrum-radio-group');
 
-    curveGroups.forEach(group => {
+    curveGroups.forEach((group) => {
       const radioId = group.getAttribute('data-radio-id');
       const path = group.querySelector('path');
       const tipText = path?.getAttribute('data-tooltip') || '';
@@ -254,9 +305,22 @@ export class SpectrumChart {
       });
 
       if (this.onRadioClick) {
-        group.addEventListener('click', () => {
-          const radio = this.radios.find(r => r.id === radioId);
+        const triggerSelect = () => {
+          const radio = this.radios.find((r) => r.id === radioId);
           if (radio) this.onRadioClick(radio);
+        };
+        group.addEventListener('click', triggerSelect);
+        group.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') {
+            triggerSelect();
+          } else if (e.key === ' ') {
+            e.preventDefault();
+          }
+        });
+        group.addEventListener('keyup', (e) => {
+          if (e.key === ' ') {
+            triggerSelect();
+          }
         });
       }
     });

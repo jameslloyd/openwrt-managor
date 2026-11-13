@@ -319,6 +319,9 @@ export class HostManager {
       for (const r of radios) {
         if (bands[r.band]) {
           bands[r.band].radios.push(r);
+          if (typeof r.noiseDbm === 'number' && r.noiseDbm > bands[r.band].noiseFloorDbm) {
+            bands[r.band].noiseFloorDbm = r.noiseDbm;
+          }
         }
       }
     }

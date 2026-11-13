@@ -6,6 +6,7 @@ import { db } from '../server/storage/db.js';
 import { backupEngine } from '../server/services/backupEngine.js';
 import { hostManager } from '../server/services/hostManager.js';
 import { parseSshTelemetryOutput } from '../server/services/realUbus.js';
+import { analyzeInterference } from '../server/services/wifiEngine.js';
 
 let server;
 let baseUrl;
@@ -501,10 +502,77 @@ test('Wireless client IP resolution: resolves AP wireless client IPs via DHCP se
   // Clean up test state from hostManager
   hostManager.liveClientsByHost.delete('gw-1');
   hostManager.liveClientsByHost.delete('ap-1');
+  hostManager.liveRadiosByHost.delete('gw-1');
+  hostManager.liveRadiosByHost.delete('ap-1');
   hostManager.dhcpByHost.delete('gw-1');
   hostManager.dhcpByHost.delete('ap-1');
   hostManager.arpByHost.delete('gw-1');
   hostManager.arpByHost.delete('ap-1');
   hostManager.rdnsByHost.delete('gw-1');
   hostManager.rdnsByHost.delete('ap-1');
+});
+
+test('Spectrum Congestion Engine: aggregates survey dump airtime across all radios and highlights overlapping congestion zones', () => {
+  const ap1Output = [
+    '===BOARD===',
+    JSON.stringify({ hostname: 'Downstairs-AP', model: 'OpenWrt AP' }),
+    '===IWDEV===',
+    'phy#1',
+    '\tInterface phy1-ap0',
+    '\t\tssid HomeMesh',
+    '\t\tchannel 36 (5180 MHz), width: 80 MHz, center1: 5210 MHz',
+    '\t\ttxpower 23.00 dBm',
+    '===SURVEY===',
+    '---IFACE:phy1-ap0---',
+    '\tfrequency:\t\t\t5180 MHz [in use]',
+    '\tnoise:\t\t\t\t-92 dBm',
+    '\tchannel active time:\t\t10000 ms',
+    '\tchannel busy time:\t\t4800 ms',
+  ].join('\n');
+
+  const ap2Output = [
+    '===BOARD===',
+    JSON.stringify({ hostname: 'Upstairs-AP', model: 'OpenWrt AP' }),
+    '===IWDEV===',
+    'phy#1',
+    '\tInterface phy1-ap0',
+    '\t\tssid HomeMesh',
+    '\t\tchannel 36 (5180 MHz), width: 80 MHz, center1: 5210 MHz',
+    '\t\ttxpower 23.00 dBm',
+    '===SURVEY===',
+    '---IFACE:phy1-ap0---',
+    '\tfrequency:\t\t\t5180 MHz [in use]',
+    '\tnoise:\t\t\t\t-90 dBm',
+    '\tchannel active time:\t\t10000 ms',
+    '\tchannel busy time:\t\t3700 ms',
+  ].join('\n');
+
+  const ap1 = { id: 'ap-down', name: 'Downstairs AP' };
+  const ap2 = { id: 'ap-up', name: 'Upstairs AP' };
+
+  const t1 = parseSshTelemetryOutput(ap1, ap1Output);
+  const t2 = parseSshTelemetryOutput(ap2, ap2Output);
+
+  assert.equal(t1.radios[0].utilizationPct, 48);
+  assert.equal(t1.radios[0].noiseDbm, -92);
+  assert.equal(t2.radios[0].utilizationPct, 37);
+  assert.equal(t2.radios[0].noiseDbm, -90);
+
+  hostManager.applyTelemetryToHost(ap1, t1);
+  hostManager.applyTelemetryToHost(ap2, t2);
+
+  const bands = hostManager.getLiveWifiBands();
+  const analysis = analyzeInterference(bands);
+
+  assert.ok(analysis.bandCongestion['5GHz']);
+  const c5 = analysis.bandCongestion['5GHz'];
+  assert.equal(c5.radiosCount, 2);
+  assert.equal(c5.overlappingCount, 1);
+  assert.equal(c5.overlappingZones[0].combinedUtilizationPct, 85); // 48% + 37%
+  assert.equal(c5.congestionLevel, 'high');
+  assert.ok(c5.recommendedChannel);
+  assert.notEqual(c5.recommendedChannel.channel, 36);
+
+  hostManager.liveRadiosByHost.delete('ap-down');
+  hostManager.liveRadiosByHost.delete('ap-up');
 });
