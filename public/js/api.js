@@ -96,6 +96,7 @@ export const api = {
   // WiFi & Spectrum
   getWifiChannels: () => request('/api/wifi/channels'),
   getWifiInterference: () => request('/api/wifi/interference'),
+  scanWifiNetworks: (hostId = 'all') => request('/api/wifi/scan', { method: 'POST', body: { hostId } }),
 
   // Backups
   getBackups: () => request('/api/backups'),

@@ -1,24 +1,28 @@
 /**
  * OpenWrt Manager (openwrt-managor)
- * WiFi APs, Spectrum Congestion & Channel Coverage Analyzer View
+ * WiFi APs, Spectrum Congestion & Neighboring Network Signal Analyzer View
  */
 
 import { store } from '../store.js';
+import { api } from '../api.js';
+import { toast } from '../components/toast.js';
 import { SpectrumChart } from '../charts/spectrum-chart.js';
 import { renderIcon } from '../utils/icons.js';
 import { escapeHtml } from '../utils/formatters.js';
 
 let chartInstance = null;
 let activeBand = '5GHz';
+let isScanning = false;
 
 export function renderWifi(container) {
   const { wifiChannels, wifiInterference } = store.state;
   const bands = wifiChannels?.bands || {};
-  const currentBandData = bands[activeBand] || { radios: [], noiseFloorDbm: -95 };
+  const currentBandData = bands[activeBand] || { radios: [], neighbors: [], noiseFloorDbm: -95 };
   const warnings = wifiInterference?.warnings || [];
   const bandCongestion = wifiInterference?.bandCongestion || {};
   const currentBandCongestion = bandCongestion[activeBand] || {
     radiosCount: (currentBandData.radios || []).length,
+    neighborsCount: (currentBandData.neighbors || []).filter((n) => !n.isManagedFleet).length,
     totalClients: (currentBandData.radios || []).reduce((acc, r) => acc + (r.clientCount || 0), 0),
     avgUtilizationPct: 0,
     peakUtilizationPct: 0,
@@ -34,9 +38,12 @@ export function renderWifi(container) {
     <div class="view-header">
       <div class="view-title-group">
         <h1>WiFi APs &amp; Spectrum Congestion Analyzer</h1>
-        <p>Multi-radio RF spectrum congestion heatmap, airtime utilization, and automated co-channel overlap detection</p>
+        <p>Multi-radio RF spectrum congestion, neighboring network scan, and relative signal strength per AP radio</p>
       </div>
       <div class="view-actions">
+        <button type="button" class="btn btn-primary" id="wifi-scan-neighbors-btn" ${isScanning ? 'disabled' : ''}>
+          ${renderIcon('wifi', 'icon')} ${isScanning ? 'Scanning Airwaves...' : 'Scan Neighboring Networks'}
+        </button>
         <span class="status-pill ${warnings.length > 0 ? 'warning' : 'success'}">
           <span class="status-dot ${warnings.length > 0 ? 'warning' : 'success'}"></span>
           ${warnings.length > 0 ? `${warnings.length} Congestion / Overlap Alert(s)` : 'All Channels Optimal'}
@@ -56,6 +63,7 @@ export function renderWifi(container) {
           .map((bandKey) => {
             const bStats = bandCongestion[bandKey];
             const rCount = (bands[bandKey]?.radios || []).length;
+            const nCount = (bands[bandKey]?.neighbors || []).filter((n) => !n.isManagedFleet).length;
             const cScore = bStats?.congestionScore ?? 0;
             const levelClass = cScore >= 65 ? 'high' : cScore >= 35 ? 'moderate' : 'low';
             const subLabel =
@@ -68,8 +76,8 @@ export function renderWifi(container) {
                     data-band="${bandKey}">
               ${renderIcon('wifi', 'icon')}
               <span>${bandKey} (${subLabel})</span>
-              <span class="band-tab-pill ${levelClass}" title="Band congestion score: ${cScore}% (${rCount} radios)">
-                ${rCount} ${rCount === 1 ? 'Radio' : 'Radios'}${rCount > 0 ? ` • ${cScore}%` : ''}
+              <span class="band-tab-pill ${levelClass}" title="Band congestion score: ${cScore}% (${rCount} radios, ${nCount} neighbor networks)">
+                ${rCount} ${rCount === 1 ? 'Radio' : 'Radios'}${nCount > 0 ? ` • ${nCount} Ext` : ''}${rCount > 0 || nCount > 0 ? ` • ${cScore}%` : ''}
               </span>
             </button>
           `;
@@ -87,13 +95,18 @@ export function renderWifi(container) {
         <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; flex-wrap: wrap; gap: 8px;">
           <div>
             <h2 style="font-size: 15px; font-weight: 600;" id="wifi-spectrum-heading">Spectrum Allocation &amp; Congestion (${activeBand})</h2>
-            <span style="font-size: 12px; color: var(--color-text-muted);">Hatched amber/red zones mark overlapping channel contention across AP radios</span>
+            <span style="font-size: 12px; color: var(--color-text-muted);">Solid curves = Managed AP radios • Dashed curves = Scanned neighboring networks • Hatched zones = Channel overlap</span>
           </div>
           <div id="wifi-band-recommendation-mount">
             ${renderRecommendationBadge(currentBandCongestion)}
           </div>
         </div>
         <div id="wifi-spectrum-chart-mount"></div>
+      </div>
+
+      <!-- Scanned Neighboring Networks & Relative Signal Strength per Radio -->
+      <div id="wifi-neighbors-mount">
+        ${renderNeighborNetworksSection(currentBandData, activeBand)}
       </div>
 
       <!-- Channel Congestion Breakdown Table across all radios on this band -->
@@ -139,6 +152,7 @@ export function renderWifi(container) {
 
   chartInstance.setData({
     radios: currentBandData.radios || [],
+    neighbors: currentBandData.neighbors || [],
     noiseFloorDbm: currentBandData.noiseFloorDbm || -95,
     conflicts: warnings,
     overlappingZones: currentBandCongestion.overlappingZones || [],
@@ -149,7 +163,7 @@ export function renderWifi(container) {
     const allBands = store.state.wifiChannels?.bands || {};
     const allCongestion = store.state.wifiInterference?.bandCongestion || {};
     const allWarnings = store.state.wifiInterference?.warnings || [];
-    const bandData = allBands[activeBand] || { radios: [], noiseFloorDbm: -95 };
+    const bandData = allBands[activeBand] || { radios: [], neighbors: [], noiseFloorDbm: -95 };
     const bCongestion = allCongestion[activeBand] || { overlappingZones: [], channels: [] };
 
     container.querySelectorAll('.band-tab-btn').forEach((b) => {
@@ -173,6 +187,7 @@ export function renderWifi(container) {
     chartInstance.setBand(activeBand);
     chartInstance.setData({
       radios: bandData.radios || [],
+      neighbors: bandData.neighbors || [],
       noiseFloorDbm: bandData.noiseFloorDbm || -95,
       conflicts: allWarnings,
       overlappingZones: bCongestion.overlappingZones || [],
@@ -181,6 +196,11 @@ export function renderWifi(container) {
     const alertMount = container.querySelector('#wifi-interference-mount');
     if (alertMount) {
       alertMount.innerHTML = renderInterferenceWarnings(allWarnings, activeBand, bCongestion);
+    }
+
+    const neighborsMount = container.querySelector('#wifi-neighbors-mount');
+    if (neighborsMount) {
+      neighborsMount.innerHTML = renderNeighborNetworksSection(bandData, activeBand);
     }
 
     const breakdownMount = container.querySelector('#wifi-channel-breakdown-mount');
@@ -196,6 +216,40 @@ export function renderWifi(container) {
       radiosMount.innerHTML = renderRadioCards(bandData.radios || [], allWarnings);
     }
   };
+
+  // Attach Scan Neighboring Networks button
+  const scanBtn = container.querySelector('#wifi-scan-neighbors-btn');
+  scanBtn?.addEventListener('click', async () => {
+    if (isScanning) return;
+    isScanning = true;
+    scanBtn.disabled = true;
+    scanBtn.innerHTML = `${renderIcon('wifi', 'icon')} Scanning Airwaves...`;
+    toast.info('Scanning Spectrum', 'Triggering active wireless scan across all OpenWrt radios...');
+    try {
+      const res = await api.scanWifiNetworks('all');
+      if (res?.bands) {
+        store.setState({
+          wifiChannels: { bands: res.bands },
+          wifiInterference: res.analysis || store.state.wifiInterference,
+        });
+      }
+      const totalFound = Object.values(res?.bands || {}).reduce(
+        (acc, b) => acc + (b.neighbors || []).length,
+        0
+      );
+      toast.success('Wireless Scan Complete', `Detected ${totalFound} neighboring wireless network BSSIDs across your radios.`);
+      renderWifi(container);
+    } catch (err) {
+      toast.error('Wireless Scan Failed', err.message || 'Could not complete wireless scan.');
+    } finally {
+      isScanning = false;
+      const btnNow = container.querySelector('#wifi-scan-neighbors-btn');
+      if (btnNow) {
+        btnNow.disabled = false;
+        btnNow.innerHTML = `${renderIcon('wifi', 'icon')} Scan Neighboring Networks`;
+      }
+    }
+  });
 
   // Attach Band Tab switching
   const tabBtns = container.querySelectorAll('.band-tab-btn');
@@ -218,12 +272,123 @@ function attachSummaryCardClicks(mount, switchBand) {
   });
 }
 
+function dbmToQualityPct(signalDbm) {
+  const clamped = Math.max(-95, Math.min(-35, Number(signalDbm) || -90));
+  return Math.round(((clamped + 95) / 60) * 100);
+}
+
+function renderNeighborNetworksSection(bandData = {}, bandName = '5GHz') {
+  const neighbors = bandData?.neighbors || [];
+  const radios = bandData?.radios || [];
+
+  return `
+    <div class="spectrum-chart-wrapper" style="padding: var(--space-4);">
+      <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; flex-wrap: wrap; gap: 8px;">
+        <div>
+          <h2 style="font-size: 15px; font-weight: 600;">Neighboring Networks &amp; Relative Signal Strength (${escapeHtml(bandName)})</h2>
+          <span style="font-size: 12px; color: var(--color-text-muted);">
+            Compares received signal strength (RSSI in dBm) of nearby networks as heard by each of your OpenWrt radios
+          </span>
+        </div>
+        <span class="status-pill ${neighbors.length > 0 ? 'info' : ''}">
+          ${neighbors.length} ${neighbors.length === 1 ? 'Network' : 'Networks'} Detected
+        </span>
+      </div>
+
+      ${
+        neighbors.length === 0
+          ? `
+        <div class="empty-state" style="padding: var(--space-4);">
+          <div class="empty-state-title">No Neighboring Networks Scanned on ${escapeHtml(bandName)} Yet</div>
+          <div class="empty-state-desc">
+            Click <strong>Scan Neighboring Networks</strong> above to command all OpenWrt radios to scan surrounding SSIDs and compare their relative signal strength on each AP.
+          </div>
+        </div>
+      `
+          : `
+        <div class="table-responsive">
+          <table class="data-table">
+            <caption class="sr-only">Scanned Neighboring Wireless Networks on ${escapeHtml(bandName)} and Relative Signal Strength per Radio</caption>
+            <thead>
+              <tr>
+                <th scope="col">SSID / Network</th>
+                <th scope="col">BSSID</th>
+                <th scope="col">Channel</th>
+                <th scope="col">Security</th>
+                <th scope="col">Peak Signal</th>
+                <th scope="col">Relative Signal Strength per OpenWrt Radio</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${neighbors
+                .map((nb) => {
+                  const peakSig = nb.strongestSignalDbm ?? -85;
+                  const peakPct = dbmToQualityPct(peakSig);
+                  const sigClass = peakSig >= -60 ? 'high' : peakSig >= -75 ? 'medium' : 'low';
+                  const overlapsOurChannel = radios.some((r) => Number(r.channel) === Number(nb.channel));
+                  const observations = Array.isArray(nb.observations) ? nb.observations : [];
+
+                  const perRadioHtml = observations
+                    .map((obs) => {
+                      const pct = dbmToQualityPct(obs.signalDbm);
+                      const barClass = obs.signalDbm >= -60 ? 'high' : obs.signalDbm >= -75 ? 'medium' : 'low';
+                      return `
+                        <div class="neighbor-radio-rssi-item" title="${escapeHtml(obs.hostName)} (${escapeHtml(obs.device)}): ${obs.signalDbm} dBm (${pct}% relative strength)">
+                          <div class="neighbor-radio-rssi-header">
+                            <span class="neighbor-radio-name">${escapeHtml(obs.hostName)} <small style="color:var(--color-text-muted);">(${escapeHtml(obs.device)})</small></span>
+                            <span class="font-mono neighbor-radio-dbm">${obs.signalDbm} dBm <small>(${pct}%)</small></span>
+                          </div>
+                          <div class="utilization-track" style="height: 5px;">
+                            <div class="utilization-fill ${barClass}" style="width: ${pct}%;"></div>
+                          </div>
+                        </div>
+                      `;
+                    })
+                    .join('');
+
+                  return `
+                    <tr>
+                      <td>
+                        <div style="display: flex; align-items: center; gap: 6px; font-weight: 600;">
+                          <span>${escapeHtml(nb.ssid)}</span>
+                          ${nb.isManagedFleet ? '<span class="status-pill info" style="font-size: 10px; padding: 1px 6px;">Fleet AP</span>' : ''}
+                          ${!nb.isManagedFleet && overlapsOurChannel ? '<span class="status-pill warning" style="font-size: 10px; padding: 1px 6px;" title="Shares channel with your AP">Shares Ch</span>' : ''}
+                        </div>
+                      </td>
+                      <td class="font-mono" style="font-size: 12px;">${escapeHtml(nb.bssid.toUpperCase())}</td>
+                      <td class="font-mono">Ch ${nb.channel} <small style="color:var(--color-text-muted);">(${nb.widthMhz || 20}MHz)</small></td>
+                      <td><span class="status-pill">${escapeHtml(nb.security || 'Open')}</span></td>
+                      <td class="font-mono">
+                        <span class="status-pill ${sigClass === 'high' ? 'warning' : sigClass === 'medium' ? 'info' : ''}">
+                          ${peakSig} dBm (${peakPct}%)
+                        </span>
+                      </td>
+                      <td style="min-width: 260px;">
+                        <div class="neighbor-radio-rssi-list">
+                          ${perRadioHtml}
+                        </div>
+                      </td>
+                    </tr>
+                  `;
+                })
+                .join('')}
+            </tbody>
+          </table>
+        </div>
+      `
+      }
+    </div>
+  `;
+}
+
 function renderBandCongestionSummary(bands = {}, bandCongestion = {}, selectedBand = '5GHz') {
   return ['2.4GHz', '5GHz', '6GHz']
     .map((bandName) => {
       const radios = bands[bandName]?.radios || [];
+      const extNeighbors = (bands[bandName]?.neighbors || []).filter((n) => !n.isManagedFleet);
       const stats = bandCongestion[bandName] || {
         radiosCount: radios.length,
+        neighborsCount: extNeighbors.length,
         totalClients: radios.reduce((acc, r) => acc + (r.clientCount || 0), 0),
         avgUtilizationPct: 0,
         peakUtilizationPct: 0,
@@ -236,8 +401,21 @@ function renderBandCongestionSummary(bands = {}, bandCongestion = {}, selectedBa
       const score = stats.congestionScore ?? 0;
       const level = stats.congestionLevel || (score >= 65 ? 'high' : score >= 35 ? 'moderate' : 'low');
       const levelLabel =
-        radios.length === 0 ? 'Inactive' : level === 'high' ? 'High Congestion' : level === 'moderate' ? 'Moderate Load' : 'Clean Spectrum';
-      const pillClass = radios.length === 0 ? '' : level === 'high' ? 'danger' : level === 'moderate' ? 'warning' : 'success';
+        radios.length === 0 && extNeighbors.length === 0
+          ? 'Inactive'
+          : level === 'high'
+            ? 'High Congestion'
+            : level === 'moderate'
+              ? 'Moderate Load'
+              : 'Clean Spectrum';
+      const pillClass =
+        radios.length === 0 && extNeighbors.length === 0
+          ? ''
+          : level === 'high'
+            ? 'danger'
+            : level === 'moderate'
+              ? 'warning'
+              : 'success';
       const barClass = level === 'high' ? 'high' : level === 'moderate' ? 'medium' : 'low';
 
       return `
@@ -255,7 +433,7 @@ function renderBandCongestionSummary(bands = {}, bandCongestion = {}, selectedBa
             </div>
             <div class="congestion-mini-stats">
               <span><strong>${stats.radiosCount}</strong> Radios</span>
-              <span><strong>${stats.totalClients}</strong> Clients</span>
+              <span><strong>${stats.neighborsCount ?? extNeighbors.length}</strong> Neighbors</span>
               <span><strong>${stats.avgUtilizationPct}%</strong> Avg Airtime</span>
               <span><strong>${stats.overlappingCount}</strong> Overlaps</span>
             </div>
@@ -274,7 +452,7 @@ function renderRecommendationBadge(bandStats = {}) {
   if (!rec || !bandStats.radiosCount) return '';
   return `
     <span class="status-pill info" title="Least congested channel on ${escapeHtml(bandStats.band || '')}">
-      Best Channel: <strong>${escapeHtml(rec.label || `Ch ${rec.channel}`)}</strong> (${rec.overlappingRadios === 0 ? '0 overlaps' : `${rec.combinedUtilPct}% load`})
+      Best Channel: <strong>${escapeHtml(rec.label || `Ch ${rec.channel}`)}</strong> (${rec.overlappingRadios === 0 && !rec.overlappingNeighbors ? '0 overlaps' : `${rec.combinedUtilPct}% load`})
     </span>
   `;
 }
@@ -297,6 +475,7 @@ function renderChannelCongestionBreakdown(bandStats = {}, bandName = '5GHz') {
               <th scope="col">Channel</th>
               <th scope="col">Width</th>
               <th scope="col">Transmitting Radios</th>
+              <th scope="col">External Neighbors</th>
               <th scope="col">Connected Clients</th>
               <th scope="col">Combined Airtime Load</th>
               <th scope="col">Status</th>
@@ -307,23 +486,29 @@ function renderChannelCongestionBreakdown(bandStats = {}, bandName = '5GHz') {
               .map((ch) => {
                 const load = ch.combinedUtilizationPct || 0;
                 const isShared = ch.radioCount > 1;
-                const isHigh = load >= 70 || (isShared && load >= 50);
-                const statusClass = isHigh ? 'danger' : isShared || load >= 45 ? 'warning' : 'success';
+                const hasLoudNeighbor = ch.strongestNeighborDbm !== null && ch.strongestNeighborDbm >= -70;
+                const isHigh = load >= 70 || (isShared && load >= 50) || (hasLoudNeighbor && load >= 55);
+                const statusClass = isHigh ? 'danger' : isShared || hasLoudNeighbor || load >= 45 ? 'warning' : 'success';
                 const statusText = isHigh
                   ? 'Congested'
                   : isShared
                     ? `Co-Channel (${ch.radioCount} APs)`
-                    : load >= 45
-                      ? 'Moderate'
-                      : 'Clear';
-                const fillClass = load >= 70 ? 'high' : load >= 45 || isShared ? 'medium' : 'low';
+                    : hasLoudNeighbor
+                      ? `Ext Neighbor (${ch.strongestNeighborDbm}dBm)`
+                      : load >= 45
+                        ? 'Moderate'
+                        : 'Clear';
+                const fillClass = load >= 70 ? 'high' : load >= 45 || isShared || hasLoudNeighbor ? 'medium' : 'low';
                 const radioNames = ch.radios.map((r) => `${escapeHtml(r.hostName)} (${r.utilizationPct}%)`).join(', ');
+                const neighborText =
+                  ch.neighborCount > 0 ? `${ch.neighborCount} (${ch.strongestNeighborDbm} dBm)` : '0';
 
                 return `
                   <tr>
                     <td class="font-mono"><strong>Ch ${ch.channel}</strong> (${ch.centerFreqMhz} MHz)</td>
                     <td class="font-mono">${ch.widthMhz} MHz</td>
                     <td>${radioNames}</td>
+                    <td class="font-mono">${neighborText}</td>
                     <td class="font-mono">${ch.clientCount}</td>
                     <td style="min-width: 160px;">
                       <div style="display: flex; align-items: center; gap: 8px;">
@@ -354,9 +539,11 @@ function renderInterferenceWarnings(warnings = [], band, bandStats = {}) {
       const titlePrefix =
         w.type === 'airtime_congestion'
           ? 'High Airtime Congestion'
-          : w.type === 'adjacent_channel'
-            ? 'Adjacent-Channel Interference'
-            : 'Co-Channel Congestion';
+          : w.type === 'external_interference'
+            ? 'External Neighbor Network Interference'
+            : w.type === 'adjacent_channel'
+              ? 'Adjacent-Channel Interference'
+              : 'Co-Channel Congestion';
       return `
         <div class="interference-alert" style="margin-bottom: 8px;">
           <div class="interference-alert-icon">${renderIcon('alertTriangle', 'icon')}</div>

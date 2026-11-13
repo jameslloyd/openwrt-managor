@@ -287,6 +287,19 @@ export async function handleApiRequest(req, res, pathname, searchParams) {
     // -------------------------------------------------------------
     // WiFi Spectrum & Interference APIs
     // -------------------------------------------------------------
+    if (pathname === '/api/wifi/scan' && req.method === 'POST') {
+      const body = await parseJsonBody(req);
+      const targetHostId = body?.hostId || 'all';
+      if (targetHostId !== 'all' && !/^[a-zA-Z0-9_-]+$/.test(targetHostId)) {
+        sendError(res, 400, 'Invalid hostId format', 'INVALID_HOST_ID');
+        return true;
+      }
+      const bands = await hostManager.scanAllWifiNetworks(targetHostId);
+      const analysis = analyzeInterference(bands);
+      sendJson(res, 200, { bands, analysis });
+      return true;
+    }
+
     if ((pathname === '/api/wifi/channels' || pathname === '/api/wifi/interference') && req.method === 'GET') {
       const bands = hostManager.getLiveWifiBands();
 

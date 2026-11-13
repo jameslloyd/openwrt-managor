@@ -12,13 +12,15 @@ export class SpectrumChart {
     this.band = band;
     this.onRadioClick = onRadioClick;
     this.radios = [];
+    this.neighbors = [];
     this.noiseFloorDbm = -95;
     this.conflicts = [];
     this.overlappingZones = [];
   }
 
-  setData({ radios = [], noiseFloorDbm = -95, conflicts = [], overlappingZones = [] }) {
+  setData({ radios = [], neighbors = [], noiseFloorDbm = -95, conflicts = [], overlappingZones = [] }) {
     this.radios = radios;
+    this.neighbors = neighbors;
     this.noiseFloorDbm = noiseFloorDbm;
     this.conflicts = conflicts;
     this.overlappingZones = overlappingZones;
@@ -168,6 +170,66 @@ export class SpectrumChart {
       }
     }
 
+    // Generate dashed RF curves for scanned external / neighboring networks
+    let neighborCurvesSvg = '';
+    const externalNeighbors = (this.neighbors || []).filter((n) => !n.isManagedFleet);
+    externalNeighbors.slice(0, 20).forEach((nb) => {
+      const centerFreq = nb.centerFreqMhz || config.getFreq(nb.channel);
+      const widthMhz = nb.widthMhz || 20;
+      const signalDbm = nb.strongestSignalDbm ?? nb.signalDbm ?? -80;
+
+      const fStart = centerFreq - widthMhz / 2;
+      const fEnd = centerFreq + widthMhz / 2;
+      const xStart = freqToX(fStart);
+      const xEnd = freqToX(fEnd);
+      const xCenter = freqToX(centerFreq);
+
+      const yBase = dbmToY(this.noiseFloorDbm);
+      const yPeak = dbmToY(signalDbm);
+
+      const flatRatio = 0.65;
+      const halfFlat = (widthMhz * flatRatio) / 2;
+      const xFlatStart = freqToX(centerFreq - halfFlat);
+      const xFlatEnd = freqToX(centerFreq + halfFlat);
+
+      const pathData = `
+        M ${xStart} ${yBase}
+        C ${xStart + (xFlatStart - xStart) * 0.4} ${yBase},
+          ${xFlatStart - (xFlatStart - xStart) * 0.2} ${yPeak},
+          ${xFlatStart} ${yPeak}
+        L ${xFlatEnd} ${yPeak}
+        C ${xFlatEnd + (xEnd - xFlatEnd) * 0.2} ${yPeak},
+          ${xEnd - (xEnd - xFlatEnd) * 0.4} ${yBase},
+          ${xEnd} ${yBase}
+        Z
+      `;
+
+      const obsStr = Array.isArray(nb.observations) && nb.observations.length > 0
+        ? nb.observations.map((o) => `${o.hostName}: ${o.signalDbm} dBm`).join(', ')
+        : `${signalDbm} dBm`;
+      const tooltipStr = escapeHtml(
+        `Neighbor: ${nb.ssid} (${nb.bssid.toUpperCase()}) • Ch ${nb.channel} (${widthMhz}MHz) • Peak ${signalDbm} dBm [${obsStr}]`
+      );
+      const shortSsid = escapeHtml(String(nb.ssid || 'Hidden').slice(0, 14));
+
+      neighborCurvesSvg += `
+        <g class="spectrum-neighbor-group" data-bssid="${escapeHtml(nb.bssid)}">
+          <path d="${pathData}"
+                fill="#94a3b8"
+                fill-opacity="0.10"
+                stroke="#94a3b8"
+                stroke-width="1.3"
+                stroke-dasharray="4 3"
+                class="spectrum-curve neighbor"
+                data-tooltip="${tooltipStr}"
+          />
+          <text x="${xCenter}" y="${Math.max(padding.top + 12, yPeak - 4)}" font-size="9.5" fill="var(--color-text-muted)" text-anchor="middle">
+            ${shortSsid} (${signalDbm}dBm)
+          </text>
+        </g>
+      `;
+    });
+
     // Generate RF Bell Curves for active radios, staggering peak labels when multiple radios share a channel
     let curvesSvg = '';
     const colorPalette = ['#38bdf8', '#a855f7', '#10b981', '#f59e0b', '#ec4899', '#06b6d4'];
@@ -266,6 +328,9 @@ export class SpectrumChart {
         ${noiseLineSvg}
         ${xTicksSvg}
 
+        <!-- Scanned Neighboring Network Curves -->
+        ${neighborCurvesSvg}
+
         <!-- Radio Curves -->
         ${curvesSvg}
       </svg>
@@ -276,7 +341,7 @@ export class SpectrumChart {
 
     // Attach curve interaction (mouse and keyboard)
     const tooltip = this.container.querySelector('#spectrum-chart-tooltip');
-    const curveGroups = this.container.querySelectorAll('.spectrum-radio-group');
+    const curveGroups = this.container.querySelectorAll('.spectrum-radio-group, .spectrum-neighbor-group');
 
     curveGroups.forEach((group) => {
       const radioId = group.getAttribute('data-radio-id');

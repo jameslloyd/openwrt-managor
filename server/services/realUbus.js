@@ -288,6 +288,166 @@ function freqToBand(freqMhz) {
   return null;
 }
 
+function freqToChannel(freqMhz) {
+  const f = Math.round(Number(freqMhz));
+  if (f === 2484) return 14;
+  if (f >= 2412 && f <= 2472) return Math.round((f - 2412) / 5) + 1;
+  if (f >= 5000 && f <= 5895) return Math.round((f - 5000) / 5);
+  if (f >= 5955 && f <= 7115) return Math.round((f - 5950) / 5);
+  return 0;
+}
+
+export function parseIwScanOutput(scanTxt, hostConfig, iwInterfaces = new Map()) {
+  const neighbors = [];
+  if (!scanTxt) return neighbors;
+
+  let currentIface = null;
+  let currentBss = null;
+
+  const flushBss = () => {
+    if (!currentBss || !currentBss.bssid) return;
+    const freqMhz = currentBss.freqMhz || (currentBss.band && currentBss.channel ? channelToCenterFreq(currentBss.band, currentBss.channel) : 0);
+    const band = currentBss.band || freqToBand(freqMhz);
+    const channel = currentBss.channel || freqToChannel(freqMhz);
+    if (!band || !channel) {
+      currentBss = null;
+      return;
+    }
+    const ifaceInfo = iwInterfaces.get(currentIface) || {};
+    neighbors.push({
+      bssid: currentBss.bssid.toLowerCase(),
+      ssid: currentBss.ssid || '(Hidden Network)',
+      isHidden: !currentBss.ssid,
+      band,
+      channel,
+      freqMhz: freqMhz || channelToCenterFreq(band, channel),
+      centerFreqMhz: currentBss.centerFreqMhz || freqMhz || channelToCenterFreq(band, channel),
+      widthMhz: currentBss.widthMhz || 20,
+      signalDbm: typeof currentBss.signalDbm === 'number' ? currentBss.signalDbm : -85,
+      security: currentBss.security || 'Open',
+      seenByHostId: hostConfig.id,
+      seenByHostName: hostConfig.name || hostConfig.hostname || hostConfig.id,
+      seenByRadioId: `radio-${hostConfig.id}-${currentIface || 'radio0'}`,
+      seenByDevice: currentIface || ifaceInfo.ifname || 'wlan0',
+      lastSeenMs: currentBss.lastSeenMs || 0,
+    });
+    currentBss = null;
+  };
+
+  for (const rawLine of String(scanTxt).split('\n')) {
+    const line = rawLine.trim();
+    if (!line) continue;
+
+    const hdr = line.match(/^---IFACE:(.+)---$/);
+    if (hdr) {
+      flushBss();
+      currentIface = hdr[1].trim();
+      continue;
+    }
+
+    const bssMatch = line.match(/^BSS\s+(([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2})\(on\s+([^)]+)\)/);
+    if (bssMatch) {
+      flushBss();
+      currentIface = bssMatch[3].trim() || currentIface;
+      currentBss = {
+        bssid: bssMatch[1].toLowerCase(),
+        ssid: '',
+        freqMhz: 0,
+        channel: 0,
+        widthMhz: 20,
+        centerFreqMhz: 0,
+        signalDbm: -85,
+        security: 'Open',
+        lastSeenMs: 0,
+      };
+      continue;
+    }
+
+    if (!currentBss) continue;
+
+    const freqMatch = line.match(/^freq:\s*(\d+(?:\.\d+)?)/i);
+    if (freqMatch) {
+      currentBss.freqMhz = Math.round(parseFloat(freqMatch[1]));
+      currentBss.band = freqToBand(currentBss.freqMhz);
+      currentBss.channel = freqToChannel(currentBss.freqMhz);
+      continue;
+    }
+
+    const sigMatch = line.match(/^signal:\s*(-?\d+(?:\.\d+)?)\s*dBm/i);
+    if (sigMatch) {
+      currentBss.signalDbm = Math.round(parseFloat(sigMatch[1]));
+      continue;
+    }
+
+    const seenMatch = line.match(/^last seen:\s*(\d+)\s*ms ago/i);
+    if (seenMatch) {
+      currentBss.lastSeenMs = Number(seenMatch[1]);
+      continue;
+    }
+
+    const ssidMatch = line.match(/^SSID:\s*(.*)$/);
+    if (ssidMatch) {
+      const val = ssidMatch[1].trim();
+      if (val && !val.startsWith('\\x00')) {
+        currentBss.ssid = val;
+      }
+      continue;
+    }
+
+    const dsChanMatch = line.match(/^DS Parameter set:\s*channel\s*(\d+)/i) || line.match(/^\*\s*primary channel:\s*(\d+)/i);
+    if (dsChanMatch) {
+      currentBss.channel = Number(dsChanMatch[1]);
+      continue;
+    }
+
+    const vhtWidthMatch = line.match(/^\*\s*channel width:\s*(\d+)\s*\(([^)]+)\)/i);
+    if (vhtWidthMatch) {
+      const desc = vhtWidthMatch[2];
+      if (desc.includes('160')) currentBss.widthMhz = 160;
+      else if (desc.includes('80')) currentBss.widthMhz = 80;
+      else if (desc.includes('40')) currentBss.widthMhz = 40;
+      continue;
+    }
+
+    const htWidthMatch = line.match(/^\*\s*STA channel width:\s*any/i);
+    if (htWidthMatch && currentBss.widthMhz < 40) {
+      currentBss.widthMhz = 40;
+      continue;
+    }
+
+    if (/^(RSN|WPA):/i.test(line)) {
+      currentBss.security = line.toUpperCase().startsWith('RSN') ? 'WPA2/WPA3' : 'WPA';
+    }
+  }
+
+  flushBss();
+  return neighbors;
+}
+
+export async function scanHostWirelessNetworks(hostConfig) {
+  const scanScript = [
+    'echo "===IWDEV==="',
+    'iw dev 2>/dev/null',
+    'echo "===SCAN==="',
+    'seen_phys=""; for iface in $(iw dev 2>/dev/null | awk \'$1=="Interface"{print $2}\'); do phy=$(iw dev "$iface" info 2>/dev/null | awk \'$1=="wiphy"{print $2}\'); case " $seen_phys " in *" $phy "*) continue ;; esac; seen_phys="$seen_phys $phy"; echo "---IFACE:$iface---"; (iw dev "$iface" scan ap-force 2>/dev/null || iw dev "$iface" scan 2>/dev/null || iw dev "$iface" scan dump 2>/dev/null) | grep -E "^(BSS |\\tfreq:|\\tsignal:|\\tSSID:|\\tDS Parameter set:|\\t\\* primary channel:|\\t\\* channel width:|\\t\\* STA channel width:|\\tRSN:|\\tWPA:|\\tlast seen:)"; done',
+  ].join('; ');
+
+  const { stdout } = await execSshCommand(hostConfig, scanScript, { timeoutMs: 25000 });
+  const sections = {};
+  let currentKey = null;
+  for (const line of String(stdout || '').split('\n')) {
+    const m = line.match(/^===([A-Z0-9_]+)===\r?$/);
+    if (m) {
+      currentKey = m[1];
+      sections[currentKey] = [];
+    } else if (currentKey) {
+      sections[currentKey].push(line);
+    }
+  }
+  const scanTxt = (sections.SCAN || []).join('\n');
+  return parseIwScanOutput(scanTxt, hostConfig);
+}
+
 /**
  * Collects full telemetry from a real OpenWrt host via SSH (or HTTP ubus fallback).
  */
@@ -322,6 +482,8 @@ export async function pollRealHost(hostConfig, prevSample = null) {
     'iw dev 2>/dev/null',
     'echo "===SURVEY==="',
     'for iface in $(iw dev 2>/dev/null | awk \'$1=="Interface"{print $2}\'); do echo "---IFACE:$iface---"; iw dev "$iface" survey dump 2>/dev/null | awk \'/Survey data from/{if(inuse)exit; next} /\\[in use\\]/{inuse=1; print; next} inuse{print}\'; done',
+    'echo "===SCANDUMP==="',
+    'seen_phys=""; for iface in $(iw dev 2>/dev/null | awk \'$1=="Interface"{print $2}\'); do phy=$(iw dev "$iface" info 2>/dev/null | awk \'$1=="wiphy"{print $2}\'); case " $seen_phys " in *" $phy "*) continue ;; esac; seen_phys="$seen_phys $phy"; echo "---IFACE:$iface---"; iw dev "$iface" scan dump 2>/dev/null | grep -E "^(BSS |\\tfreq:|\\tsignal:|\\tSSID:|\\tDS Parameter set:|\\t\\* primary channel:|\\t\\* channel width:|\\t\\* STA channel width:|\\tRSN:|\\tWPA:|\\tlast seen:)"; done',
     'echo "===STATIONS==="',
     'for iface in $(iw dev 2>/dev/null | awk \'$1=="Interface"{print $2}\'); do echo "---IFACE:$iface---"; iw dev "$iface" station dump 2>/dev/null; done',
     'echo "===DHCP==="',
@@ -426,6 +588,7 @@ export function parseSshTelemetryOutput(hostConfig, stdout, prevSample = null) {
   const wirelessJson = getSectionJson('WIRELESS');
   const iwdevTxt = getSectionText('IWDEV');
   const surveyTxt = getSectionText('SURVEY');
+  const scanDumpTxt = getSectionText('SCANDUMP');
   const stationsTxt = getSectionText('STATIONS');
   const dhcpTxt = getSectionText('DHCP');
   const uciDhcpTxt = getSectionText('UCI_DHCP');
@@ -987,6 +1150,13 @@ export function parseSshTelemetryOutput(hostConfig, stdout, prevSample = null) {
     });
   }
 
+  // 12. Parse cached/scanned neighboring wireless networks (`===SCANDUMP===`)
+  const neighbors = parseIwScanOutput(
+    scanDumpTxt,
+    { id: hostConfig.id, name: hostConfig.name || hostname, hostname },
+    iwInterfaces
+  );
+
   const clientBytes = {};
   for (const c of clients) {
     clientBytes[c.mac] = { rxBytes: c.rxBytesTotal || 0, txBytes: c.txBytesTotal || 0 };
@@ -1005,6 +1175,7 @@ export function parseSshTelemetryOutput(hostConfig, stdout, prevSample = null) {
     txRateBps,
     wan: wanInfo,
     radios,
+    neighbors,
     clients,
     dhcpMap: Object.fromEntries(dhcpByMac),
     arpMap: Object.fromEntries(arpByMac),

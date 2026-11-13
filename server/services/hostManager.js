@@ -1,7 +1,7 @@
 import { config } from '../config.js';
 import { db } from '../storage/db.js';
 import { simulator } from './simulator.js';
-import { testHostConnection, pollRealHost } from './realUbus.js';
+import { testHostConnection, pollRealHost, scanHostWirelessNetworks } from './realUbus.js';
 import { backupEngine } from './backupEngine.js';
 
 export function sanitizeHost(host) {
@@ -20,6 +20,7 @@ export class HostManager {
     this.prevSamples = new Map(); // hostId -> { timestamp, cpuStat, netCounters, clientBytes }
     this.liveClientsByHost = new Map(); // hostId -> array of client objects
     this.liveRadiosByHost = new Map(); // hostId -> array of radio objects
+    this.liveNeighborsByHost = new Map(); // hostId -> array of scanned neighbor BSS objects
     this.signalHistoryByMac = new Map(); // mac -> array of { timestamp, signalDbm }
     this.dhcpByHost = new Map(); // hostId -> { [mac]: { ip, hostname, expiresEpoch } }
     this.arpByHost = new Map(); // hostId -> { [mac]: ip }
@@ -109,6 +110,11 @@ export class HostManager {
     if (Array.isArray(telemetry.radios)) {
       host.radios = telemetry.radios;
       this.liveRadiosByHost.set(host.id, telemetry.radios);
+    }
+    if (Array.isArray(telemetry.neighbors) && telemetry.neighbors.length > 0) {
+      this.liveNeighborsByHost.set(host.id, telemetry.neighbors);
+    } else if (!this.liveNeighborsByHost.has(host.id) && Array.isArray(telemetry.neighbors)) {
+      this.liveNeighborsByHost.set(host.id, telemetry.neighbors);
     }
     if (Array.isArray(telemetry.clients)) {
       host.clientCount = telemetry.clients.length;
@@ -310,22 +316,121 @@ export class HostManager {
 
   getLiveWifiBands() {
     const bands = {
-      '2.4GHz': { rangeMhz: [2400, 2484], noiseFloorDbm: -95, radios: [] },
-      '5GHz': { rangeMhz: [5150, 5875], noiseFloorDbm: -98, radios: [] },
-      '6GHz': { rangeMhz: [5925, 7125], noiseFloorDbm: -101, radios: [] },
+      '2.4GHz': { rangeMhz: [2400, 2484], noiseFloorDbm: -95, radios: [], neighbors: [] },
+      '5GHz': { rangeMhz: [5150, 5875], noiseFloorDbm: -98, radios: [], neighbors: [] },
+      '6GHz': { rangeMhz: [5925, 7125], noiseFloorDbm: -101, radios: [], neighbors: [] },
     };
 
+    const managedSsidsByBandChan = new Set();
     for (const radios of this.liveRadiosByHost.values()) {
       for (const r of radios) {
         if (bands[r.band]) {
           bands[r.band].radios.push(r);
+          managedSsidsByBandChan.add(`${r.band}:${r.channel}:${(r.ssid || '').toLowerCase()}`);
           if (typeof r.noiseDbm === 'number' && r.noiseDbm > bands[r.band].noiseFloorDbm) {
             bands[r.band].noiseFloorDbm = r.noiseDbm;
           }
         }
       }
     }
+
+    // Aggregate scanned neighboring networks across all radios and record relative signal strength per radio
+    const neighborsByBandBssid = {
+      '2.4GHz': new Map(),
+      '5GHz': new Map(),
+      '6GHz': new Map(),
+    };
+
+    for (const hostNeighbors of this.liveNeighborsByHost.values()) {
+      for (const n of hostNeighbors) {
+        if (!bands[n.band]) continue;
+        const map = neighborsByBandBssid[n.band];
+        const bssidKey = n.bssid.toLowerCase();
+        if (!map.has(bssidKey)) {
+          map.set(bssidKey, {
+            bssid: bssidKey,
+            ssid: n.ssid || '(Hidden Network)',
+            isHidden: Boolean(n.isHidden),
+            isManagedFleet: managedSsidsByBandChan.has(`${n.band}:${n.channel}:${(n.ssid || '').toLowerCase()}`),
+            band: n.band,
+            channel: n.channel,
+            centerFreqMhz: n.centerFreqMhz || n.freqMhz,
+            widthMhz: n.widthMhz || 20,
+            security: n.security || 'Open',
+            strongestSignalDbm: n.signalDbm,
+            strongestHostId: n.seenByHostId,
+            strongestHostName: n.seenByHostName,
+            strongestDevice: n.seenByDevice,
+            observations: [],
+          });
+        }
+
+        const entry = map.get(bssidKey);
+        if (entry.isHidden && n.ssid && !n.isHidden) {
+          entry.ssid = n.ssid;
+          entry.isHidden = false;
+        }
+        if ((n.widthMhz || 20) > entry.widthMhz) {
+          entry.widthMhz = n.widthMhz;
+        }
+        if (n.signalDbm > entry.strongestSignalDbm) {
+          entry.strongestSignalDbm = n.signalDbm;
+          entry.strongestHostId = n.seenByHostId;
+          entry.strongestHostName = n.seenByHostName;
+          entry.strongestDevice = n.seenByDevice;
+        }
+
+        const existingObs = entry.observations.find(
+          (o) => o.hostId === n.seenByHostId && o.device === n.seenByDevice
+        );
+        if (!existingObs) {
+          entry.observations.push({
+            hostId: n.seenByHostId,
+            hostName: n.seenByHostName,
+            radioId: n.seenByRadioId,
+            device: n.seenByDevice,
+            signalDbm: n.signalDbm,
+            lastSeenMs: n.lastSeenMs || 0,
+          });
+        } else if (n.signalDbm > existingObs.signalDbm) {
+          existingObs.signalDbm = n.signalDbm;
+        }
+      }
+    }
+
+    for (const bandName of Object.keys(bands)) {
+      const list = Array.from(neighborsByBandBssid[bandName].values()).sort(
+        (a, b) => b.strongestSignalDbm - a.strongestSignalDbm
+      );
+      for (const item of list) {
+        item.observations.sort((a, b) => b.signalDbm - a.signalDbm);
+      }
+      bands[bandName].neighbors = list;
+    }
+
     return bands;
+  }
+
+  async scanAllWifiNetworks(targetHostId = 'all') {
+    const hosts = await this.getAllHosts({ sanitized: false });
+    const onlineHosts = hosts.filter(
+      (h) => !h.isSimulated && (targetHostId === 'all' || h.id === targetHostId)
+    );
+
+    await Promise.all(
+      onlineHosts.map(async (h) => {
+        try {
+          const scanned = await scanHostWirelessNetworks(h);
+          if (Array.isArray(scanned)) {
+            this.liveNeighborsByHost.set(h.id, scanned);
+          }
+        } catch {
+          // Ignore individual host scan errors if busy or unreachable
+        }
+      })
+    );
+
+    return this.getLiveWifiBands();
   }
 
   async getAllHosts({ sanitized = true } = {}) {
@@ -435,6 +540,7 @@ export class HostManager {
     this.prevSamples.delete(id);
     this.liveClientsByHost.delete(id);
     this.liveRadiosByHost.delete(id);
+    this.liveNeighborsByHost.delete(id);
     this.dhcpByHost.delete(id);
     this.arpByHost.delete(id);
     this.rdnsByHost.delete(id);

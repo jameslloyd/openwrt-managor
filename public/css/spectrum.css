@@ -357,3 +357,36 @@
 .utilization-fill.low { background-color: var(--color-success); }
 .utilization-fill.medium { background-color: var(--color-warning); }
 .utilization-fill.high { background-color: var(--color-danger); }
+
+/* Relative Signal Strength Per Radio (Neighboring Networks Table) */
+.neighbor-radio-rssi-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.neighbor-radio-rssi-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.neighbor-radio-rssi-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11.5px;
+}
+
+.neighbor-radio-name {
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.neighbor-radio-dbm {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-text-secondary);
+}
+

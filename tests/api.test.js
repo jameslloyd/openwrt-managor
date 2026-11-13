@@ -576,3 +576,96 @@ test('Spectrum Congestion Engine: aggregates survey dump airtime across all radi
   hostManager.liveRadiosByHost.delete('ap-down');
   hostManager.liveRadiosByHost.delete('ap-up');
 });
+
+test('Neighboring Networks Scanner: parses iw scan output and aggregates relative signal strength across multiple OpenWrt radios', () => {
+  const apDownOutput = [
+    '===BOARD===',
+    JSON.stringify({ hostname: 'Downstairs-AP', model: 'OpenWrt AP' }),
+    '===IWDEV===',
+    'phy#1',
+    '\tInterface phy1-ap0',
+    '\t\tssid HomeMesh',
+    '\t\tchannel 36 (5180 MHz), width: 80 MHz, center1: 5210 MHz',
+    '\t\ttxpower 23.00 dBm',
+    '===SCANDUMP===',
+    '---IFACE:phy1-ap0---',
+    'BSS 70:4f:57:aa:bb:cc(on phy1-ap0)',
+    '\tlb-tsf: 123456',
+    '\tfreq: 5180',
+    '\tsignal: -54.00 dBm',
+    '\tlast seen: 420 ms ago',
+    '\tSSID: NeighborFiber5G',
+    '\tRSN:\t * Version: 1',
+    '\tHT operation:',
+    '\t\t * primary channel: 36',
+    '\tVHT operation:',
+    '\t\t * channel width: 1 (80 MHz)',
+  ].join('\n');
+
+  const apUpOutput = [
+    '===BOARD===',
+    JSON.stringify({ hostname: 'Upstairs-AP', model: 'OpenWrt AP' }),
+    '===IWDEV===',
+    'phy#1',
+    '\tInterface phy1-ap0',
+    '\t\tssid HomeMesh',
+    '\t\tchannel 100 (5500 MHz), width: 80 MHz, center1: 5530 MHz',
+    '\t\ttxpower 23.00 dBm',
+    '===SCANDUMP===',
+    '---IFACE:phy1-ap0---',
+    'BSS 70:4f:57:aa:bb:cc(on phy1-ap0)',
+    '\tfreq: 5180',
+    '\tsignal: -76.00 dBm',
+    '\tlast seen: 950 ms ago',
+    '\tSSID: NeighborFiber5G',
+    '\tRSN:\t * Version: 1',
+    '\tVHT operation:',
+    '\t\t * channel width: 1 (80 MHz)',
+  ].join('\n');
+
+  const apDown = { id: 'ap-down', name: 'Downstairs AP' };
+  const apUp = { id: 'ap-up', name: 'Upstairs AP' };
+
+  const tDown = parseSshTelemetryOutput(apDown, apDownOutput);
+  const tUp = parseSshTelemetryOutput(apUp, apUpOutput);
+
+  assert.equal(tDown.neighbors.length, 1);
+  assert.equal(tDown.neighbors[0].bssid, '70:4f:57:aa:bb:cc');
+  assert.equal(tDown.neighbors[0].ssid, 'NeighborFiber5G');
+  assert.equal(tDown.neighbors[0].channel, 36);
+  assert.equal(tDown.neighbors[0].widthMhz, 80);
+  assert.equal(tDown.neighbors[0].signalDbm, -54);
+
+  hostManager.applyTelemetryToHost(apDown, tDown);
+  hostManager.applyTelemetryToHost(apUp, tUp);
+
+  const bands = hostManager.getLiveWifiBands();
+  const neighbors5g = bands['5GHz'].neighbors;
+  assert.equal(neighbors5g.length, 1);
+
+  const neighbor = neighbors5g[0];
+  assert.equal(neighbor.bssid, '70:4f:57:aa:bb:cc');
+  assert.equal(neighbor.ssid, 'NeighborFiber5G');
+  assert.equal(neighbor.strongestSignalDbm, -54);
+  assert.equal(neighbor.isManagedFleet, false);
+
+  // Relative signal strength on each radio sorted strongest first
+  assert.equal(neighbor.observations.length, 2);
+  assert.equal(neighbor.observations[0].hostName, 'Downstairs AP');
+  assert.equal(neighbor.observations[0].signalDbm, -54);
+  assert.equal(neighbor.observations[1].hostName, 'Upstairs AP');
+  assert.equal(neighbor.observations[1].signalDbm, -76);
+
+  // Interference analysis flags external neighbor overlapping Downstairs AP on Channel 36
+  const analysis = analyzeInterference(bands);
+  const extWarning = analysis.warnings.find((w) => w.type === 'external_interference' && w.band === '5GHz');
+  assert.ok(extWarning);
+  assert.ok(extWarning.message.includes('NeighborFiber5G'));
+  assert.ok(extWarning.message.includes('-54 dBm'));
+  assert.equal(analysis.bandCongestion['5GHz'].neighborsCount, 1);
+
+  hostManager.liveRadiosByHost.delete('ap-down');
+  hostManager.liveRadiosByHost.delete('ap-up');
+  hostManager.liveNeighborsByHost.delete('ap-down');
+  hostManager.liveNeighborsByHost.delete('ap-up');
+});

@@ -50,7 +50,7 @@ function getRadioSpan(radio, bandName) {
   };
 }
 
-function findLeastCongestedChannel(bandName, radios) {
+function findLeastCongestedChannel(bandName, radios, neighbors = []) {
   const candidates = CANDIDATE_CHANNELS[bandName] || [];
   let best = null;
 
@@ -60,6 +60,7 @@ function findLeastCongestedChannel(bandName, radios) {
     const end = center + cand.widthMhz / 2;
 
     let overlappingRadios = 0;
+    let overlappingNeighbors = 0;
     let combinedUtil = 0;
 
     for (const r of radios) {
@@ -70,7 +71,22 @@ function findLeastCongestedChannel(bandName, radios) {
       }
     }
 
-    const score = overlappingRadios * 40 + combinedUtil;
+    for (const n of neighbors) {
+      if (n.isManagedFleet) continue;
+      const nCenter = n.centerFreqMhz || getChannelCenterFreq(bandName, n.channel);
+      const nWidth = n.widthMhz || 20;
+      const nStart = nCenter - nWidth / 2;
+      const nEnd = nCenter + nWidth / 2;
+      if (Math.max(start, nStart) < Math.min(end, nEnd)) {
+        overlappingNeighbors++;
+        const sigDbm = n.strongestSignalDbm ?? n.signalDbm ?? -85;
+        // Stronger neighbor signals contribute more RF contention
+        const neighborWeight = sigDbm >= -60 ? 22 : sigDbm >= -72 ? 12 : 5;
+        combinedUtil += neighborWeight;
+      }
+    }
+
+    const score = overlappingRadios * 40 + overlappingNeighbors * 15 + combinedUtil;
     if (!best || score < best.score) {
       best = {
         channel: cand.channel,
@@ -78,6 +94,7 @@ function findLeastCongestedChannel(bandName, radios) {
         widthMhz: cand.widthMhz,
         label: cand.label || `Channel ${cand.channel}`,
         overlappingRadios,
+        overlappingNeighbors,
         combinedUtilPct: Math.min(100, combinedUtil),
         score,
       };
@@ -98,6 +115,8 @@ export function analyzeInterference(bandsData) {
 
   for (const [bandName, bandInfo] of Object.entries(bandsData || {})) {
     const radios = bandInfo?.radios || [];
+    const neighbors = bandInfo?.neighbors || [];
+    const externalNeighbors = neighbors.filter((n) => !n.isManagedFleet);
     const totalClients = radios.reduce((acc, r) => acc + (r.clientCount || 0), 0);
     const avgUtilizationPct =
       radios.length > 0 ? Math.round(radios.reduce((acc, r) => acc + (r.utilizationPct || 0), 0) / radios.length) : 0;
@@ -106,6 +125,7 @@ export function analyzeInterference(bandsData) {
 
     const overlappingZones = [];
     const channelStatsMap = new Map();
+    const bestCandidate = findLeastCongestedChannel(bandName, radios, externalNeighbors);
 
     // Build per-channel congestion metrics across all radios on this band
     for (const r of radios) {
@@ -116,6 +136,8 @@ export function analyzeInterference(bandsData) {
           centerFreqMhz: r.centerFreqMhz || getChannelCenterFreq(bandName, r.channel),
           widthMhz: r.widthMhz || 20,
           radioCount: 0,
+          neighborCount: 0,
+          strongestNeighborDbm: null,
           clientCount: 0,
           combinedUtilizationPct: 0,
           radios: [],
@@ -137,7 +159,6 @@ export function analyzeInterference(bandsData) {
 
       // Individual radio high airtime congestion warning
       if ((r.utilizationPct || 0) >= 70) {
-        const bestAlt = findLeastCongestedChannel(bandName, radios);
         scoreDeductions += 8;
         warnings.push({
           id: `warn-util-${r.id}`,
@@ -147,15 +168,58 @@ export function analyzeInterference(bandsData) {
           channel: r.channel,
           affectedRadios: [r.id],
           combinedUtilizationPct: r.utilizationPct,
-          recommendedChannel: bestAlt?.channel || null,
+          recommendedChannel: bestCandidate?.channel || null,
           message: `High airtime congestion (${r.utilizationPct}% busy, ${r.clientCount || 0} clients) on ${r.hostName} (${bandName} Ch ${r.channel}).${
-            bestAlt && bestAlt.channel !== r.channel ? ` Consider offloading to ${bestAlt.label}.` : ''
+            bestCandidate && bestCandidate.channel !== r.channel ? ` Consider offloading to ${bestCandidate.label}.` : ''
           }`,
         });
       }
     }
 
-    const bestCandidate = findLeastCongestedChannel(bandName, radios);
+    // Include external neighboring networks in channel stats and check for strong external interference
+    for (const n of externalNeighbors) {
+      const sigDbm = n.strongestSignalDbm ?? n.signalDbm ?? -85;
+      const chKey = n.channel;
+      if (channelStatsMap.has(chKey)) {
+        const stat = channelStatsMap.get(chKey);
+        stat.neighborCount += 1;
+        if (stat.strongestNeighborDbm === null || sigDbm > stat.strongestNeighborDbm) {
+          stat.strongestNeighborDbm = sigDbm;
+        }
+      }
+
+      // Check if this external neighbor strongly overlaps with any managed radio (signal >= -70 dBm)
+      if (sigDbm >= -70) {
+        const nCenter = n.centerFreqMhz || getChannelCenterFreq(bandName, n.channel);
+        const nWidth = n.widthMhz || 20;
+        const nStart = nCenter - nWidth / 2;
+        const nEnd = nCenter + nWidth / 2;
+
+        for (const r of radios) {
+          const rSpan = getRadioSpan(r, bandName);
+          if (Math.max(nStart, rSpan.start) < Math.min(nEnd, rSpan.end)) {
+            scoreDeductions += 5;
+            warnings.push({
+              id: `warn-ext-${r.id}-${n.bssid}`,
+              type: 'external_interference',
+              severity: sigDbm >= -60 ? 'high' : 'medium',
+              band: bandName,
+              channel: r.channel,
+              affectedRadios: [r.id],
+              neighborBssid: n.bssid,
+              neighborSsid: n.ssid,
+              signalDbm: sigDbm,
+              recommendedChannel: bestCandidate?.channel || null,
+              message: `External network "${n.ssid}" (${n.bssid.toUpperCase()}, Ch ${n.channel}) detected at ${sigDbm} dBm by ${
+                n.strongestHostName || r.hostName
+              }, overlapping ${r.hostName} on ${bandName} Ch ${r.channel}.${
+                bestCandidate && bestCandidate.channel !== r.channel ? ` Least congested channel: ${bestCandidate.label}.` : ''
+              }`,
+            });
+          }
+        }
+      }
+    }
 
     // Pairwise RF spectrum overlap & co-channel / adjacent-channel congestion analysis
     for (let i = 0; i < radios.length; i++) {
@@ -248,19 +312,26 @@ export function analyzeInterference(bandsData) {
       (acc, z) => acc + (z.type === 'adjacent_channel' ? 25 : 18) + Math.round(z.combinedUtilizationPct * 0.25),
       0
     );
+    const neighborPenalty = externalNeighbors.reduce((acc, n) => {
+      const sig = n.strongestSignalDbm ?? n.signalDbm ?? -85;
+      return acc + (sig >= -60 ? 12 : sig >= -72 ? 6 : 2);
+    }, 0);
     const congestionScore =
-      radios.length === 0 ? 0 : Math.min(100, Math.round(avgUtilizationPct * 0.55 + overlapPenalty));
+      radios.length === 0 && externalNeighbors.length === 0
+        ? 0
+        : Math.min(100, Math.round(avgUtilizationPct * 0.55 + overlapPenalty + neighborPenalty));
 
     let congestionLevel = 'low';
     if (congestionScore >= 65 || overlappingZones.some((z) => z.severity === 'high')) {
       congestionLevel = 'high';
-    } else if (congestionScore >= 35 || overlappingZones.length > 0) {
+    } else if (congestionScore >= 35 || overlappingZones.length > 0 || externalNeighbors.some((n) => (n.strongestSignalDbm ?? -85) >= -65)) {
       congestionLevel = 'moderate';
     }
 
     bandCongestion[bandName] = {
       band: bandName,
       radiosCount: radios.length,
+      neighborsCount: externalNeighbors.length,
       totalClients,
       avgUtilizationPct,
       peakUtilizationPct,
