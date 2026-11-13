@@ -7,6 +7,12 @@ import { backupEngine } from '../server/services/backupEngine.js';
 import { hostManager } from '../server/services/hostManager.js';
 import { parseSshTelemetryOutput } from '../server/services/realUbus.js';
 import { analyzeInterference } from '../server/services/wifiEngine.js';
+import {
+  resolveMacManufacturer,
+  resolveSsidManufacturer,
+  resolveWirelessNetworkManufacturer,
+  lookupVendor,
+} from '../server/services/ouiVendor.js';
 
 let server;
 let baseUrl;
@@ -646,6 +652,8 @@ test('Neighboring Networks Scanner: parses iw scan output and aggregates relativ
   const neighbor = neighbors5g[0];
   assert.equal(neighbor.bssid, '70:4f:57:aa:bb:cc');
   assert.equal(neighbor.ssid, 'NeighborFiber5G');
+  assert.equal(neighbor.manufacturer, 'TP-Link');
+  assert.equal(neighbor.bssidManufacturer, 'TP-Link');
   assert.equal(neighbor.strongestSignalDbm, -54);
   assert.equal(neighbor.isManagedFleet, false);
 
@@ -730,4 +738,33 @@ test('Foreign AP RF Triangulation: trilaterates approximate 2D coordinates from 
     hostManager.liveNeighborsByHost.delete(id);
     hostManager.hostsCacheById.delete(id);
   }
+});
+
+test('Manufacturer Resolution: identifies manufacturer from BSSID OUI, virtual locally-administered BSSID, SSID, and client MAC/hostname', () => {
+  // 1. Standard IEEE OUI lookup
+  assert.equal(resolveMacManufacturer('94:83:c4:aa:bb:cc'), 'GL.iNet');
+  assert.equal(resolveMacManufacturer('70:4f:57:11:22:33'), 'TP-Link');
+  assert.equal(resolveMacManufacturer('18:e8:29:44:55:66'), 'Ubiquiti');
+
+  // 2. Locally-administered virtual BSSID (first byte bit 1 flipped: 0x94 -> 0x96)
+  assert.equal(resolveMacManufacturer('96:83:c4:aa:bb:cc'), 'GL.iNet (Virtual BSSID)');
+
+  // 3. SSID-based manufacturer resolution
+  assert.equal(resolveSsidManufacturer('GL-MT6000-5G'), 'GL.iNet');
+  assert.equal(resolveSsidManufacturer('SKY98421'), 'Sky UK');
+  assert.equal(resolveSsidManufacturer('BT-X9A2B'), 'BT / EE');
+  assert.equal(resolveSsidManufacturer('Deco_Mesh'), 'TP-Link');
+
+  // 4. Combined BSSID + SSID wireless network manufacturer resolution
+  const netInfo = resolveWirelessNetworkManufacturer({
+    bssid: '02:00:00:11:22:33',
+    ssid: 'FRITZ!Box 7590 AX',
+  });
+  assert.equal(netInfo.manufacturer, 'AVM (FRITZ!Box)');
+  assert.equal(netInfo.ssidManufacturer, 'AVM (FRITZ!Box)');
+
+  // 5. Client MAC + Hostname fallback resolution for randomized MACs
+  assert.equal(lookupVendor('a4:83:e7:11:22:33', 'unknown'), 'Apple, Inc.');
+  assert.equal(lookupVendor('da:a1:19:22:33:44', 'Jan-iPhone-16'), 'Apple, Inc.');
+  assert.equal(lookupVendor('da:a1:19:22:33:44', 'shellyplus1pm-a8032a'), 'Shelly / Allterco');
 });

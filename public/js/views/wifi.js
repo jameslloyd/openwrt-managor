@@ -9,7 +9,7 @@ import { toast } from '../components/toast.js';
 import { SpectrumChart } from '../charts/spectrum-chart.js';
 import { TriangulationMap } from '../charts/triangulation-map.js';
 import { renderIcon } from '../utils/icons.js';
-import { escapeHtml } from '../utils/formatters.js';
+import { escapeHtml, resolveClientSideVendor } from '../utils/formatters.js';
 
 let chartInstance = null;
 let triangulationMapInstance = null;
@@ -401,13 +401,13 @@ function renderNeighborNetworksSection(bandData = {}, bandName = '5GHz', highlig
         </div>
       `
           : `
-        <div class="table-responsive">
+        <div class="table-responsive" tabindex="0" role="region" aria-labelledby="neighbor-table-caption">
           <table class="data-table">
-            <caption class="sr-only">Scanned Neighboring Wireless Networks on ${escapeHtml(bandName)}, Triangulated Coordinates, and Relative Signal Strength per Radio</caption>
+            <caption id="neighbor-table-caption" class="sr-only">Scanned Neighboring Wireless Networks on ${escapeHtml(bandName)}, Triangulated Coordinates, and Relative Signal Strength per Radio</caption>
             <thead>
               <tr>
-                <th scope="col">SSID / Network</th>
-                <th scope="col">BSSID</th>
+                <th scope="col">SSID / Manufacturer</th>
+                <th scope="col">BSSID / OUI Vendor</th>
                 <th scope="col">Channel</th>
                 <th scope="col">Peak Signal</th>
                 <th scope="col">Triangulated Location</th>
@@ -425,6 +425,13 @@ function renderNeighborNetworksSection(bandData = {}, bandName = '5GHz', highlig
                   const tri = nb.triangulation || null;
                   const isHighlighted =
                     highlightedBssid && nb.bssid.toLowerCase() === highlightedBssid.toLowerCase();
+                  const ssidMfg =
+                    nb.ssidManufacturer ||
+                    nb.manufacturer ||
+                    resolveClientSideVendor(nb.bssid, nb.ssid, nb.manufacturer);
+                  const bssidMfg =
+                    nb.bssidManufacturer ||
+                    resolveClientSideVendor(nb.bssid, nb.ssid, nb.manufacturer);
 
                   const perRadioHtml = observations
                     .map((obs) => {
@@ -482,9 +489,14 @@ function renderNeighborNetworksSection(bandData = {}, bandName = '5GHz', highlig
                           ${nb.isManagedFleet ? '<span class="status-pill info" style="font-size: 10px; padding: 1px 6px;">Fleet AP</span>' : ''}
                           ${!nb.isManagedFleet && overlapsOurChannel ? '<span class="status-pill warning" style="font-size: 10px; padding: 1px 6px;" title="Shares channel with your AP">Shares Ch</span>' : ''}
                         </div>
-                        <div style="font-size: 11px; color: var(--color-text-muted); margin-top: 2px;">${escapeHtml(nb.security || 'Open')}</div>
+                        <div style="font-size: 11px; color: var(--color-text-secondary); margin-top: 2px;">
+                          Manufacturer: <strong>${escapeHtml(ssidMfg)}</strong> • ${escapeHtml(nb.security || 'Open')}
+                        </div>
                       </td>
-                      <td class="font-mono" style="font-size: 12px;">${escapeHtml(nb.bssid.toUpperCase())}</td>
+                      <td>
+                        <div class="font-mono" style="font-size: 12px; font-weight: 600;">${escapeHtml(nb.bssid.toUpperCase())}</div>
+                        <div style="font-size: 11px; color: var(--color-text-muted); margin-top: 2px;">${escapeHtml(bssidMfg)}</div>
+                      </td>
                       <td class="font-mono">Ch ${nb.channel} <small style="color:var(--color-text-muted);">(${nb.widthMhz || 20}MHz)</small></td>
                       <td class="font-mono">
                         <span class="status-pill ${sigClass === 'high' ? 'warning' : sigClass === 'medium' ? 'info' : ''}">
@@ -598,9 +610,9 @@ function renderChannelCongestionBreakdown(bandStats = {}, bandName = '5GHz') {
         <h2 style="font-size: 15px; font-weight: 600;">Channel Congestion Breakdown across All ${escapeHtml(bandName)} Radios</h2>
         <span style="font-size: 12px; color: var(--color-text-muted);">Aggregated airtime contention per channel</span>
       </div>
-      <div class="table-responsive">
+      <div class="table-responsive" tabindex="0" role="region" aria-labelledby="channel-breakdown-caption">
         <table class="data-table">
-          <caption class="sr-only">${escapeHtml(bandName)} Channel Congestion Breakdown</caption>
+          <caption id="channel-breakdown-caption" class="sr-only">${escapeHtml(bandName)} Channel Congestion Breakdown</caption>
           <thead>
             <tr>
               <th scope="col">Channel</th>
@@ -709,12 +721,19 @@ function renderRadioCards(radios = [], warnings = []) {
       if (utilPct >= 70) utilClass = 'high';
       else if (utilPct >= 45) utilClass = 'medium';
 
+      const radioMfg =
+        radio.manufacturer ||
+        resolveClientSideVendor(radio.bssid, radio.ssid || radio.hostName);
+      const radioBssid = radio.bssid ? radio.bssid.toUpperCase() : null;
+      const radioBssidMfg = radio.bssidManufacturer || radioMfg;
+
       return `
       <div class="radio-card ${isConflicted ? 'has-conflict' : ''}">
         <div class="radio-card-header">
           <div>
             <div class="radio-card-title">${escapeHtml(radio.hostName)} (${escapeHtml(radio.device || 'radio0')})</div>
-            <div class="radio-card-ssid">SSID: <strong>${escapeHtml(radio.ssid || 'Homelab')}</strong></div>
+            <div class="radio-card-ssid">SSID: <strong>${escapeHtml(radio.ssid || 'Homelab')}</strong> • <span style="color:var(--color-text-muted);">${escapeHtml(radioMfg)}</span></div>
+            ${radioBssid ? `<div class="font-mono" style="font-size: 11px; color: var(--color-text-muted); margin-top: 2px;">BSSID: ${escapeHtml(radioBssid)} (${escapeHtml(radioBssidMfg)})</div>` : ''}
           </div>
           ${
             isConflicted

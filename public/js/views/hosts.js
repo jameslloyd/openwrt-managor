@@ -7,7 +7,7 @@ import { store } from '../store.js';
 import { api } from '../api.js';
 import { toast } from '../components/toast.js';
 import { openModal, closeModal, confirmAction } from '../components/modal.js';
-import { formatUptime, escapeHtml } from '../utils/formatters.js';
+import { formatUptime, formatMac, escapeHtml, resolveClientSideVendor } from '../utils/formatters.js';
 import { renderIcon } from '../utils/icons.js';
 
 export function renderHosts(container) {
@@ -286,6 +286,7 @@ export function renderHosts(container) {
 
 function renderHostRow(h) {
   const isOnline = h.status === 'online';
+  const hostVendor = resolveClientSideVendor(h.mac, h.model || h.name, h.vendor);
   return `
     <tr>
       <td>
@@ -296,7 +297,10 @@ function renderHostRow(h) {
       </td>
       <td>
         <div style="font-weight: 600;">${escapeHtml(h.name || h.hostname)}</div>
-        <div style="font-size: 11px; color: var(--color-text-muted);">${escapeHtml(h.model || 'OpenWrt')}</div>
+        <div style="font-size: 11px; color: var(--color-text-muted);">
+          ${escapeHtml(h.model || 'OpenWrt')}${hostVendor && hostVendor !== 'Unknown Manufacturer' ? ` • ${escapeHtml(hostVendor)}` : ''}
+        </div>
+        ${h.mac ? `<div class="font-mono" style="font-size: 10.5px; color: var(--color-text-muted);">${escapeHtml(formatMac(h.mac))} (${escapeHtml(hostVendor)})</div>` : ''}
       </td>
       <td>
         <span class="font-mono">${escapeHtml(h.ip)}</span>

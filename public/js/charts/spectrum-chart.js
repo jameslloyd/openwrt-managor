@@ -4,7 +4,7 @@
  * Accurately models 20/40/80/160 MHz channel width curves, congested overlap zones, and airtime utilization across 2.4GHz, 5GHz, and 6GHz
  */
 
-import { escapeHtml } from '../utils/formatters.js';
+import { escapeHtml, resolveClientSideVendor } from '../utils/formatters.js';
 
 export class SpectrumChart {
   constructor({ container, band = '5GHz', onRadioClick = null }) {
@@ -207,8 +207,9 @@ export class SpectrumChart {
       const obsStr = Array.isArray(nb.observations) && nb.observations.length > 0
         ? nb.observations.map((o) => `${o.hostName}: ${o.signalDbm} dBm`).join(', ')
         : `${signalDbm} dBm`;
+      const nbMfg = nb.manufacturer || nb.bssidManufacturer || resolveClientSideVendor(nb.bssid, nb.ssid);
       const tooltipStr = escapeHtml(
-        `Neighbor: ${nb.ssid} (${nb.bssid.toUpperCase()}) • Ch ${nb.channel} (${widthMhz}MHz) • Peak ${signalDbm} dBm [${obsStr}]`
+        `Neighbor: ${nb.ssid} [${nbMfg}] (${nb.bssid.toUpperCase()}) • Ch ${nb.channel} (${widthMhz}MHz) • Peak ${signalDbm} dBm [${obsStr}]`
       );
       const shortSsid = escapeHtml(String(nb.ssid || 'Hidden').slice(0, 14));
 
@@ -281,8 +282,9 @@ export class SpectrumChart {
       const strokeColor = isHighUtil ? 'var(--color-danger)' : isConflicted ? 'var(--color-warning)' : color;
       const fillOpacity = Math.min(0.45, Math.max(0.18, 0.15 + (utilPct / 100) * 0.3));
 
+      const radioMfg = radio.manufacturer || resolveClientSideVendor(radio.bssid, radio.ssid || radio.hostName);
       const tooltipStr = escapeHtml(
-        `${radio.hostName} • ${radio.ssid || 'OpenWrt'} (Ch ${radio.channel}, ${widthMhz}MHz) • ${utilPct}% Airtime • ${radio.clientCount ?? 0} Clients`
+        `${radio.hostName} • ${radio.ssid || 'OpenWrt'} [${radioMfg}] (Ch ${radio.channel}, ${widthMhz}MHz) • ${utilPct}% Airtime • ${radio.clientCount ?? 0} Clients`
       );
       const radioLabel = escapeHtml(`${radio.hostName || radio.ssid} (${utilPct}%)`);
       const labelY = Math.max(padding.top + 12, yPeak - 6 - slotIdx * 11);

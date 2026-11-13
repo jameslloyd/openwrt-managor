@@ -6,7 +6,7 @@
 import { store } from '../store.js';
 import { DataTable } from '../components/table.js';
 import { toast } from '../components/toast.js';
-import { formatBps, formatRssi, formatMac, escapeHtml } from '../utils/formatters.js';
+import { formatBps, formatRssi, formatMac, escapeHtml, resolveClientSideVendor } from '../utils/formatters.js';
 import { renderIcon } from '../utils/icons.js';
 
 let tableInstance = null;
@@ -60,12 +60,15 @@ export function renderClients(container) {
         key: 'hostname',
         label: 'Device / Vendor',
         sortable: true,
-        render: (c) => `
+        render: (c) => {
+          const mfg = resolveClientSideVendor(c.mac, c.hostname, c.vendor);
+          return `
           <div>
             <div style="font-weight: 600; color: var(--color-text-primary);">${escapeHtml(c.displayName || c.nickname || c.hostname || c.ip)}</div>
-            <div style="font-size: 11px; color: var(--color-text-muted);">${(c.nickname || c.displayName) ? escapeHtml(c.hostname) + ' • ' : ''}${escapeHtml(c.vendor || 'Unknown Manufacturer')}</div>
+            <div style="font-size: 11px; color: var(--color-text-muted);">${(c.nickname || c.displayName) ? escapeHtml(c.hostname) + ' • ' : ''}${escapeHtml(mfg)}</div>
           </div>
-        `
+        `;
+        }
       },
       {
         key: 'ip',
@@ -80,14 +83,17 @@ export function renderClients(container) {
       },
       {
         key: 'mac',
-        label: 'MAC Address',
+        label: 'MAC Address / OUI',
         sortable: true,
-        render: (c) => `
+        render: (c) => {
+          const macMfg = resolveClientSideVendor(c.mac, c.hostname, c.vendor);
+          return `
           <div>
-            <div class="font-mono">${formatMac(c.mac)}</div>
-            <div style="font-size: 10px; color: var(--color-text-muted);">Lease: ${Math.floor((c.dhcpLeaseRemainingSec || 36000) / 3600)}h rem</div>
+            <div class="font-mono" style="font-weight: 600;">${formatMac(c.mac)}</div>
+            <div style="font-size: 10.5px; color: var(--color-text-muted);">${escapeHtml(macMfg)} • Lease: ${Math.floor((c.dhcpLeaseRemainingSec || 36000) / 3600)}h</div>
           </div>
-        `
+        `;
+        }
       },
       {
         key: 'connectedTo',

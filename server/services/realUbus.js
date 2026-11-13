@@ -4,44 +4,14 @@ import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { config } from '../config.js';
+import {
+  lookupVendor,
+  resolveMacManufacturer,
+  resolveSsidManufacturer,
+  resolveWirelessNetworkManufacturer,
+} from './ouiVendor.js';
 
 const execFileAsync = promisify(execFile);
-
-/**
- * Common OUI vendor lookup table for MAC addresses
- */
-const OUI_VENDORS = {
-  '00:25:90': 'Supermicro',
-  '00:e0:4c': 'Realtek',
-  '94:83:c4': 'GL.iNet',
-  'e0:d5:5e': 'GIGABYTE / Intel',
-  'bc:24:11': 'Proxmox / QEMU',
-  '00:17:88': 'Philips Lighting',
-  'a4:83:e7': 'Apple, Inc.',
-  'f0:99:bf': 'Apple, Inc.',
-  '1c:59:9b': 'Apple, Inc.',
-  '40:a3:cc': 'Apple, Inc.',
-  'fc:f1:52': 'Sony',
-  '94:9f:3e': 'Sonos, Inc.',
-  'd8:43:ae': 'Valve',
-  '48:3f:da': 'Shelly / Allterco',
-  'dc:a6:32': 'Raspberry Pi',
-  'b8:27:eb': 'Raspberry Pi',
-  'e4:5f:01': 'Raspberry Pi',
-  '28:cd:c1': 'Raspberry Pi',
-  '70:4f:57': 'TP-Link',
-  '50:c7:bf': 'TP-Link',
-  'b0:be:76': 'TP-Link',
-  '18:e8:29': 'Ubiquiti',
-  '74:83:c2': 'Ubiquiti',
-  'f0:9f:c2': 'Ubiquiti',
-};
-
-function lookupVendor(mac) {
-  if (!mac || typeof mac !== 'string') return 'Network Device';
-  const prefix = mac.toLowerCase().slice(0, 8);
-  return OUI_VENDORS[prefix] || 'Network Device';
-}
 
 let askpassScriptPath = null;
 let hasSshpass = null;
@@ -314,10 +284,19 @@ export function parseIwScanOutput(scanTxt, hostConfig, iwInterfaces = new Map())
       return;
     }
     const ifaceInfo = iwInterfaces.get(currentIface) || {};
+    const ssidStr = currentBss.ssid || '(Hidden Network)';
+    const { manufacturer, bssidManufacturer, ssidManufacturer } = resolveWirelessNetworkManufacturer({
+      bssid: currentBss.bssid,
+      ssid: ssidStr,
+      wpsManufacturer: currentBss.wpsManufacturer || '',
+    });
     neighbors.push({
       bssid: currentBss.bssid.toLowerCase(),
-      ssid: currentBss.ssid || '(Hidden Network)',
+      ssid: ssidStr,
       isHidden: !currentBss.ssid,
+      manufacturer,
+      bssidManufacturer,
+      ssidManufacturer,
       band,
       channel,
       freqMhz: freqMhz || channelToCenterFreq(band, channel),
@@ -417,6 +396,15 @@ export function parseIwScanOutput(scanTxt, hostConfig, iwInterfaces = new Map())
 
     if (/^(RSN|WPA):/i.test(line)) {
       currentBss.security = line.toUpperCase().startsWith('RSN') ? 'WPA2/WPA3' : 'WPA';
+      continue;
+    }
+
+    const wpsMfgMatch = line.match(/^\*\s*Manufacturer:\s*(.+)$/i);
+    if (wpsMfgMatch) {
+      const val = wpsMfgMatch[1].trim();
+      if (val && val.length > 1) {
+        currentBss.wpsManufacturer = val;
+      }
     }
   }
 
@@ -429,7 +417,7 @@ export async function scanHostWirelessNetworks(hostConfig) {
     'echo "===IWDEV==="',
     'iw dev 2>/dev/null',
     'echo "===SCAN==="',
-    'seen_phys=""; for iface in $(iw dev 2>/dev/null | awk \'$1=="Interface"{print $2}\'); do phy=$(iw dev "$iface" info 2>/dev/null | awk \'$1=="wiphy"{print $2}\'); case " $seen_phys " in *" $phy "*) continue ;; esac; seen_phys="$seen_phys $phy"; echo "---IFACE:$iface---"; (iw dev "$iface" scan ap-force 2>/dev/null || iw dev "$iface" scan 2>/dev/null || iw dev "$iface" scan dump 2>/dev/null) | grep -E "^(BSS |\\tfreq:|\\tsignal:|\\tSSID:|\\tDS Parameter set:|\\t\\* primary channel:|\\t\\* channel width:|\\t\\* STA channel width:|\\tRSN:|\\tWPA:|\\tlast seen:)"; done',
+    'seen_phys=""; for iface in $(iw dev 2>/dev/null | awk \'$1=="Interface"{print $2}\'); do phy=$(iw dev "$iface" info 2>/dev/null | awk \'$1=="wiphy"{print $2}\'); case " $seen_phys " in *" $phy "*) continue ;; esac; seen_phys="$seen_phys $phy"; echo "---IFACE:$iface---"; (iw dev "$iface" scan ap-force 2>/dev/null || iw dev "$iface" scan 2>/dev/null || iw dev "$iface" scan dump 2>/dev/null) | grep -E "^(BSS |\\tfreq:|\\tsignal:|\\tSSID:|\\tDS Parameter set:|\\t\\* primary channel:|\\t\\* channel width:|\\t\\* STA channel width:|\\t\\* Manufacturer:|\\tRSN:|\\tWPA:|\\tlast seen:)"; done',
   ].join('; ');
 
   const { stdout } = await execSshCommand(hostConfig, scanScript, { timeoutMs: 25000 });
@@ -483,7 +471,7 @@ export async function pollRealHost(hostConfig, prevSample = null) {
     'echo "===SURVEY==="',
     'for iface in $(iw dev 2>/dev/null | awk \'$1=="Interface"{print $2}\'); do echo "---IFACE:$iface---"; iw dev "$iface" survey dump 2>/dev/null | awk \'/Survey data from/{if(inuse)exit; next} /\\[in use\\]/{inuse=1; print; next} inuse{print}\'; done',
     'echo "===SCANDUMP==="',
-    'seen_phys=""; for iface in $(iw dev 2>/dev/null | awk \'$1=="Interface"{print $2}\'); do phy=$(iw dev "$iface" info 2>/dev/null | awk \'$1=="wiphy"{print $2}\'); case " $seen_phys " in *" $phy "*) continue ;; esac; seen_phys="$seen_phys $phy"; echo "---IFACE:$iface---"; iw dev "$iface" scan dump 2>/dev/null | grep -E "^(BSS |\\tfreq:|\\tsignal:|\\tSSID:|\\tDS Parameter set:|\\t\\* primary channel:|\\t\\* channel width:|\\t\\* STA channel width:|\\tRSN:|\\tWPA:|\\tlast seen:)"; done',
+    'seen_phys=""; for iface in $(iw dev 2>/dev/null | awk \'$1=="Interface"{print $2}\'); do phy=$(iw dev "$iface" info 2>/dev/null | awk \'$1=="wiphy"{print $2}\'); case " $seen_phys " in *" $phy "*) continue ;; esac; seen_phys="$seen_phys $phy"; echo "---IFACE:$iface---"; iw dev "$iface" scan dump 2>/dev/null | grep -E "^(BSS |\\tfreq:|\\tsignal:|\\tSSID:|\\tDS Parameter set:|\\t\\* primary channel:|\\t\\* channel width:|\\t\\* STA channel width:|\\t\\* Manufacturer:|\\tRSN:|\\tWPA:|\\tlast seen:)"; done',
     'echo "===STATIONS==="',
     'for iface in $(iw dev 2>/dev/null | awk \'$1=="Interface"{print $2}\'); do echo "---IFACE:$iface---"; iw dev "$iface" station dump 2>/dev/null; done',
     'echo "===DHCP==="',
@@ -694,6 +682,7 @@ export function parseSshTelemetryOutput(hostConfig, stdout, prevSample = null) {
     if (ifaceMatch) {
       currentIface = {
         ifname: ifaceMatch[1],
+        bssid: null,
         ssid: null,
         channel: null,
         freqMhz: null,
@@ -707,6 +696,11 @@ export function parseSshTelemetryOutput(hostConfig, stdout, prevSample = null) {
     }
     if (!currentIface) continue;
 
+    const addrMatch = line.match(/^addr\s+(([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2})/);
+    if (addrMatch) {
+      currentIface.bssid = addrMatch[1].toLowerCase();
+      continue;
+    }
     const ssidMatch = line.match(/^ssid\s+(.+)$/);
     if (ssidMatch) {
       currentIface.ssid = ssidMatch[1].trim();
@@ -945,7 +939,7 @@ export function parseSshTelemetryOutput(hostConfig, stdout, prevSample = null) {
       mac: sMac,
       ip: resolvedIp,
       hostname: resolvedHostname,
-      vendor: lookupVendor(sMac),
+      vendor: lookupVendor(sMac, resolvedHostname),
       connectionType: connType,
       connectedTo: {
         hostId: hostConfig.id,
@@ -1036,7 +1030,7 @@ export function parseSshTelemetryOutput(hostConfig, stdout, prevSample = null) {
         mac: dMac,
         ip: dhcp.ip,
         hostname: dhcp.hostname,
-        vendor: lookupVendor(dMac),
+        vendor: lookupVendor(dMac, dhcp.hostname),
         connectionType: 'wired',
         connectedTo: {
           hostId: hostConfig.id,
@@ -1132,12 +1126,24 @@ export function parseSshTelemetryOutput(hostConfig, stdout, prevSample = null) {
       }
     }
 
+    const radioBssid = ifaceInfo.bssid || mac || '';
+    const radioSsid = ifaceInfo.ssid || 'OpenWrt';
+    const radioMfgInfo = resolveWirelessNetworkManufacturer({
+      bssid: radioBssid,
+      ssid: radioSsid,
+      wpsManufacturer: resolveMacManufacturer(mac) || resolveSsidManufacturer(model) || '',
+    });
+
     radios.push({
       id: `radio-${hostConfig.id}-${ifaceInfo.ifname}`,
       hostId: hostConfig.id,
       hostName: hostConfig.name || hostname,
       device: ifaceInfo.ifname,
-      ssid: ifaceInfo.ssid || 'OpenWrt',
+      bssid: radioBssid,
+      ssid: radioSsid,
+      manufacturer: radioMfgInfo.manufacturer,
+      bssidManufacturer: radioMfgInfo.bssidManufacturer,
+      ssidManufacturer: radioMfgInfo.ssidManufacturer,
       band: ifaceInfo.band,
       channel: ifaceInfo.channel,
       centerFreqMhz: ifaceInfo.centerFreqMhz || channelToCenterFreq(ifaceInfo.band, ifaceInfo.channel),
@@ -1166,6 +1172,7 @@ export function parseSshTelemetryOutput(hostConfig, stdout, prevSample = null) {
     online: true,
     hostname,
     model,
+    vendor: lookupVendor(mac, model),
     firmware,
     uptimeSec,
     cpuUsagePct,

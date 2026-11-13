@@ -77,7 +77,7 @@ export class DataTable {
 
     // Build Table HTML
     let html = `
-      <div class="table-responsive">
+      <div class="table-responsive" tabindex="0" role="region" aria-label="Network Data Table">
         <table class="data-table">
           <thead>
             <tr>
@@ -90,7 +90,7 @@ export class DataTable {
           sortIcon = this.sortAsc ? ' ↑' : ' ↓';
         }
       }
-      html += `<th data-key="${col.key}" class="${col.sortable ? 'sortable' : ''}">${col.label}${sortIcon}</th>`;
+      html += `<th scope="col" data-key="${col.key}" class="${col.sortable ? 'sortable' : ''}">${col.label}${sortIcon}</th>`;
     }
 
     html += `

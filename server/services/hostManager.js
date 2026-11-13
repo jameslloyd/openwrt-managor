@@ -4,6 +4,7 @@ import { simulator } from './simulator.js';
 import { testHostConnection, pollRealHost, scanHostWirelessNetworks } from './realUbus.js';
 import { backupEngine } from './backupEngine.js';
 import { triangulateBandNeighbors } from './wifiEngine.js';
+import { lookupVendor, resolveWirelessNetworkManufacturer } from './ouiVendor.js';
 
 export function sanitizeHost(host) {
   if (!host) return null;
@@ -101,11 +102,15 @@ export class HostManager {
     host.status = 'online';
     if (telemetry.hostname) host.hostname = telemetry.hostname;
     if (telemetry.model) host.model = telemetry.model;
+    if (telemetry.vendor) host.vendor = telemetry.vendor;
     if (telemetry.firmware) host.firmware = telemetry.firmware;
     if (typeof telemetry.uptimeSec === 'number') host.uptimeSec = telemetry.uptimeSec;
     if (typeof telemetry.cpuUsagePct === 'number') host.cpuUsagePct = telemetry.cpuUsagePct;
     if (typeof telemetry.memUsagePct === 'number') host.memUsagePct = telemetry.memUsagePct;
     if (telemetry.mac) host.mac = telemetry.mac;
+    if (!host.vendor && (host.mac || host.model)) {
+      host.vendor = lookupVendor(host.mac, host.model);
+    }
     host.rxRateBps = telemetry.rxRateBps || 0;
     host.txRateBps = telemetry.txRateBps || 0;
     if (telemetry.wan) host.wan = telemetry.wan;
@@ -292,12 +297,17 @@ export class HostManager {
           c.dhcpLeaseRemainingSec ||
           dhcp.dhcpLeaseRemainingSec ||
           (existing ? existing.dhcpLeaseRemainingSec || 0 : 0);
+        const resolvedVendor =
+          c.vendor && c.vendor !== 'Unknown Manufacturer' && c.vendor !== 'Private / Randomized MAC' && c.vendor !== 'Network Device'
+            ? c.vendor
+            : lookupVendor(macLower, resolvedHostname);
 
         if (!existing || (existing.connectionType === 'wired' && c.connectionType !== 'wired')) {
           byMac.set(macLower, {
             ...c,
             ip: resolvedIp,
             hostname: resolvedHostname,
+            vendor: resolvedVendor,
             dhcpLeaseRemainingSec: resolvedLeaseRemaining,
             signalHistory: this.signalHistoryByMac.get(c.mac) || this.signalHistoryByMac.get(macLower) || [],
             roamingLog: [],
@@ -313,6 +323,12 @@ export class HostManager {
             resolvedHostname.toLowerCase() !== macLower
           ) {
             existing.hostname = resolvedHostname;
+          }
+          if (
+            (!existing.vendor || existing.vendor === 'Unknown Manufacturer' || existing.vendor === 'Private / Randomized MAC') &&
+            resolvedVendor
+          ) {
+            existing.vendor = resolvedVendor;
           }
           if (!existing.dhcpLeaseRemainingSec && resolvedLeaseRemaining) {
             existing.dhcpLeaseRemainingSec = resolvedLeaseRemaining;
@@ -356,10 +372,17 @@ export class HostManager {
         const map = neighborsByBandBssid[n.band];
         const bssidKey = n.bssid.toLowerCase();
         if (!map.has(bssidKey)) {
+          const mfgInfo = resolveWirelessNetworkManufacturer({
+            bssid: bssidKey,
+            ssid: n.ssid || '(Hidden Network)',
+          });
           map.set(bssidKey, {
             bssid: bssidKey,
             ssid: n.ssid || '(Hidden Network)',
             isHidden: Boolean(n.isHidden),
+            manufacturer: n.manufacturer || mfgInfo.manufacturer,
+            bssidManufacturer: n.bssidManufacturer || mfgInfo.bssidManufacturer,
+            ssidManufacturer: n.ssidManufacturer || mfgInfo.ssidManufacturer,
             isManagedFleet: managedSsidsByBandChan.has(`${n.band}:${n.channel}:${(n.ssid || '').toLowerCase()}`),
             band: n.band,
             channel: n.channel,
@@ -378,6 +401,13 @@ export class HostManager {
         if (entry.isHidden && n.ssid && !n.isHidden) {
           entry.ssid = n.ssid;
           entry.isHidden = false;
+          const updatedMfg = resolveWirelessNetworkManufacturer({
+            bssid: bssidKey,
+            ssid: entry.ssid,
+          });
+          entry.manufacturer = updatedMfg.manufacturer;
+          entry.bssidManufacturer = updatedMfg.bssidManufacturer;
+          entry.ssidManufacturer = updatedMfg.ssidManufacturer;
         }
         if ((n.widthMhz || 20) > entry.widthMhz) {
           entry.widthMhz = n.widthMhz;

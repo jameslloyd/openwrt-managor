@@ -6,7 +6,7 @@
 import { store } from '../store.js';
 import { api } from '../api.js';
 import { toast } from './toast.js';
-import { formatBytes, formatBps, formatUptime, formatRssi, formatMac, escapeHtml } from '../utils/formatters.js';
+import { formatBytes, formatBps, formatUptime, formatRssi, formatMac, escapeHtml, resolveClientSideVendor } from '../utils/formatters.js';
 import { renderIcon } from '../utils/icons.js';
 
 let drawerEl = null;
@@ -99,7 +99,11 @@ export function renderNodeDetails(node) {
           <div><span style="color:var(--color-text-muted);">Model:</span> <div style="font-weight:600;">${escapeHtml(node.model || 'OpenWrt Device')}</div></div>
           <div><span style="color:var(--color-text-muted);">Role:</span> <div style="font-weight:600; text-transform: capitalize;">${escapeHtml(node.type || 'Node')}</div></div>
           <div><span style="color:var(--color-text-muted);">IP Address:</span> <div class="font-mono">${escapeHtml(node.ip || 'N/A')}</div></div>
-          <div><span style="color:var(--color-text-muted);">MAC Address:</span> <div class="font-mono">${formatMac(node.mac) || 'N/A'}</div></div>
+          <div>
+            <span style="color:var(--color-text-muted);">MAC Address:</span>
+            <div class="font-mono">${formatMac(node.mac) || 'N/A'}</div>
+            ${node.mac ? `<div style="font-size: 11px; color: var(--color-text-muted);">${escapeHtml(resolveClientSideVendor(node.mac, node.model || node.label, node.vendor))}</div>` : ''}
+          </div>
         </div>
       </div>
 
@@ -213,8 +217,12 @@ export function renderClientDetails(client) {
         <div class="drawer-section-title">Device Identity</div>
         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: 12.5px;">
           <div><span style="color:var(--color-text-muted);">IP Address:</span> <div class="font-mono" style="font-weight:600;">${escapeHtml(client.ip)}</div></div>
-          <div><span style="color:var(--color-text-muted);">MAC Address:</span> <div class="font-mono">${formatMac(client.mac)}</div></div>
-          <div><span style="color:var(--color-text-muted);">Manufacturer:</span> <div>${escapeHtml(client.vendor || 'Unknown')}</div></div>
+          <div>
+            <span style="color:var(--color-text-muted);">MAC Address:</span>
+            <div class="font-mono">${formatMac(client.mac)}</div>
+            <div style="font-size: 11px; color: var(--color-text-muted);">${escapeHtml(resolveClientSideVendor(client.mac, client.hostname, client.vendor))}</div>
+          </div>
+          <div><span style="color:var(--color-text-muted);">Manufacturer:</span> <div>${escapeHtml(resolveClientSideVendor(client.mac, client.hostname, client.vendor))}</div></div>
           <div><span style="color:var(--color-text-muted);">Connected AP:</span> <div style="font-weight:600;">${escapeHtml(client.connectedTo?.hostName || client.connectedTo?.hostId || 'Gateway')}</div></div>
         </div>
 

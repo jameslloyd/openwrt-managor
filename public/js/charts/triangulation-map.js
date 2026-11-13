@@ -5,7 +5,7 @@
  * RSSI log-distance path loss rings, and multi-AP signal power vectors.
  */
 
-import { escapeHtml } from '../utils/formatters.js';
+import { escapeHtml, resolveClientSideVendor } from '../utils/formatters.js';
 
 export class TriangulationMap {
   constructor({ container, band = '5GHz', onAnchorMove = null, onSelectNeighbor = null }) {
@@ -228,6 +228,7 @@ export class TriangulationMap {
             : 'Proximity Ring (1 AP)';
       const shortSsid =
         nb.ssid && nb.ssid.length > 18 ? `${nb.ssid.slice(0, 16)}…` : nb.ssid || '(Hidden)';
+      const mfgLabel = nb.manufacturer || nb.bssidManufacturer || resolveClientSideVendor(nb.bssid, nb.ssid);
 
       foreignNodesHtml += `
         <g class="triangulation-foreign-node ${isSelected ? 'selected' : ''}"
@@ -235,7 +236,7 @@ export class TriangulationMap {
            tabindex="0"
            role="button"
            aria-pressed="${isSelected ? 'true' : 'false'}"
-           aria-label="Foreign AP ${escapeHtml(nb.ssid)}, BSSID ${escapeHtml(nb.bssid.toUpperCase())}, Channel ${nb.channel}, Peak ${sig} dBm, ${methodLabel}, ${escapeHtml(tri.bearingLabel || '')}"
+           aria-label="Foreign AP ${escapeHtml(nb.ssid)}, Manufacturer ${escapeHtml(mfgLabel)}, BSSID ${escapeHtml(nb.bssid.toUpperCase())}, Channel ${nb.channel}, Peak ${sig} dBm, ${methodLabel}, ${escapeHtml(tri.bearingLabel || '')}"
            transform="translate(${sx.toFixed(1)}, ${sy.toFixed(1)})">
           ${
             isSelected
@@ -334,6 +335,9 @@ export class TriangulationMap {
           </span>
           <span style="font-size: 13px; font-weight: 700; color: var(--color-text-primary);">
             ${escapeHtml(selectedNeighbor.ssid)}
+          </span>
+          <span class="status-pill">
+            ${escapeHtml(selectedNeighbor.manufacturer || selectedNeighbor.bssidManufacturer || resolveClientSideVendor(selectedNeighbor.bssid, selectedNeighbor.ssid))}
           </span>
           <span class="font-mono" style="font-size: 12px; color: var(--color-text-secondary);">
             (${escapeHtml(selectedNeighbor.bssid.toUpperCase())} • Ch ${selectedNeighbor.channel})
