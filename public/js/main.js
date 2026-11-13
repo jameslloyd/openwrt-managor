@@ -8,7 +8,7 @@ import { api } from './api.js';
 import { initDrawer, closeDrawer } from './components/drawer.js';
 import { renderDashboard } from './views/dashboard.js';
 import { renderTopology, updateTopologyData } from './views/topology.js';
-import { renderClients } from './views/clients.js';
+import { renderClients, updateClientsData } from './views/clients.js';
 import { renderWifi } from './views/wifi.js';
 import { renderBackups } from './views/backups.js';
 import { renderHosts } from './views/hosts.js';
@@ -176,6 +176,10 @@ function initApp() {
     const activeRoute = getActiveRoute();
     if (activeRoute === 'topology') {
       updateTopologyData();
+    } else if (activeRoute === 'clients') {
+      updateClientsData();
+    } else if (!document.querySelector('dialog[open]')) {
+      dispatchView();
     }
   });
 

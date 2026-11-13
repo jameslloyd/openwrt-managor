@@ -189,6 +189,15 @@ export function renderClients(container) {
   });
 }
 
+export function updateClientsData() {
+  if (!tableInstance) return;
+  tableInstance.setRows(getFilteredClients());
+  const allChip = document.querySelector('.chip-btn[data-filter="all"]');
+  if (allChip) {
+    allChip.textContent = `All (${store.state.clients.length})`;
+  }
+}
+
 function getFilteredClients() {
   const { clients } = store.state;
   return clients.filter(c => {

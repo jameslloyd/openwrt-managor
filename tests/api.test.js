@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import { createServer } from '../server/index.js';
 import { hostManager } from '../server/services/hostManager.js';
+import { parseSshTelemetryOutput } from '../server/services/realUbus.js';
 
 let server;
 let baseUrl;
@@ -362,4 +363,70 @@ test('API: Adding a real host removes all demo data (hosts, backups, clients, wi
 
   // Cleanup: delete the real host
   await fetch(`${baseUrl}/api/hosts/${realHost.id}`, { method: 'DELETE' });
+});
+
+test('SSH Telemetry Parser: extracts real uptime, CPU%, RAM%, model, firmware, radios, and clients from OpenWrt output', () => {
+  const sampleSshOutput = [
+    '===BOARD===',
+    JSON.stringify({
+      hostname: 'OpenWrt-Flint2',
+      model: 'GL.iNet GL-MT6000',
+      release: {
+        distribution: 'OpenWrt',
+        version: '23.05.4',
+        revision: 'r24012-d811c7cee8',
+        description: 'OpenWrt 23.05.4 r24012-d811c7cee8',
+      },
+    }),
+    '===UPTIME===',
+    '172845.62 684120.11',
+    '===MEMINFO===',
+    'MemTotal:        1024000 kB',
+    'MemFree:          400000 kB',
+    'MemAvailable:     768000 kB',
+    'Buffers:           50000 kB',
+    'Cached:           318000 kB',
+    '===CPUSTAT1===',
+    'cpu  1000 0 500 8500 0 0 0 0',
+    '===CPUSTAT2===',
+    'cpu  1025 0 515 8560 0 0 0 0',
+    '===MAC===',
+    '94:83:c4:aa:bb:cc',
+    '===IWDEV===',
+    'phy#1',
+    '\tInterface phy1-ap0',
+    '\t\tssid Homelab-5G',
+    '\t\tchannel 36 (5180 MHz), width: 80 MHz, center1: 5210 MHz',
+    '\t\ttxpower 23.00 dBm',
+    '===STATIONS===',
+    '---IFACE:phy1-ap0---',
+    'Station a4:83:e7:11:22:33 (on phy1-ap0)',
+    '\trx bytes:\t52428800',
+    '\ttx bytes:\t10485760',
+    '\tsignal:\t\t-51 [-53, -54] dBm',
+    '\ttx bitrate:\t1201.0 MBit/s 80MHz HE-MCS 11',
+    '\trx bitrate:\t866.7 MBit/s 80MHz HE-MCS 9',
+    '===DHCP===',
+    `${Math.floor(Date.now() / 1000) + 7200} a4:83:e7:11:22:33 192.168.1.142 MacBook-Air 01:a4:83:e7:11:22:33`,
+    '===ARP===',
+    'IP address       HW type     Flags       HW address            Mask     Device',
+    '192.168.1.142    0x1         0x2         a4:83:e7:11:22:33     *        br-lan',
+  ].join('\n');
+
+  const parsed = parseSshTelemetryOutput({ id: 'node-ap-test', name: 'Flint 2 AP' }, sampleSshOutput);
+  assert.equal(parsed.online, true);
+  assert.equal(parsed.hostname, 'OpenWrt-Flint2');
+  assert.equal(parsed.model, 'GL.iNet GL-MT6000');
+  assert.equal(parsed.firmware, 'OpenWrt 23.05.4 r24012-d811c7cee8');
+  assert.equal(parsed.uptimeSec, 172845);
+  assert.equal(parsed.memUsagePct, 25); // (1024000 - 768000) / 1024000 = 25%
+  assert.equal(parsed.cpuUsagePct, 40); // dTotal=100, dIdle=60 -> 40%
+  assert.equal(parsed.mac, '94:83:c4:aa:bb:cc');
+  assert.equal(parsed.radios.length, 1);
+  assert.equal(parsed.radios[0].band, '5GHz');
+  assert.equal(parsed.radios[0].channel, 36);
+  assert.equal(parsed.clients.length, 1);
+  assert.equal(parsed.clients[0].ip, '192.168.1.142');
+  assert.equal(parsed.clients[0].hostname, 'MacBook-Air');
+  assert.equal(parsed.clients[0].signalDbm, -51);
 });

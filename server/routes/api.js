@@ -288,16 +288,7 @@ export async function handleApiRequest(req, res, pathname, searchParams) {
     // WiFi Spectrum & Interference APIs
     // -------------------------------------------------------------
     if ((pathname === '/api/wifi/channels' || pathname === '/api/wifi/interference') && req.method === 'GET') {
-      const hosts = await hostManager.getAllHosts();
-      const simHostIds = new Set(hosts.filter((h) => h.isSimulated).map((h) => h.id));
-      const rawBands = simulator.getWifiBands();
-      const bands = {};
-      for (const [bandName, bandInfo] of Object.entries(rawBands)) {
-        bands[bandName] = {
-          ...bandInfo,
-          radios: (bandInfo.radios || []).filter((r) => simHostIds.has(r.hostId)),
-        };
-      }
+      const bands = hostManager.getLiveWifiBands();
 
       if (pathname === '/api/wifi/channels') {
         sendJson(res, 200, { bands });

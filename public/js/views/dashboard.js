@@ -193,11 +193,12 @@ export function renderDashboard(container) {
           model: host.model,
           status: host.status,
           metrics: {
-            cpuUsagePct: host.cpuUsagePct,
-            memUsagePct: host.memUsagePct,
-            clientCount: host.clientCount,
-            rxRateBps: 8200000,
-            txRateBps: 2100000
+            cpuUsagePct: host.cpuUsagePct ?? 0,
+            memUsagePct: host.memUsagePct ?? 0,
+            uptimeSec: host.uptimeSec ?? 0,
+            clientCount: host.clientCount ?? 0,
+            rxRateBps: host.rxRateBps ?? 0,
+            txRateBps: host.txRateBps ?? 0
           }
         });
       }
@@ -223,15 +224,19 @@ export function renderDashboard(container) {
 
 function renderHostCard(host) {
   const isOnline = host.status === 'online';
-  const cpuPct = host.cpuUsagePct ?? 10;
-  const memPct = host.memUsagePct ?? 30;
+  const cpuPct = host.cpuUsagePct ?? 0;
+  const memPct = host.memUsagePct ?? 0;
+  const radios = Array.isArray(host.radios) ? host.radios : [];
+  const has2g = radios.some(r => r.band === '2.4GHz');
+  const has5g = radios.some(r => r.band === '5GHz');
+  const has6g = radios.some(r => r.band === '6GHz');
 
   return `
     <div class="node-card">
       <div class="node-card-header">
         <div>
           <div class="node-name">${escapeHtml(host.name || host.hostname || host.id)}</div>
-          <div class="node-model">${escapeHtml(host.model || 'OpenWrt Hardware')}</div>
+          <div class="node-model">${escapeHtml(host.model || 'OpenWrt Device')}</div>
         </div>
         <span class="status-pill ${isOnline ? 'online' : 'offline'}">
           <span class="status-dot ${isOnline ? 'online' : 'offline'}"></span>
@@ -240,7 +245,7 @@ function renderHostCard(host) {
       </div>
 
       <div class="node-meta-row">
-        <span>IP: ${host.ip}</span>
+        <span>IP: ${escapeHtml(host.ip)}</span>
         <span>•</span>
         <span>Uptime: ${formatUptime(host.uptimeSec)}</span>
       </div>
@@ -262,9 +267,10 @@ function renderHostCard(host) {
 
       <div style="display: flex; align-items: center; justify-content: space-between; font-size: 12px;">
         <div class="node-radios-pills">
-          <span class="radio-pill band-2g">2.4G</span>
-          <span class="radio-pill band-5g">5G</span>
-          ${host.role === 'gateway' ? '<span class="radio-pill band-wired">Trunk 2.5G</span>' : ''}
+          ${has2g ? '<span class="radio-pill band-2g">2.4G</span>' : ''}
+          ${has5g ? '<span class="radio-pill band-5g">5G</span>' : ''}
+          ${has6g ? '<span class="radio-pill band-6g">6G</span>' : ''}
+          ${!has2g && !has5g && !has6g ? `<span class="radio-pill band-wired" style="text-transform: capitalize;">${escapeHtml(host.role || 'Node')}</span>` : ''}
         </div>
         <span style="color: var(--color-text-secondary);">${host.clientCount ?? 0} Clients</span>
       </div>

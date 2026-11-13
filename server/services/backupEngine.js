@@ -6,6 +6,7 @@ import { writeJsonAtomic, readJson } from '../storage/atomic.js';
 import { extractTarGz, getFileContentFromTarGz, computeSha256 } from './tarUci.js';
 import { computeDiff } from './diffEngine.js';
 import { simulator } from './simulator.js';
+import { execSshCommand } from './realUbus.js';
 
 export class BackupEngine {
   constructor(backupDir = config.backupDir) {
@@ -90,7 +91,44 @@ export class BackupEngine {
     const dbHosts = (await db.getHosts()) || [];
     const host = dbHosts.find((h) => h.id === hostId) || simulator.getHost(hostId);
     const hostName = host ? host.name : hostId;
-    const { archiveBuffer, sha256, sizeBytes, filesCount, filesList } = simulator.generateMockArchive(hostId, versionOffset, host);
+
+    let archiveBuffer = null;
+    let sha256 = null;
+    let sizeBytes = 0;
+    let filesCount = 0;
+    let filesList = [];
+
+    // Try pulling a real backup archive over SSH if host is a real router
+    if (host && !host.isSimulated && host.ip) {
+      try {
+        const { stdout } = await execSshCommand(
+          host,
+          'sysupgrade -b - 2>/dev/null || tar -czf - -C / etc/config etc/dropbear etc/passwd etc/shadow etc/hosts 2>/dev/null',
+          { timeoutMs: 15000, binary: true }
+        );
+        if (Buffer.isBuffer(stdout) && stdout.length > 32 && stdout[0] === 0x1f && stdout[1] === 0x8b) {
+          const extracted = extractTarGz(stdout, false);
+          if (Array.isArray(extracted) && extracted.length > 0) {
+            archiveBuffer = stdout;
+            sha256 = computeSha256(archiveBuffer);
+            sizeBytes = archiveBuffer.length;
+            filesCount = extracted.length;
+            filesList = extracted.map((f) => f.path);
+          }
+        }
+      } catch {
+        // Fallback to generated archive if SSH backup fails (e.g. offline test hosts)
+      }
+    }
+
+    if (!archiveBuffer) {
+      const mock = simulator.generateMockArchive(hostId, versionOffset, host);
+      archiveBuffer = mock.archiveBuffer;
+      sha256 = mock.sha256;
+      sizeBytes = mock.sizeBytes;
+      filesCount = mock.filesCount;
+      filesList = mock.filesList;
+    }
 
     const resolvedBackupDir = path.resolve(this.backupDir);
     const safeHostDir = path.resolve(resolvedBackupDir, hostId);

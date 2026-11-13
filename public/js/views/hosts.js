@@ -99,9 +99,9 @@ export function renderHosts(container) {
             <div class="form-group">
               <label class="form-label" for="host-protocol-select">Connection Protocol</label>
               <select id="host-protocol-select" class="form-select">
-                <option value="ubus_http" selected>ubus HTTP (Port 80)</option>
+                <option value="ssh" selected>Direct SSH (Port 22)</option>
+                <option value="ubus_http">ubus HTTP (Port 80)</option>
                 <option value="ubus_https">ubus HTTPS (Port 443)</option>
-                <option value="ssh">Direct SSH (Port 22)</option>
               </select>
             </div>
             <div class="form-group">
@@ -226,9 +226,12 @@ export function renderHosts(container) {
           model: host.model,
           status: host.status,
           metrics: {
-            cpuUsagePct: host.cpuUsagePct,
-            memUsagePct: host.memUsagePct,
-            clientCount: host.clientCount
+            cpuUsagePct: host.cpuUsagePct ?? 0,
+            memUsagePct: host.memUsagePct ?? 0,
+            uptimeSec: host.uptimeSec ?? 0,
+            rxRateBps: host.rxRateBps ?? 0,
+            txRateBps: host.txRateBps ?? 0,
+            clientCount: host.clientCount ?? 0
           }
         });
       }
@@ -244,9 +247,11 @@ export function renderHosts(container) {
         document.getElementById('host-name-input').value = host.name || host.hostname || '';
         document.getElementById('host-ip-input').value = host.ip || '';
         document.getElementById('host-role-select').value = host.role || 'ap';
-        document.getElementById('host-protocol-select').value = host.protocol || 'ubus_http';
+        document.getElementById('host-protocol-select').value = host.protocol || 'ssh';
         document.getElementById('host-username-input').value = host.username || 'root';
-        document.getElementById('host-password-input').value = '';
+        const passInput = document.getElementById('host-password-input');
+        passInput.value = '';
+        passInput.placeholder = host.hasPassword ? 'Leave blank to keep saved password' : 'Router password or ubus token';
         document.getElementById('host-modal-title').textContent = `Edit Host: ${host.name || host.id}`;
         const fb = document.getElementById('host-test-feedback');
         if (fb) fb.style.display = 'none';

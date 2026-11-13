@@ -2,8 +2,8 @@ FROM node:20-alpine AS runner
 
 WORKDIR /app
 
-# Install openssh-client and tar/gzip utilities for real router communications
-RUN apk add --no-cache openssh-client tar gzip tzdata
+# Install openssh-client, sshpass, and tar/gzip utilities for real router communications
+RUN apk add --no-cache openssh-client sshpass tar gzip tzdata
 
 # Set production environment
 ENV NODE_ENV=production

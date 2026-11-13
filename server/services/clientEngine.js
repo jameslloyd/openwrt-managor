@@ -1,21 +1,34 @@
-import { simulator } from './simulator.js';
 import { hostManager } from './hostManager.js';
 import { db } from '../storage/db.js';
 
 export class ClientEngine {
   async getClients(filter = {}) {
-    const hosts = await hostManager.getAllHosts();
-    const simHostIds = new Set(hosts.filter((h) => h.isSimulated).map((h) => h.id));
-    if (simHostIds.size === 0) {
-      return [];
+    let list = hostManager.getLiveClients();
+
+    if (filter.q) {
+      const q = filter.q.toLowerCase();
+      list = list.filter(
+        (c) =>
+          (c.hostname && c.hostname.toLowerCase().includes(q)) ||
+          (c.ip && c.ip.includes(q)) ||
+          (c.mac && c.mac.toLowerCase().includes(q)) ||
+          (c.vendor && c.vendor.toLowerCase().includes(q))
+      );
+    }
+    if (filter.hostId) {
+      list = list.filter((c) => c.connectedTo && c.connectedTo.hostId === filter.hostId);
+    }
+    if (filter.type) {
+      list = list.filter((c) => c.connectionType === filter.type);
+    }
+    if (filter.vlan) {
+      const vlanNum = parseInt(filter.vlan, 10);
+      list = list.filter((c) => c.vlan === vlanNum);
     }
 
-    const clients = simulator
-      .getClients(filter)
-      .filter((c) => !c.connectedTo?.hostId || simHostIds.has(c.connectedTo.hostId));
     const aliases = (await db.getClientAliases()) || {};
 
-    return clients.map((c) => {
+    return list.map((c) => {
       const alias = aliases[c.mac.toLowerCase()];
       return {
         ...c,
@@ -26,20 +39,14 @@ export class ClientEngine {
   }
 
   async getClientByMac(mac) {
-    const hosts = await hostManager.getAllHosts();
-    const simHostIds = new Set(hosts.filter((h) => h.isSimulated).map((h) => h.id));
-    if (simHostIds.size === 0) {
-      return null;
-    }
-
-    const client = simulator.getClientByMac(mac);
+    if (!mac || typeof mac !== 'string') return null;
+    const normalized = mac.toLowerCase().trim();
+    const list = hostManager.getLiveClients();
+    const client = list.find((c) => c.mac.toLowerCase() === normalized);
     if (!client) return null;
-    if (client.connectedTo?.hostId && !simHostIds.has(client.connectedTo.hostId)) {
-      return null;
-    }
 
     const aliases = (await db.getClientAliases()) || {};
-    const alias = aliases[client.mac.toLowerCase()];
+    const alias = aliases[normalized];
 
     return {
       ...client,
@@ -66,7 +73,13 @@ export class ClientEngine {
       delete aliases[normalized];
     }
     await db.saveClientAliases({ ...aliases });
-    return this.getClientByMac(mac);
+    return (
+      (await this.getClientByMac(mac)) || {
+        mac: normalized,
+        nickname: aliases[normalized] || null,
+        displayName: aliases[normalized] || normalized,
+      }
+    );
   }
 }
 
