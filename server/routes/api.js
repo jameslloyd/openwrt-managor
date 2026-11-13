@@ -301,6 +301,7 @@ export async function handleApiRequest(req, res, pathname, searchParams) {
     }
 
     if ((pathname === '/api/wifi/channels' || pathname === '/api/wifi/interference') && req.method === 'GET') {
+      await hostManager.getAllHosts();
       const bands = hostManager.getLiveWifiBands();
 
       if (pathname === '/api/wifi/channels') {

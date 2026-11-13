@@ -3,6 +3,7 @@ import { db } from '../storage/db.js';
 import { simulator } from './simulator.js';
 import { testHostConnection, pollRealHost, scanHostWirelessNetworks } from './realUbus.js';
 import { backupEngine } from './backupEngine.js';
+import { triangulateBandNeighbors } from './wifiEngine.js';
 
 export function sanitizeHost(host) {
   if (!host) return null;
@@ -25,6 +26,7 @@ export class HostManager {
     this.dhcpByHost = new Map(); // hostId -> { [mac]: { ip, hostname, expiresEpoch } }
     this.arpByHost = new Map(); // hostId -> { [mac]: ip }
     this.rdnsByHost = new Map(); // hostId -> { [ip]: hostname }
+    this.hostsCacheById = new Map(); // hostId -> host metadata (name, role, mapPosition)
   }
 
   async init() {
@@ -142,6 +144,13 @@ export class HostManager {
     if (telemetry.sample) {
       this.prevSamples.set(host.id, telemetry.sample);
     }
+    this.hostsCacheById.set(host.id, {
+      id: host.id,
+      name: host.name || host.hostname || host.id,
+      hostname: host.hostname || host.name || host.id,
+      role: host.role || 'ap',
+      mapPosition: host.mapPosition || null,
+    });
     host.lastSeen = new Date().toISOString();
     return true;
   }
@@ -408,6 +417,36 @@ export class HostManager {
       bands[bandName].neighbors = list;
     }
 
+    // Collect active hosts for RF triangulation anchor coordinates
+    const activeHostIds = new Set();
+    for (const [id, radios] of this.liveRadiosByHost.entries()) {
+      if (Array.isArray(radios) && radios.length > 0) activeHostIds.add(id);
+    }
+    for (const [id, neighbors] of this.liveNeighborsByHost.entries()) {
+      if (Array.isArray(neighbors) && neighbors.length > 0) activeHostIds.add(id);
+    }
+    for (const [id, h] of this.hostsCacheById.entries()) {
+      if (h.persisted) activeHostIds.add(id);
+    }
+
+    const activeHosts = [];
+    for (const hostId of activeHostIds) {
+      const cached = this.hostsCacheById.get(hostId);
+      if (cached) {
+        activeHosts.push(cached);
+      } else {
+        const radios = this.liveRadiosByHost.get(hostId) || [];
+        const neighbors = this.liveNeighborsByHost.get(hostId) || [];
+        const hostName =
+          radios[0]?.hostName ||
+          neighbors[0]?.seenByHostName ||
+          hostId;
+        activeHosts.push({ id: hostId, name: hostName, role: 'ap', mapPosition: null });
+      }
+    }
+
+    triangulateBandNeighbors(bands, activeHosts);
+
     return bands;
   }
 
@@ -438,6 +477,22 @@ export class HostManager {
     if (hosts.some((h) => h.isSimulated)) {
       hosts = await this.removeDemoData(hosts);
       await db.saveHosts(hosts);
+    }
+    const persistedIds = new Set(hosts.map((h) => h.id));
+    for (const [id, entry] of this.hostsCacheById.entries()) {
+      if (entry.persisted && !persistedIds.has(id)) {
+        this.hostsCacheById.delete(id);
+      }
+    }
+    for (const h of hosts) {
+      this.hostsCacheById.set(h.id, {
+        id: h.id,
+        name: h.name || h.hostname || h.id,
+        hostname: h.hostname || h.name || h.id,
+        role: h.role || 'ap',
+        mapPosition: h.mapPosition || null,
+        persisted: true,
+      });
     }
     if (sanitized) {
       return hosts.map(sanitizeHost);
@@ -498,6 +553,14 @@ export class HostManager {
     }
 
     hosts.push(newHost);
+    this.hostsCacheById.set(newHost.id, {
+      id: newHost.id,
+      name: newHost.name || newHost.hostname || newHost.id,
+      hostname: newHost.hostname || newHost.name || newHost.id,
+      role: newHost.role || 'ap',
+      mapPosition: newHost.mapPosition || null,
+      persisted: true,
+    });
     await db.saveHosts(hosts);
     return sanitizeHost(newHost);
   }
@@ -527,6 +590,14 @@ export class HostManager {
     }
 
     hosts[idx] = updated;
+    this.hostsCacheById.set(updated.id, {
+      id: updated.id,
+      name: updated.name || updated.hostname || updated.id,
+      hostname: updated.hostname || updated.name || updated.id,
+      role: updated.role || 'ap',
+      mapPosition: updated.mapPosition || null,
+      persisted: true,
+    });
     await db.saveHosts(hosts);
     return sanitizeHost(updated);
   }
@@ -544,6 +615,7 @@ export class HostManager {
     this.dhcpByHost.delete(id);
     this.arpByHost.delete(id);
     this.rdnsByHost.delete(id);
+    this.hostsCacheById.delete(id);
     await db.saveHosts(hosts);
 
     if (deleteBackups) {

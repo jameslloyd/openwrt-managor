@@ -7,11 +7,14 @@ import { store } from '../store.js';
 import { api } from '../api.js';
 import { toast } from '../components/toast.js';
 import { SpectrumChart } from '../charts/spectrum-chart.js';
+import { TriangulationMap } from '../charts/triangulation-map.js';
 import { renderIcon } from '../utils/icons.js';
 import { escapeHtml } from '../utils/formatters.js';
 
 let chartInstance = null;
+let triangulationMapInstance = null;
 let activeBand = '5GHz';
+let selectedNeighborBssid = null;
 let isScanning = false;
 
 export function renderWifi(container) {
@@ -104,9 +107,23 @@ export function renderWifi(container) {
         <div id="wifi-spectrum-chart-mount"></div>
       </div>
 
+      <!-- Foreign AP RF Triangulation & Spatial Radar Map -->
+      <div class="spectrum-chart-wrapper">
+        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; flex-wrap: wrap; gap: 8px;">
+          <div>
+            <h2 style="font-size: 15px; font-weight: 600;" id="wifi-triangulation-heading">Foreign AP RF Triangulation &amp; Spatial Map (${activeBand})</h2>
+            <span style="font-size: 12px; color: var(--color-text-muted);">
+              Triangulates approximate foreign AP locations from multi-AP RSSI path-loss rings • Drag your blue OpenWrt AP nodes to match your physical layout
+            </span>
+          </div>
+          <span class="status-pill info">Log-Distance Path Loss + Weighted Least Squares</span>
+        </div>
+        <div id="wifi-triangulation-map-mount"></div>
+      </div>
+
       <!-- Scanned Neighboring Networks & Relative Signal Strength per Radio -->
       <div id="wifi-neighbors-mount">
-        ${renderNeighborNetworksSection(currentBandData, activeBand)}
+        ${renderNeighborNetworksSection(currentBandData, activeBand, selectedNeighborBssid)}
       </div>
 
       <!-- Channel Congestion Breakdown Table across all radios on this band -->
@@ -158,6 +175,55 @@ export function renderWifi(container) {
     overlappingZones: currentBandCongestion.overlappingZones || [],
   });
 
+  // Instantiate Foreign AP RF Triangulation Map
+  const triMount = container.querySelector('#wifi-triangulation-map-mount');
+  triangulationMapInstance = new TriangulationMap({
+    container: triMount,
+    band: activeBand,
+    onSelectNeighbor: (bssid) => {
+      selectedNeighborBssid = bssid;
+      const allBands = store.state.wifiChannels?.bands || {};
+      const bandData = allBands[activeBand] || { radios: [], neighbors: [], anchors: [] };
+      const neighborsMount = container.querySelector('#wifi-neighbors-mount');
+      if (neighborsMount) {
+        neighborsMount.innerHTML = renderNeighborNetworksSection(bandData, activeBand, selectedNeighborBssid);
+        attachNeighborTableClicks(neighborsMount);
+      }
+    },
+    onAnchorMove: async (hostId, mapPosition) => {
+      try {
+        await api.updateHost(hostId, { mapPosition });
+        const channelsRes = await api.getWifiChannels();
+        if (channelsRes?.bands) {
+          store.setState({ wifiChannels: channelsRes });
+          const updatedBand = channelsRes.bands[activeBand] || currentBandData;
+          triangulationMapInstance.setData({
+            anchors: updatedBand.anchors || [],
+            neighbors: updatedBand.neighbors || [],
+            selectedBssid: selectedNeighborBssid,
+          });
+          selectedNeighborBssid = triangulationMapInstance.selectedBssid;
+          const neighborsMount = container.querySelector('#wifi-neighbors-mount');
+          if (neighborsMount) {
+            neighborsMount.innerHTML = renderNeighborNetworksSection(updatedBand, activeBand, selectedNeighborBssid);
+            attachNeighborTableClicks(neighborsMount);
+          }
+        }
+        toast.success('AP Position Calibrated', `Updated AP anchor coordinates to (${mapPosition.x}m, ${mapPosition.y}m) and re-triangulated foreign APs.`);
+      } catch (err) {
+        toast.error('AP Calibration Failed', err.message || 'Failed to save AP position.');
+      }
+    },
+  });
+
+  triangulationMapInstance.setData({
+    anchors: currentBandData.anchors || [],
+    neighbors: currentBandData.neighbors || [],
+    selectedBssid: selectedNeighborBssid,
+  });
+  selectedNeighborBssid = triangulationMapInstance.selectedBssid;
+  attachNeighborTableClicks(container.querySelector('#wifi-neighbors-mount'));
+
   const switchBand = (newBand) => {
     activeBand = newBand;
     const allBands = store.state.wifiChannels?.bands || {};
@@ -193,6 +259,20 @@ export function renderWifi(container) {
       overlappingZones: bCongestion.overlappingZones || [],
     });
 
+    const triHeading = container.querySelector('#wifi-triangulation-heading');
+    if (triHeading) triHeading.textContent = `Foreign AP RF Triangulation & Spatial Map (${activeBand})`;
+
+    if (triangulationMapInstance) {
+      selectedNeighborBssid = null;
+      triangulationMapInstance.setBand(activeBand);
+      triangulationMapInstance.setData({
+        anchors: bandData.anchors || [],
+        neighbors: bandData.neighbors || [],
+        selectedBssid: null,
+      });
+      selectedNeighborBssid = triangulationMapInstance.selectedBssid;
+    }
+
     const alertMount = container.querySelector('#wifi-interference-mount');
     if (alertMount) {
       alertMount.innerHTML = renderInterferenceWarnings(allWarnings, activeBand, bCongestion);
@@ -200,7 +280,8 @@ export function renderWifi(container) {
 
     const neighborsMount = container.querySelector('#wifi-neighbors-mount');
     if (neighborsMount) {
-      neighborsMount.innerHTML = renderNeighborNetworksSection(bandData, activeBand);
+      neighborsMount.innerHTML = renderNeighborNetworksSection(bandData, activeBand, selectedNeighborBssid);
+      attachNeighborTableClicks(neighborsMount);
     }
 
     const breakdownMount = container.querySelector('#wifi-channel-breakdown-mount');
@@ -272,12 +353,26 @@ function attachSummaryCardClicks(mount, switchBand) {
   });
 }
 
+function attachNeighborTableClicks(mount) {
+  if (!mount) return;
+  mount.querySelectorAll('[data-locate-bssid]').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const bssid = btn.getAttribute('data-locate-bssid');
+      if (bssid && triangulationMapInstance) {
+        triangulationMapInstance.selectNeighbor(bssid);
+        triangulationMapInstance.container?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      }
+    });
+  });
+}
+
 function dbmToQualityPct(signalDbm) {
   const clamped = Math.max(-95, Math.min(-35, Number(signalDbm) || -90));
   return Math.round(((clamped + 95) / 60) * 100);
 }
 
-function renderNeighborNetworksSection(bandData = {}, bandName = '5GHz') {
+function renderNeighborNetworksSection(bandData = {}, bandName = '5GHz', highlightedBssid = null) {
   const neighbors = bandData?.neighbors || [];
   const radios = bandData?.radios || [];
 
@@ -285,9 +380,9 @@ function renderNeighborNetworksSection(bandData = {}, bandName = '5GHz') {
     <div class="spectrum-chart-wrapper" style="padding: var(--space-4);">
       <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; flex-wrap: wrap; gap: 8px;">
         <div>
-          <h2 style="font-size: 15px; font-weight: 600;">Neighboring Networks &amp; Relative Signal Strength (${escapeHtml(bandName)})</h2>
+          <h2 style="font-size: 15px; font-weight: 600;">Neighboring Networks, Relative Signal Strength &amp; Triangulation (${escapeHtml(bandName)})</h2>
           <span style="font-size: 12px; color: var(--color-text-muted);">
-            Compares received signal strength (RSSI in dBm) of nearby networks as heard by each of your OpenWrt radios
+            Compares received signal power (dBm) and estimated path-loss distance per OpenWrt radio to triangulate foreign AP positions
           </span>
         </div>
         <span class="status-pill ${neighbors.length > 0 ? 'info' : ''}">
@@ -301,22 +396,22 @@ function renderNeighborNetworksSection(bandData = {}, bandName = '5GHz') {
         <div class="empty-state" style="padding: var(--space-4);">
           <div class="empty-state-title">No Neighboring Networks Scanned on ${escapeHtml(bandName)} Yet</div>
           <div class="empty-state-desc">
-            Click <strong>Scan Neighboring Networks</strong> above to command all OpenWrt radios to scan surrounding SSIDs and compare their relative signal strength on each AP.
+            Click <strong>Scan Neighboring Networks</strong> above to command all OpenWrt radios to scan surrounding SSIDs, compare their relative signal strength, and triangulate their positions.
           </div>
         </div>
       `
           : `
         <div class="table-responsive">
           <table class="data-table">
-            <caption class="sr-only">Scanned Neighboring Wireless Networks on ${escapeHtml(bandName)} and Relative Signal Strength per Radio</caption>
+            <caption class="sr-only">Scanned Neighboring Wireless Networks on ${escapeHtml(bandName)}, Triangulated Coordinates, and Relative Signal Strength per Radio</caption>
             <thead>
               <tr>
                 <th scope="col">SSID / Network</th>
                 <th scope="col">BSSID</th>
                 <th scope="col">Channel</th>
-                <th scope="col">Security</th>
                 <th scope="col">Peak Signal</th>
-                <th scope="col">Relative Signal Strength per OpenWrt Radio</th>
+                <th scope="col">Triangulated Location</th>
+                <th scope="col">Relative Signal Strength &amp; Distance per OpenWrt Radio</th>
               </tr>
             </thead>
             <tbody>
@@ -327,16 +422,20 @@ function renderNeighborNetworksSection(bandData = {}, bandName = '5GHz') {
                   const sigClass = peakSig >= -60 ? 'high' : peakSig >= -75 ? 'medium' : 'low';
                   const overlapsOurChannel = radios.some((r) => Number(r.channel) === Number(nb.channel));
                   const observations = Array.isArray(nb.observations) ? nb.observations : [];
+                  const tri = nb.triangulation || null;
+                  const isHighlighted =
+                    highlightedBssid && nb.bssid.toLowerCase() === highlightedBssid.toLowerCase();
 
                   const perRadioHtml = observations
                     .map((obs) => {
                       const pct = dbmToQualityPct(obs.signalDbm);
                       const barClass = obs.signalDbm >= -60 ? 'high' : obs.signalDbm >= -75 ? 'medium' : 'low';
+                      const distLabel = typeof obs.distanceMeters === 'number' ? ` • ~${obs.distanceMeters}m` : '';
                       return `
-                        <div class="neighbor-radio-rssi-item" title="${escapeHtml(obs.hostName)} (${escapeHtml(obs.device)}): ${obs.signalDbm} dBm (${pct}% relative strength)">
+                        <div class="neighbor-radio-rssi-item" title="${escapeHtml(obs.hostName)} (${escapeHtml(obs.device)}): ${obs.signalDbm} dBm (${pct}% relative strength${distLabel})">
                           <div class="neighbor-radio-rssi-header">
                             <span class="neighbor-radio-name">${escapeHtml(obs.hostName)} <small style="color:var(--color-text-muted);">(${escapeHtml(obs.device)})</small></span>
-                            <span class="font-mono neighbor-radio-dbm">${obs.signalDbm} dBm <small>(${pct}%)</small></span>
+                            <span class="font-mono neighbor-radio-dbm">${obs.signalDbm} dBm <small>(${pct}%${distLabel})</small></span>
                           </div>
                           <div class="utilization-track" style="height: 5px;">
                             <div class="utilization-fill ${barClass}" style="width: ${pct}%;"></div>
@@ -346,22 +445,54 @@ function renderNeighborNetworksSection(bandData = {}, bandName = '5GHz') {
                     })
                     .join('');
 
+                  const methodBadge = tri
+                    ? tri.method === 'trilateration'
+                      ? `<span class="status-pill success" style="font-size: 10.5px;">Trilaterated (${tri.apCount} APs)</span>`
+                      : tri.method === 'bilateration'
+                        ? `<span class="status-pill info" style="font-size: 10.5px;">Bilaterated (2 APs)</span>`
+                        : `<span class="status-pill" style="font-size: 10.5px;">Proximity Ring (1 AP)</span>`
+                    : `<span class="status-pill">—</span>`;
+
+                  const triangulationCellHtml = tri
+                    ? `
+                      <div style="display: flex; flex-direction: column; gap: 4px;">
+                        <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
+                          ${methodBadge}
+                          <span class="font-mono" style="font-size: 11px; color: var(--color-text-secondary);">
+                            (${tri.x}m, ${tri.y}m) ±${tri.errorRadiusMeters}m
+                          </span>
+                        </div>
+                        <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 11.5px; color: var(--color-text-secondary);">
+                          <span>${escapeHtml(tri.bearingLabel || '')}</span>
+                          ${
+                            !nb.isManagedFleet
+                              ? `<button type="button" class="btn btn-secondary btn-sm" style="padding: 2px 8px; font-size: 11px;" data-locate-bssid="${escapeHtml(nb.bssid)}" aria-label="Focus ${escapeHtml(nb.ssid)} on Triangulation Map">Locate</button>`
+                              : ''
+                          }
+                        </div>
+                      </div>
+                    `
+                    : '<span style="color: var(--color-text-muted);">—</span>';
+
                   return `
-                    <tr>
+                    <tr class="${isHighlighted ? 'selected-neighbor-row' : ''}">
                       <td>
                         <div style="display: flex; align-items: center; gap: 6px; font-weight: 600;">
                           <span>${escapeHtml(nb.ssid)}</span>
                           ${nb.isManagedFleet ? '<span class="status-pill info" style="font-size: 10px; padding: 1px 6px;">Fleet AP</span>' : ''}
                           ${!nb.isManagedFleet && overlapsOurChannel ? '<span class="status-pill warning" style="font-size: 10px; padding: 1px 6px;" title="Shares channel with your AP">Shares Ch</span>' : ''}
                         </div>
+                        <div style="font-size: 11px; color: var(--color-text-muted); margin-top: 2px;">${escapeHtml(nb.security || 'Open')}</div>
                       </td>
                       <td class="font-mono" style="font-size: 12px;">${escapeHtml(nb.bssid.toUpperCase())}</td>
                       <td class="font-mono">Ch ${nb.channel} <small style="color:var(--color-text-muted);">(${nb.widthMhz || 20}MHz)</small></td>
-                      <td><span class="status-pill">${escapeHtml(nb.security || 'Open')}</span></td>
                       <td class="font-mono">
                         <span class="status-pill ${sigClass === 'high' ? 'warning' : sigClass === 'medium' ? 'info' : ''}">
                           ${peakSig} dBm (${peakPct}%)
                         </span>
+                      </td>
+                      <td style="min-width: 230px;">
+                        ${triangulationCellHtml}
                       </td>
                       <td style="min-width: 260px;">
                         <div class="neighbor-radio-rssi-list">

@@ -668,4 +668,66 @@ test('Neighboring Networks Scanner: parses iw scan output and aggregates relativ
   hostManager.liveRadiosByHost.delete('ap-up');
   hostManager.liveNeighborsByHost.delete('ap-down');
   hostManager.liveNeighborsByHost.delete('ap-up');
+  hostManager.hostsCacheById.delete('ap-down');
+  hostManager.hostsCacheById.delete('ap-up');
+});
+
+test('Foreign AP RF Triangulation: trilaterates approximate 2D coordinates from 3 OpenWrt AP signal powers', () => {
+  const makeApScan = (hostname, signalDbm) =>
+    [
+      '===BOARD===',
+      JSON.stringify({ hostname, model: 'OpenWrt AP' }),
+      '===IWDEV===',
+      'phy#1',
+      '\tInterface phy1-ap0',
+      '\t\tssid FleetWiFi',
+      '\t\tchannel 36 (5180 MHz), width: 80 MHz, center1: 5210 MHz',
+      '===SCANDUMP===',
+      '---IFACE:phy1-ap0---',
+      'BSS c8:b4:22:11:22:33(on phy1-ap0)',
+      '\tfreq: 5745',
+      `\tsignal: ${signalDbm}.00 dBm`,
+      '\tlast seen: 210 ms ago',
+      '\tSSID: NextDoorCafe5G',
+      '\tRSN:\t * Version: 1',
+      '\tVHT operation:',
+      '\t\t * channel width: 1 (80 MHz)',
+    ].join('\n');
+
+  const apWest = { id: 'ap-west', name: 'West Wing AP', mapPosition: { x: 20, y: 20 } };
+  const apEast = { id: 'ap-east', name: 'East Wing AP', mapPosition: { x: 80, y: 20 } };
+  const apSouth = { id: 'ap-south', name: 'South Patio AP', mapPosition: { x: 50, y: 80 } };
+
+  // Foreign AP is much closer to West Wing AP (-48 dBm -> ~1.6m) than East (-74 dBm -> ~11.7m) or South (-78 dBm -> ~15.8m)
+  hostManager.applyTelemetryToHost(apWest, parseSshTelemetryOutput(apWest, makeApScan('West-AP', -48)));
+  hostManager.applyTelemetryToHost(apEast, parseSshTelemetryOutput(apEast, makeApScan('East-AP', -74)));
+  hostManager.applyTelemetryToHost(apSouth, parseSshTelemetryOutput(apSouth, makeApScan('South-AP', -78)));
+
+  const bands = hostManager.getLiveWifiBands();
+  const band5g = bands['5GHz'];
+  assert.equal(band5g.anchors.length, 3);
+  assert.equal(band5g.neighbors.length, 1);
+
+  const foreignAp = band5g.neighbors[0];
+  assert.equal(foreignAp.ssid, 'NextDoorCafe5G');
+  assert.ok(foreignAp.triangulation);
+  assert.equal(foreignAp.triangulation.method, 'trilateration');
+  assert.equal(foreignAp.triangulation.confidence, 'high');
+  assert.equal(foreignAp.triangulation.apCount, 3);
+  assert.equal(foreignAp.triangulation.closestHostId, 'ap-west');
+  assert.ok(foreignAp.triangulation.minDistanceMeters < 2.5);
+
+  // Triangulated coordinates (x, y) must be closer to West Wing AP (20, 20) than East (80, 20) or South (50, 80)
+  const distToWest = Math.hypot(foreignAp.triangulation.x - 20, foreignAp.triangulation.y - 20);
+  const distToEast = Math.hypot(foreignAp.triangulation.x - 80, foreignAp.triangulation.y - 20);
+  const distToSouth = Math.hypot(foreignAp.triangulation.x - 50, foreignAp.triangulation.y - 80);
+  assert.ok(distToWest < distToEast, `Expected distToWest (${distToWest}) < distToEast (${distToEast})`);
+  assert.ok(distToWest < distToSouth, `Expected distToWest (${distToWest}) < distToSouth (${distToSouth})`);
+
+  // Clean up test state
+  for (const id of ['ap-west', 'ap-east', 'ap-south']) {
+    hostManager.liveRadiosByHost.delete(id);
+    hostManager.liveNeighborsByHost.delete(id);
+    hostManager.hostsCacheById.delete(id);
+  }
 });

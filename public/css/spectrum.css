@@ -390,3 +390,59 @@
   color: var(--color-text-secondary);
 }
 
+/* Foreign AP RF Triangulation Spatial Map */
+.triangulation-map-svg {
+  width: 100%;
+  height: auto;
+  max-height: 430px;
+  display: block;
+}
+
+.triangulation-grid-line {
+  stroke: var(--color-border-subtle);
+  stroke-width: 1px;
+  stroke-dasharray: 2 4;
+}
+
+.triangulation-foreign-node {
+  cursor: pointer;
+  transition: opacity var(--transition-fast);
+}
+
+.triangulation-foreign-node:hover {
+  filter: drop-shadow(0 0 6px rgba(245, 158, 11, 0.55));
+}
+
+.triangulation-foreign-node:focus-visible,
+.triangulation-anchor-node:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 4px;
+}
+
+.triangulation-anchor-node {
+  cursor: grab;
+  touch-action: pan-y;
+}
+
+.triangulation-anchor-node:active {
+  cursor: grabbing;
+}
+
+.triangulation-Inspector-bar {
+  margin-top: var(--space-3);
+  padding: var(--space-3);
+  background-color: var(--color-surface-elevated);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.selected-neighbor-row {
+  background-color: var(--color-surface-hover);
+}
+
+
