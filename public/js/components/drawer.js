@@ -1,0 +1,319 @@
+/**
+ * OpenWrt Manager (openwrt-managor)
+ * Slide-out Inspector Drawer Controller
+ */
+
+import { store } from '../store.js';
+import { api } from '../api.js';
+import { toast } from './toast.js';
+import { formatBytes, formatBps, formatUptime, formatRssi, formatMac, escapeHtml } from '../utils/formatters.js';
+import { renderIcon } from '../utils/icons.js';
+
+let drawerEl = null;
+let backdropEl = null;
+
+export function initDrawer() {
+  drawerEl = document.getElementById('inspector-drawer');
+  if (!drawerEl) return;
+
+  // Create backdrop if not present
+  backdropEl = document.getElementById('drawer-backdrop');
+  if (!backdropEl) {
+    backdropEl = document.createElement('div');
+    backdropEl.id = 'drawer-backdrop';
+    backdropEl.className = 'drawer-backdrop';
+    backdropEl.style.cssText = `
+      position: fixed; inset: 0; background: rgba(0,0,0,0.5);
+      z-index: calc(var(--z-drawer) - 1); display: none; opacity: 0;
+      transition: opacity var(--transition-normal);
+    `;
+    document.body.appendChild(backdropEl);
+    backdropEl.addEventListener('click', closeDrawer);
+  }
+
+  // Close on Escape
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && isDrawerOpen()) {
+      closeDrawer();
+    }
+  });
+
+  // Listen to store selection events
+  store.on('node-selected', (node) => {
+    if (node) renderNodeDetails(node);
+  });
+
+  store.on('client-selected', (client) => {
+    if (client) renderClientDetails(client);
+  });
+
+  store.on('selection-cleared', () => {
+    closeDrawer();
+  });
+}
+
+export function isDrawerOpen() {
+  return drawerEl && drawerEl.classList.contains('open');
+}
+
+export function openDrawer() {
+  if (!drawerEl) return;
+  drawerEl.hidden = false;
+  drawerEl.classList.add('open');
+  if (backdropEl) {
+    backdropEl.style.display = 'block';
+    setTimeout(() => { backdropEl.style.opacity = '1'; }, 10);
+  }
+}
+
+export function closeDrawer() {
+  if (!drawerEl) return;
+  drawerEl.classList.remove('open');
+  if (backdropEl) {
+    backdropEl.style.opacity = '0';
+    setTimeout(() => { backdropEl.style.display = 'none'; }, 200);
+  }
+}
+
+export function renderNodeDetails(node) {
+  if (!drawerEl) return;
+
+  const metrics = node.metrics || {};
+  const isGw = node.type === 'gateway';
+
+  drawerEl.innerHTML = `
+    <div class="drawer-header">
+      <div style="display: flex; align-items: center; gap: 8px;">
+        <span class="status-dot ${node.status === 'online' ? 'online' : 'offline'}"></span>
+        <h2 class="modal-title" style="font-size: 15px;">${escapeHtml(node.label || node.id)}</h2>
+      </div>
+      <button type="button" class="btn-icon drawer-close-btn" aria-label="Close drawer">
+        ${renderIcon('x', 'icon')}
+      </button>
+    </div>
+    <div class="drawer-body">
+      <!-- General Specs -->
+      <div class="drawer-section">
+        <div class="drawer-section-title">Hardware & Identity</div>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: 12.5px;">
+          <div><span style="color:var(--color-text-muted);">Model:</span> <div style="font-weight:600;">${escapeHtml(node.model || 'OpenWrt Device')}</div></div>
+          <div><span style="color:var(--color-text-muted);">Role:</span> <div style="font-weight:600; text-transform: capitalize;">${escapeHtml(node.type || 'Node')}</div></div>
+          <div><span style="color:var(--color-text-muted);">IP Address:</span> <div class="font-mono">${escapeHtml(node.ip || 'N/A')}</div></div>
+          <div><span style="color:var(--color-text-muted);">MAC Address:</span> <div class="font-mono">${formatMac(node.mac) || 'N/A'}</div></div>
+        </div>
+      </div>
+
+      <!-- Live Resource Utilization -->
+      <div class="drawer-section">
+        <div class="drawer-section-title">Resource Utilization</div>
+        <div class="node-progress-group">
+          <div class="progress-label-row">
+            <span>CPU Usage</span>
+            <span class="font-mono">${metrics.cpuUsagePct ?? 0}%</span>
+          </div>
+          <div class="progress-bar-track">
+            <div class="progress-bar-fill cpu" style="width: ${metrics.cpuUsagePct ?? 0}%;"></div>
+          </div>
+        </div>
+        <div class="node-progress-group" style="margin-top: 8px;">
+          <div class="progress-label-row">
+            <span>Memory (RAM)</span>
+            <span class="font-mono">${metrics.memUsagePct ?? 0}%</span>
+          </div>
+          <div class="progress-bar-track">
+            <div class="progress-bar-fill ram" style="width: ${metrics.memUsagePct ?? 0}%;"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Live Bandwidth -->
+      <div class="drawer-section">
+        <div class="drawer-section-title">Live Throughput</div>
+        <div style="display: flex; gap: 16px; background: var(--color-surface-elevated); padding: 12px; border-radius: var(--radius-md);">
+          <div style="flex: 1;">
+            <div style="font-size: 11px; color: var(--color-text-muted);">RX (Download)</div>
+            <div style="font-size: 16px; font-weight: 700; color: var(--color-primary);">${formatBps(metrics.rxRateBps)}</div>
+          </div>
+          <div style="flex: 1;">
+            <div style="font-size: 11px; color: var(--color-text-muted);">TX (Upload)</div>
+            <div style="font-size: 16px; font-weight: 700; color: var(--color-success);">${formatBps(metrics.txRateBps)}</div>
+          </div>
+          <div style="flex: 1;">
+            <div style="font-size: 11px; color: var(--color-text-muted);">Connected</div>
+            <div style="font-size: 16px; font-weight: 700;">${metrics.clientCount ?? 0} clients</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="drawer-footer">
+      <a href="http://${node.ip || ''}" target="_blank" rel="noopener noreferrer" class="btn btn-secondary">
+        ${renderIcon('externalLink', 'icon')} Open LuCI WebUI
+      </a>
+      <button type="button" class="btn btn-primary" id="drawer-backup-btn">
+        ${renderIcon('database', 'icon')} Backup Node
+      </button>
+      <button type="button" class="btn btn-secondary" id="drawer-copy-ssh-btn">
+        ${renderIcon('terminal', 'icon')} Copy SSH
+      </button>
+    </div>
+  `;
+
+  // Attach event handlers
+  drawerEl.querySelector('.drawer-close-btn').addEventListener('click', closeDrawer);
+
+  const backupBtn = drawerEl.querySelector('#drawer-backup-btn');
+  if (backupBtn) {
+    backupBtn.addEventListener('click', async () => {
+      try {
+        backupBtn.disabled = true;
+        backupBtn.textContent = 'Backing up...';
+        await api.runBackup(node.id);
+        toast.success('Backup Started', `Configuration backup queued for ${node.label || node.id}`);
+        store.poll();
+      } catch (err) {
+        toast.error('Backup Failed', err.message);
+      } finally {
+        backupBtn.disabled = false;
+        backupBtn.innerHTML = `${renderIcon('database', 'icon')} Backup Node`;
+      }
+    });
+  }
+
+  const copySshBtn = drawerEl.querySelector('#drawer-copy-ssh-btn');
+  if (copySshBtn) {
+    copySshBtn.addEventListener('click', () => {
+      const cmd = `ssh root@${node.ip || '192.168.1.1'}`;
+      navigator.clipboard.writeText(cmd);
+      toast.info('Copied to Clipboard', cmd);
+    });
+  }
+
+  openDrawer();
+}
+
+export function renderClientDetails(client) {
+  if (!drawerEl) return;
+
+  const rssi = formatRssi(client.signalDbm);
+  const isWired = client.connectionType === 'wired';
+
+  drawerEl.innerHTML = `
+    <div class="drawer-header">
+      <div style="display: flex; align-items: center; gap: 8px;">
+        ${renderIcon(isWired ? 'server' : 'wifi', 'icon')}
+        <h2 class="modal-title" style="font-size: 15px;">${escapeHtml(client.hostname || client.ip)}</h2>
+      </div>
+      <button type="button" class="btn-icon drawer-close-btn" aria-label="Close drawer">
+        ${renderIcon('x', 'icon')}
+      </button>
+    </div>
+    <div class="drawer-body">
+      <!-- Identity & Vendor -->
+      <div class="drawer-section">
+        <div class="drawer-section-title">Device Identity</div>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: 12.5px;">
+          <div><span style="color:var(--color-text-muted);">IP Address:</span> <div class="font-mono" style="font-weight:600;">${escapeHtml(client.ip)}</div></div>
+          <div><span style="color:var(--color-text-muted);">MAC Address:</span> <div class="font-mono">${formatMac(client.mac)}</div></div>
+          <div><span style="color:var(--color-text-muted);">Manufacturer:</span> <div>${escapeHtml(client.vendor || 'Unknown')}</div></div>
+          <div><span style="color:var(--color-text-muted);">Connected AP:</span> <div style="font-weight:600;">${escapeHtml(client.connectedTo?.hostName || client.connectedTo?.hostId || 'Gateway')}</div></div>
+        </div>
+
+        <!-- Friendly Alias / Nickname Editor (UX Spec) -->
+        <div style="margin-top: 10px; display: flex; gap: 6px; align-items: center;">
+          <input type="text" id="client-alias-input" class="form-input" style="padding: 5px 8px; font-size: 12px; flex: 1;" placeholder="Set friendly device nickname..." value="${escapeHtml(client.nickname || client.displayName || '')}" />
+          <button type="button" class="btn btn-secondary" id="client-alias-save-btn" style="padding: 5px 10px; font-size: 12px;">Save</button>
+        </div>
+      </div>
+
+      <!-- Wireless / Network Connection -->
+      <div class="drawer-section">
+        <div class="drawer-section-title">Connection Metrics</div>
+        <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; background: var(--color-surface-elevated); padding: 12px; border-radius: var(--radius-md); text-align: center;">
+          <div>
+            <div style="font-size: 11px; color: var(--color-text-muted);">Signal (RSSI)</div>
+            <div style="font-weight: 700; color: ${isWired ? 'var(--color-text-muted)' : 'var(--color-primary)'};">${rssi.dbm}</div>
+            <div style="font-size: 10px; color: var(--color-text-muted);">${rssi.label}</div>
+          </div>
+          <div>
+            <div style="font-size: 11px; color: var(--color-text-muted);">PHY Rx Rate</div>
+            <div style="font-weight: 700;">${client.rxRateMbps ? `${client.rxRateMbps} Mbps` : 'N/A'}</div>
+          </div>
+          <div>
+            <div style="font-size: 11px; color: var(--color-text-muted);">PHY Tx Rate</div>
+            <div style="font-weight: 700;">${client.txRateMbps ? `${client.txRateMbps} Mbps` : 'N/A'}</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Live Bandwidth & Cumulative Traffic -->
+      <div class="drawer-section">
+        <div class="drawer-section-title">Live & Total Data Flow</div>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: 12.5px;">
+          <div style="background: var(--color-surface-elevated); padding: 10px; border-radius: var(--radius-md);">
+            <div style="font-size: 11px; color: var(--color-text-muted);">Current RX Rate</div>
+            <div style="font-weight: 700; color: var(--color-primary);">${formatBps(client.rxRateBps)}</div>
+          </div>
+          <div style="background: var(--color-surface-elevated); padding: 10px; border-radius: var(--radius-md);">
+            <div style="font-size: 11px; color: var(--color-text-muted);">Current TX Rate</div>
+            <div style="font-weight: 700; color: var(--color-success);">${formatBps(client.txRateBps)}</div>
+          </div>
+          <div style="background: var(--color-surface-elevated); padding: 10px; border-radius: var(--radius-md);">
+            <div style="font-size: 11px; color: var(--color-text-muted);">Total RX Volume</div>
+            <div style="font-weight: 600;">${formatBytes(client.rxBytesTotal)}</div>
+          </div>
+          <div style="background: var(--color-surface-elevated); padding: 10px; border-radius: var(--radius-md);">
+            <div style="font-size: 11px; color: var(--color-text-muted);">Total TX Volume</div>
+            <div style="font-weight: 600;">${formatBytes(client.txBytesTotal)}</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Roaming Timeline History -->
+      <div class="drawer-section">
+        <div class="drawer-section-title">AP Roaming Timeline</div>
+        <div style="font-size: 12px; color: var(--color-text-secondary); background: var(--color-surface-elevated); padding: 10px; border-radius: var(--radius-md);">
+          ${isWired ? 'Static wired client connected via Ethernet port.' : 'Currently active on ' + escapeHtml(client.ssid || 'Wi-Fi') + ' via ' + escapeHtml(client.connectedTo?.hostName || 'Living Room AP') + ' (Channel ' + (client.channel || '36') + ').'}
+        </div>
+      </div>
+    </div>
+    <div class="drawer-footer">
+      <button type="button" class="btn btn-secondary" id="drawer-copy-ip">
+        ${renderIcon('copy', 'icon')} Copy IP
+      </button>
+      <button type="button" class="btn btn-secondary" id="drawer-copy-mac">
+        ${renderIcon('copy', 'icon')} Copy MAC
+      </button>
+    </div>
+  `;
+
+  drawerEl.querySelector('.drawer-close-btn').addEventListener('click', closeDrawer);
+
+  const aliasBtn = drawerEl.querySelector('#client-alias-save-btn');
+  if (aliasBtn) {
+    aliasBtn.addEventListener('click', async () => {
+      const aliasInput = drawerEl.querySelector('#client-alias-input');
+      const nickname = aliasInput ? aliasInput.value.trim() : '';
+      try {
+        await api.setClientAlias(client.mac, nickname);
+        client.nickname = nickname;
+        client.displayName = nickname;
+        toast.success('Alias Saved', `Nickname updated for ${client.mac}`);
+        store.poll();
+      } catch (err) {
+        toast.error('Failed to Save Alias', err.message);
+      }
+    });
+  }
+
+  drawerEl.querySelector('#drawer-copy-ip').addEventListener('click', () => {
+    navigator.clipboard.writeText(client.ip);
+    toast.info('Copied IP Address', client.ip);
+  });
+
+  drawerEl.querySelector('#drawer-copy-mac').addEventListener('click', () => {
+    navigator.clipboard.writeText(client.mac);
+    toast.info('Copied MAC Address', client.mac);
+  });
+
+  openDrawer();
+}

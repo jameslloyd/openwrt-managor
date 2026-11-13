@@ -1,0 +1,14 @@
+# Dependencies
+node_modules/
+
+# Persistent TrueNAS / local runtime storage
+data/
+backups/
+
+# System and editor files
+.DS_Store
+*.log
+swarm-board.log
+.env
+*.tmp*
+.gemini/

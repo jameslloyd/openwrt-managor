@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>OpenWrt Manager | TrueNAS SCALE</title>
+  <meta name="description" content="Centralized Multi-Node OpenWrt Management, RF Spectrum Analyzer, and TrueNAS Configuration Backup Center" />
+
+  <!-- Native Color Scheme & FOUC Prevention Script (compliant with modern-web-guidance) -->
+  <meta name="color-scheme" content="dark light" />
+  <script>
+    try {
+      const stored = localStorage.getItem("color-scheme");
+      if (stored) {
+        document.querySelector('meta[name="color-scheme"]').content = stored;
+      }
+    } catch (e) {}
+  </script>
+
+  <!-- Favicon -->
+  <link rel="icon" type="image/svg+xml" href="assets/favicon.svg" />
+
+  <!-- Stylesheets -->
+  <link rel="stylesheet" href="css/tokens.css" />
+  <link rel="stylesheet" href="css/main.css" />
+  <link rel="stylesheet" href="css/components.css" />
+  <link rel="stylesheet" href="css/topology.css" />
+  <link rel="stylesheet" href="css/spectrum.css" />
+</head>
+<body>
+  <!-- Accessibility: Skip Navigation Link (WCAG 2.2 AA) -->
+  <a href="#main-content" class="skip-link">Skip to main content</a>
+
+  <!-- Global Non-Intrusive Connection Reconnection Banner -->
+  <div id="connection-error-banner" style="display: none; align-items: center; justify-content: space-between; padding: 10px 20px; background: var(--color-warning-bg); border-bottom: 1px solid var(--color-warning); color: var(--color-text-primary); font-size: 13px; z-index: 1000;" role="alert">
+    <div style="display: flex; align-items: center; gap: 10px;">
+      <span style="color: var(--color-warning); font-size: 16px;">⚠️</span>
+      <span class="banner-msg">Lost connection to OpenWrt Manager backend API. Reconnecting...</span>
+    </div>
+    <button type="button" class="btn btn-secondary" onclick="window.location.reload()" style="padding: 3px 8px; font-size: 12px;">Retry Now</button>
+  </div>
+
+  <div class="app-shell" id="app-shell">
+    <!-- Primary Global Navigation Sidebar -->
+    <aside class="sidebar" role="navigation" aria-label="Main Navigation">
+      <div class="sidebar-header">
+        <a href="#/dashboard" class="brand-logo" aria-label="OpenWrt Manager Home">
+          <svg class="brand-icon" viewBox="0 0 32 32" fill="none" aria-hidden="true">
+            <rect width="32" height="32" rx="8" fill="#0078d4"/>
+            <rect x="5" y="17" width="22" height="9" rx="3" fill="#ffffff" fill-opacity="0.9"/>
+            <circle cx="9" cy="21.5" r="1.5" fill="#10b981"/>
+            <circle cx="13" cy="21.5" r="1.5" fill="#10b981"/>
+            <circle cx="17" cy="21.5" r="1.5" fill="#06b6d4"/>
+            <line x1="8" y1="17" x2="8" y2="10" stroke="#ffffff" stroke-width="2" stroke-linecap="round"/>
+            <line x1="24" y1="17" x2="24" y2="10" stroke="#ffffff" stroke-width="2" stroke-linecap="round"/>
+            <path d="M12 9C14 7.5 18 7.5 20 9" stroke="#38bdf8" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+          <span class="brand-text">OpenWrt Manager</span>
+        </a>
+      </div>
+
+      <nav class="sidebar-nav">
+        <a href="#/dashboard" class="nav-link active" data-route="dashboard">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+          <span class="nav-label">Dashboard</span>
+        </a>
+
+        <a href="#/topology" class="nav-link" data-route="topology">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>
+          <span class="nav-label">Network Topology</span>
+        </a>
+
+        <a href="#/clients" class="nav-link" data-route="clients">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>
+          <span class="nav-label">Hosts &amp; Clients</span>
+          <span class="nav-badge" id="nav-badge-clients">0</span>
+        </a>
+
+        <a href="#/wifi" class="nav-link" data-route="wifi">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><line x1="12" y1="20" x2="12.01" y2="20"/></svg>
+          <span class="nav-label">WiFi Spectrum</span>
+        </a>
+
+        <a href="#/backups" class="nav-link" data-route="backups">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          <span class="nav-label">Backups &amp; TrueNAS</span>
+          <span class="nav-badge" id="nav-badge-backups">0</span>
+        </a>
+
+        <a href="#/hosts" class="nav-link" data-route="hosts">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="14" width="20" height="8" rx="2"/><path d="M6 18h.01"/><path d="M10 18h.01"/><path d="M15 10v4"/><path d="M9 10v4"/><path d="M12 2v8"/></svg>
+          <span class="nav-label">OpenWrt Fleet</span>
+          <span class="nav-badge" id="nav-badge-nodes">0</span>
+        </a>
+
+        <a href="#/settings" class="nav-link" data-route="settings">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          <span class="nav-label">Settings &amp; Sim</span>
+        </a>
+      </nav>
+
+      <!-- Sidebar Host Fleet Quick List -->
+      <div class="sidebar-section">
+        <div class="sidebar-section-title">
+          <span>Fleet Nodes</span>
+          <a href="#/hosts" style="font-size: 10px; color: var(--color-primary); text-decoration: none;">+ Add</a>
+        </div>
+        <ul class="sidebar-hosts-list" id="sidebar-hosts-list">
+          <!-- Populated dynamically by main.js -->
+        </ul>
+      </div>
+    </aside>
+
+    <!-- Top Navigation Header -->
+    <header class="topbar" role="banner">
+      <div class="topbar-left">
+        <div id="topbar-status-pill" class="status-pill online">
+          <span class="status-dot online"></span>
+          All Systems Normal
+        </div>
+        <button type="button" id="topbar-mode-pill" class="mode-pill demo" title="Click to toggle simulator parameters">
+          Demo Mode Active
+        </button>
+      </div>
+
+      <div class="topbar-center">
+        <div class="storage-meter" title="TrueNAS ZFS Backup Dataset Mount">
+          <span>/backups Mount:</span>
+          <div class="storage-bar-track">
+            <div class="storage-bar-fill" style="width: 25%;"></div>
+          </div>
+          <span style="font-family: var(--font-mono); font-size: 11px;">ZFS Healthy</span>
+        </div>
+      </div>
+
+      <div class="topbar-right">
+        <button type="button" class="btn btn-primary" id="topbar-backup-all-btn">
+          <svg style="width:14px;height:14px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          Backup All
+        </button>
+
+        <a href="#/hosts" class="btn btn-secondary" style="text-decoration:none;">
+          + Add Host
+        </a>
+
+        <button type="button" class="btn-icon" id="topbar-refresh-btn" title="Refresh Telemetry (R)" aria-label="Refresh telemetry">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- Main View Dynamic Container -->
+    <main class="main-content" id="main-content" role="main" tabindex="-1">
+      <!-- Active view dynamically injected here by main.js router -->
+      <div class="shimmer skeleton-card"></div>
+      <div class="shimmer skeleton-card" style="height: 300px;"></div>
+    </main>
+
+    <!-- System Status Footer -->
+    <footer class="footer" role="contentinfo">
+      <div class="footer-left">
+        <span id="footer-connected-hosts">4 Hosts Online</span>
+        <span>•</span>
+        <span id="footer-active-clients">22 Active Devices</span>
+        <span>•</span>
+        <span id="footer-last-poll">Last Poll: Just now</span>
+      </div>
+      <div class="footer-right">
+        <span>OpenWrt Manager for TrueNAS SCALE</span>
+        <span>•</span>
+        <span>v1.0.0</span>
+      </div>
+    </footer>
+  </div>
+
+  <!-- Contextual Slide-Out Inspector Drawer -->
+  <aside class="inspector-drawer" id="inspector-drawer" aria-label="Inspector Drawer" hidden></aside>
+
+  <!-- Screen Reader Announcements (ARIA Live Regions) -->
+  <div id="sr-announcer-polite" class="sr-only" aria-live="polite"></div>
+  <div id="sr-announcer-assertive" class="sr-only" aria-live="assertive"></div>
+
+  <!-- Toast Notification Container -->
+  <div id="toast-container" class="toast-container" aria-live="polite" aria-atomic="true"></div>
+
+  <!-- Native Zero-Bundler ES Module Entrypoint -->
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>

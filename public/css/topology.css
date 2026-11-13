@@ -1,0 +1,217 @@
+/**
+ * OpenWrt Manager (openwrt-managor)
+ * Network Topology Map Styles: Interactive SVG Canvas, Nodes, Links, Controls
+ */
+
+.topology-wrapper {
+  position: relative;
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  height: calc(100vh - 210px);
+  min-height: 540px;
+  display: flex;
+  flex-direction: column;
+  box-shadow: var(--shadow-sm);
+}
+
+.topology-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-3) var(--space-4);
+  background-color: var(--color-surface);
+  border-bottom: 1px solid var(--color-border);
+  z-index: 10;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.topology-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.topology-filters {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.topology-viewport {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+  cursor: grab;
+  user-select: none;
+  background-image: radial-gradient(var(--color-border-subtle) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+
+.topology-viewport.panning {
+  cursor: grabbing;
+}
+
+.topology-svg {
+  width: 100%;
+  height: 100%;
+  position: absolute;
+  top: 0;
+  left: 0;
+}
+
+/* Link Visual Styles */
+.topo-link {
+  fill: none;
+  transition: stroke 0.2s, stroke-width 0.2s;
+}
+
+.topo-link.speed-10g {
+  stroke: var(--color-link-10g);
+  stroke-width: 4px;
+}
+
+.topo-link.speed-2-5g {
+  stroke: var(--color-link-2-5g);
+  stroke-width: 3.5px;
+}
+
+.topo-link.speed-1g {
+  stroke: var(--color-link-1g);
+  stroke-width: 2.5px;
+}
+
+.topo-link.speed-100m {
+  stroke: var(--color-link-100m);
+  stroke-width: 2px;
+  stroke-dasharray: 4 3;
+}
+
+.topo-link.wifi-mesh {
+  stroke: var(--color-link-mesh);
+  stroke-width: 2.5px;
+  stroke-dasharray: 6 4;
+  animation: mesh-flow 1.5s linear infinite;
+}
+
+.topo-link.wifi-station {
+  stroke: var(--color-text-muted);
+  stroke-width: 1.5px;
+  stroke-dasharray: 3 3;
+  opacity: 0.6;
+}
+
+@keyframes mesh-flow {
+  from { stroke-dashoffset: 20; }
+  to { stroke-dashoffset: 0; }
+}
+
+/* Link Labels */
+.topo-link-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  fill: var(--color-text-secondary);
+  text-anchor: middle;
+  background: var(--color-surface);
+  pointer-events: none;
+}
+
+/* Node Styles */
+.topo-node {
+  cursor: pointer;
+  transition: transform 0.15s ease-out;
+}
+
+.topo-node:hover {
+  filter: drop-shadow(0 0 8px var(--color-primary-light));
+}
+
+.topo-node-card {
+  fill: var(--color-surface);
+  stroke: var(--color-border);
+  stroke-width: 1.5px;
+  rx: 8px;
+  ry: 8px;
+  transition: stroke 0.2s;
+}
+
+.topo-node.selected .topo-node-card {
+  stroke: var(--color-primary);
+  stroke-width: 2.5px;
+}
+
+.topo-node-icon {
+  pointer-events: none;
+}
+
+.topo-node-label {
+  font-size: 12px;
+  font-weight: 600;
+  fill: var(--color-text-primary);
+  text-anchor: middle;
+  pointer-events: none;
+}
+
+.topo-node-subtext {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  fill: var(--color-text-secondary);
+  text-anchor: middle;
+  pointer-events: none;
+}
+
+/* Client Cluster Badge */
+.client-cluster-badge {
+  fill: var(--color-surface-hover);
+  stroke: var(--color-border);
+  stroke-width: 1px;
+  cursor: pointer;
+}
+
+.client-cluster-text {
+  font-size: 11px;
+  font-weight: 600;
+  fill: var(--color-primary);
+  text-anchor: middle;
+  dominant-baseline: central;
+}
+
+/* Topology Legend */
+.topology-legend {
+  position: absolute;
+  bottom: 16px;
+  left: 16px;
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 8px 12px;
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  font-size: 11px;
+  box-shadow: var(--shadow-md);
+  z-index: 5;
+  pointer-events: none;
+  flex-wrap: wrap;
+}
+
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.legend-line {
+  width: 18px;
+  height: 3px;
+  border-radius: 2px;
+}
+
+.legend-line.speed-10g  { background-color: var(--color-link-10g); }
+.legend-line.speed-2-5g { background-color: var(--color-link-2-5g); }
+.legend-line.speed-1g   { background-color: var(--color-link-1g); }
+.legend-line.speed-100m { background-color: var(--color-link-100m); border-top: 1px dashed; }
+.legend-line.mesh       { background-color: var(--color-link-mesh); border-top: 1px dashed; }
