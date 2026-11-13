@@ -34,7 +34,7 @@ test('Storage: database initialization and CRUD', async () => {
 
     const settings = await db.getSettings();
     assert.ok(settings);
-    assert.equal(settings.demoMode, true);
+    assert.equal(settings.demoMode, false);
 
     const schedules = await db.getSchedules();
     assert.ok(Array.isArray(schedules));

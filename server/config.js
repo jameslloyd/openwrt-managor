@@ -31,7 +31,7 @@ export const config = {
   nodeEnv: process.env.NODE_ENV || 'development',
   dataDir: resolveDirectory(process.env.DATA_DIR, 'data'),
   backupDir: resolveDirectory(process.env.BACKUP_DIR, 'backups'),
-  demoMode: process.env.DEMO_MODE !== 'false',
+  demoMode: false,
   pollIntervalMs: parseInt(process.env.POLL_INTERVAL_MS || '10000', 10),
   backupTimeoutMs: parseInt(process.env.BACKUP_TIMEOUT_MS || '30000', 10),
   logLevel: process.env.LOG_LEVEL || 'info',

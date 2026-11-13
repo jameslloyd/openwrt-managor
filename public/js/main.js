@@ -88,12 +88,11 @@ function updateTopBarAndFooter(state) {
     `;
   }
 
-  // Top Bar Mode Pill (Demo Mode / Live Mode)
+  // Top Bar Mode Pill
   const modePill = document.getElementById('topbar-mode-pill');
   if (modePill) {
-    const isDemo = health?.demoMode ?? true;
-    modePill.className = `mode-pill ${isDemo ? 'demo' : ''}`;
-    modePill.textContent = isDemo ? 'Demo Mode Active' : 'TrueNAS Live Mode';
+    modePill.className = 'mode-pill';
+    modePill.textContent = 'TrueNAS Live Mode';
   }
 
   // Footer Status
@@ -217,17 +216,6 @@ function initApp() {
       store.poll();
     } catch (err) {
       toast.error('Backup Error', err.message);
-    }
-  });
-
-  document.getElementById('topbar-mode-pill')?.addEventListener('click', async () => {
-    const currentDemo = store.state.health?.demoMode ?? true;
-    try {
-      await api.configureSimulator({ enableRoaming: !currentDemo });
-      toast.info('Simulator Toggled', `Switched mode.`);
-      store.poll();
-    } catch (err) {
-      toast.error('Failed to toggle mode', err.message);
     }
   });
 

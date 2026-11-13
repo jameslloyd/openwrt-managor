@@ -46,7 +46,16 @@ export function renderHosts(container) {
             </tr>
           </thead>
           <tbody>
-            ${hosts.map(h => renderHostRow(h)).join('')}
+            ${hosts.length > 0 ? hosts.map(h => renderHostRow(h)).join('') : `
+              <tr>
+                <td colspan="8" style="text-align: center; padding: 32px;">
+                  <div class="empty-state">
+                    <div class="empty-state-title">No OpenWrt Hosts Registered</div>
+                    <div class="empty-state-desc">Click "Add OpenWrt Host" above to register your routers and access points.</div>
+                  </div>
+                </td>
+              </tr>
+            `}
           </tbody>
         </table>
       </div>

@@ -480,15 +480,6 @@ export async function handleApiRequest(req, res, pathname, searchParams) {
 
     if (pathname === '/api/simulator/reset' && req.method === 'POST') {
       const status = simulator.reset();
-      const hosts = (await db.getHosts()) || [];
-      const hasRealHosts = hosts.some((h) => !h.isSimulated);
-      if (!hasRealHosts) {
-        config.demoMode = true;
-        const currentSettings = (await db.getSettings()) || {};
-        await db.saveSettings({ ...currentSettings, demoMode: true });
-        await db.saveHosts(simulator.getHosts());
-        await backupEngine.seedDemoBackups();
-      }
       sendJson(res, 200, status);
       return true;
     }

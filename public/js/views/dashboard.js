@@ -29,10 +29,9 @@ export function renderDashboard(container) {
   const backupStatusLabel = hasBackups ? 'Up-to-Date' : 'Attention Needed';
 
   // Current WAN rates from latest history
-  const isDemo = Boolean(health?.demoMode);
   const latestThroughput = throughputHistory.length > 0
     ? throughputHistory[throughputHistory.length - 1]
-    : (isDemo ? { rxBps: 12500000, txBps: 4200000 } : { rxBps: 0, txBps: 0 });
+    : { rxBps: 0, txBps: 0 };
 
   container.innerHTML = `
     <div class="view-header">
@@ -139,7 +138,13 @@ export function renderDashboard(container) {
           <a href="#/hosts" class="btn btn-ghost" style="font-size: 12px;">+ Add New Router</a>
         </div>
         <div class="nodes-grid" id="dash-nodes-grid">
-          ${hosts.map(host => renderHostCard(host)).join('')}
+          ${hosts.length > 0 ? hosts.map(host => renderHostCard(host)).join('') : `
+            <div class="empty-state" style="grid-column: 1 / -1;">
+              <div class="empty-state-title">No OpenWrt Hosts Registered</div>
+              <div class="empty-state-desc">Add your first OpenWrt router or access point to begin monitoring.</div>
+              <a href="#/hosts" class="btn btn-primary" style="margin-top: 8px; text-decoration: none;">+ Add OpenWrt Host</a>
+            </div>
+          `}
         </div>
       </div>
 
@@ -147,14 +152,14 @@ export function renderDashboard(container) {
       <div class="activity-card">
         <h2 style="font-size: 15px; font-weight: 600;">Live Network Activity</h2>
         <ul class="activity-list">
-          ${renderActivityItems({ isDemo, hosts, backups, warnings: wifiInterference?.warnings || [] })}
+          ${renderActivityItems({ hosts, backups, warnings: wifiInterference?.warnings || [] })}
         </ul>
       </div>
     </div>
   `;
 
   // Render SVG Sparkline
-  renderSparkline(container.querySelector('#dash-sparkline-container'), throughputHistory, isDemo);
+  renderSparkline(container.querySelector('#dash-sparkline-container'), throughputHistory);
 
   // Attach quick actions
   container.querySelector('#dash-quick-refresh')?.addEventListener('click', () => {
@@ -276,40 +281,7 @@ function renderHostCard(host) {
   `;
 }
 
-function renderActivityItems({ isDemo, hosts = [], backups = [], warnings = [] }) {
-  if (isDemo) {
-    return `
-      <li class="activity-item">
-        <div class="activity-icon-badge info">${renderIcon('wifi', 'icon')}</div>
-        <div class="activity-content">
-          <div><strong>Client Roamed:</strong> MacBook Pro roamed from Living Room AP to Office AP (-78 dBm → -52 dBm)</div>
-          <div class="activity-time">2 minutes ago</div>
-        </div>
-      </li>
-      <li class="activity-item">
-        <div class="activity-icon-badge success">${renderIcon('check', 'icon')}</div>
-        <div class="activity-content">
-          <div><strong>Scheduled Backup Verified:</strong> SHA-256 validated for Main Gateway (42.2 KB)</div>
-          <div class="activity-time">35 minutes ago</div>
-        </div>
-      </li>
-      <li class="activity-item">
-        <div class="activity-icon-badge warning">${renderIcon('alertTriangle', 'icon')}</div>
-        <div class="activity-content">
-          <div><strong>WiFi Interference:</strong> Co-channel overlap detected on 2.4 GHz Channel 6</div>
-          <div class="activity-time">1 hour ago</div>
-        </div>
-      </li>
-      <li class="activity-item">
-        <div class="activity-icon-badge info">${renderIcon('database', 'icon')}</div>
-        <div class="activity-content">
-          <div><strong>TrueNAS Retention:</strong> Pruned 1 expired backup archive per retention policy</div>
-          <div class="activity-time">3 hours ago</div>
-        </div>
-      </li>
-    `;
-  }
-
+function renderActivityItems({ hosts = [], backups = [], warnings = [] }) {
   const items = [];
   for (const h of hosts.slice(0, 3)) {
     items.push(`
@@ -359,7 +331,7 @@ function renderActivityItems({ isDemo, hosts = [], backups = [], warnings = [] }
   return items.join('');
 }
 
-function renderSparkline(container, history = [], isDemo = false) {
+function renderSparkline(container, history = []) {
   if (!container) return;
 
   const width = container.clientWidth || 800;
@@ -372,20 +344,11 @@ function renderSparkline(container, history = [], isDemo = false) {
   // Synthesize baseline points if empty
   let points = [...history];
   if (points.length < 5) {
-    points = isDemo
-      ? [
-          { rxBps: 8500000, txBps: 2100000 },
-          { rxBps: 11200000, txBps: 3400000 },
-          { rxBps: 14800000, txBps: 4100000 },
-          { rxBps: 12000000, txBps: 3800000 },
-          { rxBps: 16500000, txBps: 5200000 },
-          { rxBps: 13500000, txBps: 4600000 }
-        ]
-      : [
-          { rxBps: 0, txBps: 0 },
-          { rxBps: 0, txBps: 0 },
-          ...points
-        ];
+    points = [
+      { rxBps: 0, txBps: 0 },
+      { rxBps: 0, txBps: 0 },
+      ...points
+    ];
   }
 
   const maxVal = Math.max(...points.map(p => Math.max(p.rxBps, p.txBps)), 1000000);

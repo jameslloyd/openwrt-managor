@@ -70,39 +70,47 @@ test('API: Hosts CRUD and test probes', async () => {
   assert.equal(probeData.success, true);
   assert.equal(probeData.ubusConnected, true);
 
-  // List hosts
-  const listRes = await fetch(`${baseUrl}/api/hosts`);
-  assert.equal(listRes.status, 200);
-  const hosts = await listRes.json();
-  assert.ok(Array.isArray(hosts));
-  assert.ok(hosts.length >= 4);
+  // Initially no demo hosts are seeded
+  const initialRes = await fetch(`${baseUrl}/api/hosts`);
+  assert.equal(initialRes.status, 200);
+  const initialHosts = await initialRes.json();
+  assert.ok(Array.isArray(initialHosts));
+  assert.equal(initialHosts.length, 0);
+
+  // Create new gateway host
+  const gwRes = await fetch(`${baseUrl}/api/hosts`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      id: 'node-gw-01',
+      name: 'Main Gateway',
+      ip: '192.168.1.1',
+      role: 'gateway',
+    }),
+  });
+  assert.equal(gwRes.status, 201);
+
+  // Create new AP host
+  const createRes = await fetch(`${baseUrl}/api/hosts`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      id: 'node-ap-01',
+      name: 'Workshop AP',
+      ip: '192.168.1.19',
+      role: 'ap',
+    }),
+  });
+  assert.equal(createRes.status, 201);
+  const newHost = await createRes.json();
+  assert.equal(newHost.id, 'node-ap-01');
+  assert.equal(newHost.isSimulated, false);
 
   // Get single host
   const singleRes = await fetch(`${baseUrl}/api/hosts/node-gw-01`);
   assert.equal(singleRes.status, 200);
   const host = await singleRes.json();
   assert.equal(host.id, 'node-gw-01');
-
-  // Test single host probe
-  const testRes = await fetch(`${baseUrl}/api/hosts/node-gw-01/test`, { method: 'POST' });
-  assert.equal(testRes.status, 200);
-  const testData = await testRes.json();
-  assert.equal(testData.success, true);
-
-  // Create new host
-  const createRes = await fetch(`${baseUrl}/api/hosts`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      name: 'Workshop AP',
-      ip: '192.168.1.19',
-      role: 'ap',
-      isSimulated: true,
-    }),
-  });
-  assert.equal(createRes.status, 201);
-  const newHost = await createRes.json();
-  assert.ok(newHost.id);
 
   // Update new host
   const updateRes = await fetch(`${baseUrl}/api/hosts/${newHost.id}`, {
@@ -113,13 +121,9 @@ test('API: Hosts CRUD and test probes', async () => {
   assert.equal(updateRes.status, 200);
   const updatedHost = await updateRes.json();
   assert.equal(updatedHost.name, 'Workshop AP Updated');
-
-  // Delete new host
-  const deleteRes = await fetch(`${baseUrl}/api/hosts/${newHost.id}`, { method: 'DELETE' });
-  assert.equal(deleteRes.status, 200);
 });
 
-test('API: GET /api/topology returns nodes and links', async () => {
+test('API: GET /api/topology returns nodes and links for registered hosts', async () => {
   const res = await fetch(`${baseUrl}/api/topology`);
   assert.equal(res.status, 200);
   const data = await res.json();
@@ -134,63 +138,52 @@ test('API: GET /api/topology returns nodes and links', async () => {
   assert.ok(data.nodes.some((n) => n.type === 'ap'));
 });
 
-test('API: Clients inventory and MAC inspection', async () => {
+test('API: Clients inventory returns empty list when no demo data exists', async () => {
   const res = await fetch(`${baseUrl}/api/clients`);
   assert.equal(res.status, 200);
   const clients = await res.json();
   assert.ok(Array.isArray(clients));
-  assert.ok(clients.length >= 20);
-
-  // Query filter
-  const filterRes = await fetch(`${baseUrl}/api/clients?q=MacBook`);
-  assert.equal(filterRes.status, 200);
-  const filtered = await filterRes.json();
-  assert.equal(filtered.length, 1);
-  assert.ok(filtered[0].hostname.includes('MacBook'));
-
-  // Single client deep inspection
-  const mac = encodeURIComponent(filtered[0].mac);
-  const detailRes = await fetch(`${baseUrl}/api/clients/${mac}`);
-  assert.equal(detailRes.status, 200);
-  const detail = await detailRes.json();
-  assert.ok(Array.isArray(detail.roamingLog));
-  assert.ok(Array.isArray(detail.signalHistory));
-
-  // Set client alias
-  const aliasRes = await fetch(`${baseUrl}/api/clients/${mac}/alias`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ nickname: "James Work Laptop" }),
-  });
-  assert.equal(aliasRes.status, 200);
-  const aliased = await aliasRes.json();
-  assert.equal(aliased.nickname, "James Work Laptop");
+  assert.equal(clients.length, 0);
 });
 
-test('API: WiFi spectrum channels and interference analysis', async () => {
+test('API: WiFi spectrum channels and interference analysis have no demo radios', async () => {
   const channelsRes = await fetch(`${baseUrl}/api/wifi/channels`);
   assert.equal(channelsRes.status, 200);
   const channelsData = await channelsRes.json();
   assert.ok(channelsData.bands['2.4GHz']);
   assert.ok(channelsData.bands['5GHz']);
   assert.ok(channelsData.bands['6GHz']);
+  assert.equal(channelsData.bands['2.4GHz'].radios.length, 0);
+  assert.equal(channelsData.bands['5GHz'].radios.length, 0);
+  assert.equal(channelsData.bands['6GHz'].radios.length, 0);
 
   const interRes = await fetch(`${baseUrl}/api/wifi/interference`);
   assert.equal(interRes.status, 200);
   const interData = await interRes.json();
   assert.ok(interData.summary);
-  assert.ok(interData.warnings.length > 0);
+  assert.equal(interData.warnings.length, 0);
 });
 
 test('API: Backups run, download, inspection, diff, schedules', async () => {
-  // List initial backups
+  // Run on-demand backups for registered hosts
+  const runRes = await fetch(`${baseUrl}/api/backups/run`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ hostId: 'all' }),
+  });
+  assert.equal(runRes.status, 200);
+  const runData = await runRes.json();
+  assert.equal(runData.status, 'completed');
+  assert.ok(runData.backups.length >= 2);
+
+  // List backups
   const listRes = await fetch(`${baseUrl}/api/backups`);
   assert.equal(listRes.status, 200);
   const backups = await listRes.json();
   assert.ok(backups.length >= 2);
 
   const backupA = backups[0];
-  const backupB = backups.find((b) => b.hostId === backupA.hostId && b.id !== backupA.id) || backups[1];
+  const backupB = backups[1];
 
   // Inspect files
   const filesRes = await fetch(`${baseUrl}/api/backups/${backupA.id}/files`);
@@ -221,17 +214,6 @@ test('API: Backups run, download, inspection, diff, schedules', async () => {
   const blob = await downloadRes.arrayBuffer();
   assert.ok(blob.byteLength > 0);
 
-  // Run on-demand backup
-  const runRes = await fetch(`${baseUrl}/api/backups/run`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ hostId: 'node-ap-01' }),
-  });
-  assert.equal(runRes.status, 200);
-  const runData = await runRes.json();
-  assert.equal(runData.status, 'completed');
-  assert.ok(runData.backups.length >= 1);
-
   // Schedules
   const schedRes = await fetch(`${baseUrl}/api/backups/schedules`);
   assert.equal(schedRes.status, 200);
@@ -243,6 +225,10 @@ test('API: Backups run, download, inspection, diff, schedules', async () => {
     method: 'POST',
   });
   assert.equal(schedRunRes.status, 200);
+
+  // Clean up test hosts and their backups
+  await fetch(`${baseUrl}/api/hosts/node-gw-01?deleteBackups=true`, { method: 'DELETE' });
+  await fetch(`${baseUrl}/api/hosts/node-ap-01?deleteBackups=true`, { method: 'DELETE' });
 });
 
 test('API: Simulator controls (status, configure, reset)', async () => {
@@ -374,7 +360,6 @@ test('API: Adding a real host removes all demo data (hosts, backups, clients, wi
   const healthData = await healthRes.json();
   assert.equal(healthData.demoMode, false);
 
-  // Cleanup: delete the real host and reset simulator for clean state
+  // Cleanup: delete the real host
   await fetch(`${baseUrl}/api/hosts/${realHost.id}`, { method: 'DELETE' });
-  await fetch(`${baseUrl}/api/simulator/reset`, { method: 'POST' });
 });

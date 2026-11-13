@@ -9,8 +9,8 @@ import { serveStatic } from './static.js';
 
 export async function createServer() {
   await db.init();
-  await backupEngine.init(config.demoMode);
-  await hostManager.init(config.demoMode);
+  await backupEngine.init();
+  await hostManager.init();
   hostManager.startPolling(config.pollIntervalMs);
 
   const server = http.createServer(async (req, res) => {
@@ -46,7 +46,6 @@ if (isMain) {
         console.log(`[openwrt-managor] Server running on port ${config.port}`);
         console.log(`[openwrt-managor] Data dir: ${config.dataDir}`);
         console.log(`[openwrt-managor] Backup dir: ${config.backupDir}`);
-        console.log(`[openwrt-managor] Demo mode: ${config.demoMode}`);
       });
 
       const shutdown = () => {

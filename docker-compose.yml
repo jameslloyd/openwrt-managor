@@ -15,7 +15,6 @@ services:
       - PORT=8080
       - DATA_DIR=/data
       - BACKUP_DIR=/backups
-      - DEMO_MODE=true
       - POLL_INTERVAL_MS=10000
       - LOG_LEVEL=info
     volumes:

@@ -6,7 +6,7 @@ const getPath = (fileName) => path.join(config.dataDir, fileName);
 
 export const defaultSettings = {
   pollIntervalMs: 10000,
-  demoMode: true,
+  demoMode: false,
   retention: {
     maxBackupsPerHost: 10,
     maxAgeDays: 30,

@@ -12,17 +12,12 @@ export class BackupEngine {
     this.backupDir = backupDir;
   }
 
-  async init(demoMode = config.demoMode) {
+  async init(seedDemo = false) {
     await fs.mkdir(this.backupDir, { recursive: true });
-    const hosts = await db.getHosts();
-    const hasRealHosts = Array.isArray(hosts) && hosts.some((h) => !h.isSimulated);
-    const settings = await db.getSettings();
-    const isDemo = demoMode && (!settings || settings.demoMode !== false) && !hasRealHosts;
-
-    if (hasRealHosts) {
-      await this.removeDemoBackups();
-    } else if (isDemo) {
+    if (seedDemo === true) {
       await this.seedDemoBackups();
+    } else {
+      await this.removeDemoBackups();
     }
   }
 
@@ -254,8 +249,7 @@ export class BackupEngine {
     let targetHosts = [hostId];
     if (hostId === 'all') {
       const dbHosts = (await db.getHosts()) || [];
-      const activeHosts = dbHosts.length > 0 ? dbHosts : (config.demoMode ? simulator.getHosts() : []);
-      targetHosts = activeHosts.map((h) => h.id);
+      targetHosts = dbHosts.map((h) => h.id);
     }
 
     const results = [];
