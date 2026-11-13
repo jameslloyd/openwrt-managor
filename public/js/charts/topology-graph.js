@@ -5,7 +5,13 @@
  */
 
 import { renderIcon } from '../utils/icons.js';
-import { formatBps, formatMac, escapeHtml } from '../utils/formatters.js';
+import { escapeHtml } from '../utils/formatters.js';
+
+function truncateLabel(str, maxLen = 18) {
+  const s = String(str || '').trim();
+  if (s.length <= maxLen) return s;
+  return s.slice(0, maxLen - 1) + '…';
+}
 
 export class TopologyGraph {
   constructor({ container, onNodeClick = null }) {
@@ -20,6 +26,7 @@ export class TopologyGraph {
     this.zoom = 1;
     this.panX = 0;
     this.panY = 0;
+    this.hasInitialFit = false;
     this.isPanning = false;
     this.startX = 0;
     this.startY = 0;
@@ -40,16 +47,16 @@ export class TopologyGraph {
       <div class="topology-wrapper">
         <div class="topology-toolbar">
           <div class="topology-controls">
-            <button type="button" class="btn-icon" id="topo-zoom-in" title="Zoom In (+)">
+            <button type="button" class="btn-icon" id="topo-zoom-in" title="Zoom In (+)" aria-label="Zoom In">
               ${renderIcon('zoomIn', 'icon')}
             </button>
-            <button type="button" class="btn-icon" id="topo-zoom-out" title="Zoom Out (-)">
+            <button type="button" class="btn-icon" id="topo-zoom-out" title="Zoom Out (-)" aria-label="Zoom Out">
               ${renderIcon('zoomOut', 'icon')}
             </button>
-            <button type="button" class="btn-icon" id="topo-fit" title="Fit to Screen (Space)">
+            <button type="button" class="btn-icon" id="topo-fit" title="Fit to Screen (Space)" aria-label="Fit to Screen">
               ${renderIcon('fitScreen', 'icon')}
             </button>
-            <button type="button" class="btn-icon" id="topo-reset" title="Reset View">
+            <button type="button" class="btn-icon" id="topo-reset" title="Reset View" aria-label="Reset View">
               ${renderIcon('refresh', 'icon')}
             </button>
           </div>
@@ -60,6 +67,7 @@ export class TopologyGraph {
               <span>Group Clients</span>
             </label>
 
+            <label for="topo-filter-band" class="sr-only">Filter by Band</label>
             <select id="topo-filter-band" class="form-select" style="padding: 4px 8px; font-size: 12px;">
               <option value="all">All Bands</option>
               <option value="wired">Wired Only</option>
@@ -71,7 +79,9 @@ export class TopologyGraph {
         </div>
 
         <div class="topology-viewport" id="topo-viewport">
-          <svg class="topology-svg" id="topo-svg"></svg>
+          <svg class="topology-svg" id="topo-svg" role="img" aria-label="Interactive Network Topology Map">
+            <title>Interactive Network Topology Map</title>
+          </svg>
         </div>
 
         <div class="topology-legend">
@@ -92,7 +102,6 @@ export class TopologyGraph {
   }
 
   bindEvents() {
-    // Toolbar controls
     this.container.querySelector('#topo-zoom-in')?.addEventListener('click', () => this.zoomBy(1.2));
     this.container.querySelector('#topo-zoom-out')?.addEventListener('click', () => this.zoomBy(0.8));
     this.container.querySelector('#topo-fit')?.addEventListener('click', () => this.fitToScreen());
@@ -102,17 +111,19 @@ export class TopologyGraph {
     collapseToggle?.addEventListener('change', (e) => {
       this.collapseClients = e.target.checked;
       this.render();
+      this.fitToScreen();
     });
 
     const bandSelect = this.container.querySelector('#topo-filter-band');
     bandSelect?.addEventListener('change', (e) => {
       this.bandFilter = e.target.value;
       this.render();
+      this.fitToScreen();
     });
 
     // Viewport Panning (mouse drag)
     this.viewport.addEventListener('mousedown', (e) => {
-      if (e.target.closest('.topo-node')) return; // let node handle click
+      if (e.target.closest('.topo-node') || e.target.closest('.client-cluster-badge-group')) return;
       this.isPanning = true;
       this.startX = e.clientX - this.panX;
       this.startY = e.clientY - this.panY;
@@ -134,22 +145,15 @@ export class TopologyGraph {
     });
 
     // Mouse wheel zoom
-    this.viewport.addEventListener('wheel', (e) => {
-      e.preventDefault();
-      const factor = e.deltaY > 0 ? 0.9 : 1.1;
-      this.zoomBy(factor, e.offsetX, e.offsetY);
-    }, { passive: false });
-
-    // Keyboard controls
-    window.addEventListener('keydown', (e) => {
-      if (document.activeElement?.tagName === 'INPUT' || document.activeElement?.tagName === 'TEXTAREA') return;
-      if (e.key === '+' || e.key === '=') this.zoomBy(1.15);
-      if (e.key === '-' || e.key === '_') this.zoomBy(0.85);
-      if (e.key === ' ' && e.target === document.body) {
+    this.viewport.addEventListener(
+      'wheel',
+      (e) => {
         e.preventDefault();
-        this.fitToScreen();
-      }
-    });
+        const factor = e.deltaY > 0 ? 0.9 : 1.1;
+        this.zoomBy(factor, e.offsetX, e.offsetY);
+      },
+      { passive: false }
+    );
   }
 
   zoomBy(factor) {
@@ -159,17 +163,33 @@ export class TopologyGraph {
   }
 
   fitToScreen() {
-    this.zoom = 1;
-    this.panX = 0;
-    this.panY = 0;
+    if (!this.bounds || !this.viewport) {
+      this.zoom = 1;
+      this.panX = 0;
+      this.panY = 0;
+      this.updateTransform();
+      return;
+    }
+
+    const vw = this.viewport.clientWidth || 960;
+    const vh = this.viewport.clientHeight || 540;
+    const bw = Math.max(200, this.bounds.maxX - this.bounds.minX + 120);
+    const bh = Math.max(200, this.bounds.maxY - this.bounds.minY + 120);
+
+    const scaleX = vw / bw;
+    const scaleY = vh / bh;
+    this.zoom = Math.max(0.45, Math.min(1.15, Math.min(scaleX, scaleY)));
+
+    const contentCenterX = (this.bounds.minX + this.bounds.maxX) / 2;
+    const contentCenterY = (this.bounds.minY + this.bounds.maxY) / 2;
+
+    this.panX = vw / 2 - contentCenterX * this.zoom;
+    this.panY = vh / 2 - contentCenterY * this.zoom;
     this.updateTransform();
   }
 
   resetView() {
-    this.zoom = 1;
-    this.panX = 0;
-    this.panY = 0;
-    this.updateTransform();
+    this.fitToScreen();
   }
 
   updateTransform() {
@@ -184,12 +204,16 @@ export class TopologyGraph {
     this.links = links || [];
     this.clients = clients || [];
     this.render();
+    if (!this.hasInitialFit && (this.nodes.length > 0 || this.clients.length > 0)) {
+      this.hasInitialFit = true;
+      this.fitToScreen();
+    }
   }
 
   selectNode(nodeId) {
     this.selectedNodeId = nodeId;
     const allNodeEls = this.svg.querySelectorAll('.topo-node');
-    allNodeEls.forEach(el => {
+    allNodeEls.forEach((el) => {
       if (el.getAttribute('data-id') === nodeId) {
         el.classList.add('selected');
       } else {
@@ -201,10 +225,10 @@ export class TopologyGraph {
   render() {
     if (!this.svg) return;
 
-    // Filter nodes and clients
+    // Filter clients by band
     let displayClients = this.clients;
     if (this.bandFilter !== 'all') {
-      displayClients = displayClients.filter(c => {
+      displayClients = displayClients.filter((c) => {
         if (this.bandFilter === 'wired') return c.connectionType === 'wired';
         if (this.bandFilter === '2.4g') return c.connectionType === 'wifi_2g';
         if (this.bandFilter === '5g') return c.connectionType === 'wifi_5g';
@@ -213,70 +237,129 @@ export class TopologyGraph {
       });
     }
 
-    // Node positioning layout calculation (hierarchical tiered tree)
     const nodePositions = new Map();
     const width = this.viewport.clientWidth || 960;
     const centerX = width / 2;
 
+    const wanNode = this.nodes.find((n) => n.type === 'wan');
+    const gwNode = this.nodes.find((n) => n.type === 'gateway');
+    const apNodes = this.nodes.filter((n) => n.type === 'ap' || n.type === 'mesh' || n.type === 'switch');
+    const defaultParentId = gwNode?.id || apNodes[0]?.id || 'wan-internet';
+
+    // Group clients by connected host first so AP horizontal spacing accounts for client fan-out
+    const clientsByHost = new Map();
+    displayClients.forEach((c) => {
+      const hostId = c.connectedTo?.hostId || defaultParentId;
+      if (!clientsByHost.has(hostId)) clientsByHost.set(hostId, []);
+      clientsByHost.get(hostId).push(c);
+    });
+
+    const clientColSpacing = 128; // Wide enough so 16-char hostnames and IP addresses never collide
+    const clientRowSpacing = 88; // Tall enough for circle + 2 text rows + link clearance
+    const maxColsPerCluster = 4; // Wrap larger client groups into neat multi-row grids under their AP
+
     // Tier 0: WAN Uplink
-    const wanNode = this.nodes.find(n => n.type === 'wan');
     if (wanNode) {
-      nodePositions.set(wanNode.id, { x: centerX, y: 50, node: wanNode });
+      nodePositions.set(wanNode.id, { x: centerX, y: 55, node: wanNode });
     }
 
     // Tier 1: Gateway
-    const gwNode = this.nodes.find(n => n.type === 'gateway');
     if (gwNode) {
-      nodePositions.set(gwNode.id, { x: centerX, y: 160, node: gwNode });
+      nodePositions.set(gwNode.id, { x: centerX, y: 175, node: gwNode });
     }
 
     // Tier 2: Access Points / Mesh Nodes & Switches
-    const apNodes = this.nodes.filter(n => n.type === 'ap' || n.type === 'mesh' || n.type === 'switch');
-    const apCount = apNodes.length || 1;
-    const apSpacing = Math.min(260, width / (apCount + 1));
-    const apStartX = centerX - ((apCount - 1) * apSpacing) / 2;
-    const apTierY = gwNode ? 280 : 180;
-
-    apNodes.forEach((ap, idx) => {
-      nodePositions.set(ap.id, {
-        x: apStartX + idx * apSpacing,
-        y: apTierY,
-        node: ap
+    // Compute each AP's required horizontal footprint based on its client grid width
+    const apTierY = gwNode ? 310 : 195;
+    if (apNodes.length > 0) {
+      const apWidths = apNodes.map((ap) => {
+        if (this.collapseClients) return 240;
+        const count = (clientsByHost.get(ap.id) || []).length;
+        const cols = Math.min(maxColsPerCluster, Math.max(1, count));
+        return Math.max(240, cols * clientColSpacing + 48);
       });
-    });
 
-    const defaultParentId = gwNode?.id || apNodes[0]?.id || 'wan-internet';
+      const totalApSpan = apWidths.reduce((acc, w) => acc + w, 0);
+      let cursorX = centerX - totalApSpan / 2;
 
-    // Tier 3: Clients (if not collapsed)
+      apNodes.forEach((ap, idx) => {
+        const w = apWidths[idx];
+        const apCenterX = cursorX + w / 2;
+        nodePositions.set(ap.id, {
+          x: apCenterX,
+          y: apTierY,
+          node: ap,
+        });
+        cursorX += w;
+      });
+    }
+
+    // Tier 3: Clients arranged in non-overlapping multi-row grids beneath their parent AP / Gateway
     if (!this.collapseClients) {
-      // Group clients by connected host
-      const clientsByHost = new Map();
-      displayClients.forEach(c => {
-        const hostId = c.connectedTo?.hostId || defaultParentId;
-        if (!clientsByHost.has(hostId)) clientsByHost.set(hostId, []);
-        clientsByHost.get(hostId).push(c);
-      });
+      // If Gateway also has direct clients and there are APs on Tier 2, place Gateway's direct clients to the right of the AP row or below if no APs
+      let gwClientBaseX = centerX;
+      let gwClientBaseY = apNodes.length > 0 ? apTierY + 150 : (gwNode ? 320 : 200);
+      if (gwNode && apNodes.length > 0 && clientsByHost.has(gwNode.id)) {
+        // Find rightmost AP edge so Gateway clients don't collide with the middle AP's clients
+        let maxApRight = centerX;
+        apNodes.forEach((ap) => {
+          const p = nodePositions.get(ap.id);
+          const count = (clientsByHost.get(ap.id) || []).length;
+          const cols = Math.min(maxColsPerCluster, Math.max(1, count));
+          const halfW = Math.max(120, (cols * clientColSpacing) / 2);
+          if (p && p.x + halfW > maxApRight) maxApRight = p.x + halfW;
+        });
+        const gwClientCount = (clientsByHost.get(gwNode.id) || []).length;
+        const gwCols = Math.min(maxColsPerCluster, Math.max(1, gwClientCount));
+        gwClientBaseX = maxApRight + 80 + (gwCols * clientColSpacing) / 2;
+        gwClientBaseY = apTierY + 150;
+      }
 
-      // Position clients beneath their parent AP/GW
       clientsByHost.forEach((hostClients, hostId) => {
         const parentPos = nodePositions.get(hostId) || { x: centerX, y: apTierY };
+        const isGwHost = gwNode && hostId === gwNode.id;
+        const clusterCenterX = isGwHost ? gwClientBaseX : parentPos.x;
+        const baseTierY = isGwHost ? gwClientBaseY : parentPos.y + 150;
+
         const cCount = hostClients.length;
-        const cSpacing = 70;
-        const cStart = parentPos.x - ((cCount - 1) * cSpacing) / 2;
+        const cols = Math.min(maxColsPerCluster, Math.max(1, cCount));
 
         hostClients.forEach((client, cIdx) => {
+          const row = Math.floor(cIdx / cols);
+          const col = cIdx % cols;
+          const itemsInThisRow = Math.min(cols, cCount - row * cols);
+          const rowStartX = clusterCenterX - ((itemsInThisRow - 1) * clientColSpacing) / 2;
+
           nodePositions.set(`client-${client.mac}`, {
-            x: cStart + cIdx * cSpacing,
-            y: 430 + (cIdx % 2) * 40, // stagger vertically to avoid overlap
-            client: client
+            x: rowStartX + col * clientColSpacing,
+            y: baseTierY + row * clientRowSpacing,
+            client,
           });
         });
       });
     }
 
-    // Generate Links SVG
+    // Track bounding box for fitToScreen
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minY = Infinity;
+    let maxY = -Infinity;
+    nodePositions.forEach((pos) => {
+      const halfW = pos.node ? 95 : 65;
+      const halfH = pos.node ? 35 : 45;
+      if (pos.x - halfW < minX) minX = pos.x - halfW;
+      if (pos.x + halfW > maxX) maxX = pos.x + halfW;
+      if (pos.y - halfH < minY) minY = pos.y - halfH;
+      if (pos.y + halfH > maxY) maxY = pos.y + halfH;
+    });
+    if (Number.isFinite(minX)) {
+      this.bounds = { minX, maxX, minY, maxY };
+    }
+
+    // Generate Infrastructure Links SVG (skip client links here; client links are rendered below)
     let linksSvg = '';
     for (const link of this.links) {
+      if (String(link.target || '').startsWith('client-')) continue;
       const srcPos = nodePositions.get(link.source);
       const tgtPos = nodePositions.get(link.target);
       if (!srcPos || !tgtPos) continue;
@@ -290,33 +373,39 @@ export class TopologyGraph {
       if (link.medium === 'wifi_mesh') mediumClass = 'wifi-mesh';
       else if (link.medium === 'wifi_station') mediumClass = 'wifi-station';
 
-      // Curved Bezier line
       const midY = (srcPos.y + tgtPos.y) / 2;
+      const midX = (srcPos.x + tgtPos.x) / 2;
       const pathD = `M ${srcPos.x} ${srcPos.y} C ${srcPos.x} ${midY}, ${tgtPos.x} ${midY}, ${tgtPos.x} ${tgtPos.y}`;
+      const speedText = link.speedMbps >= 1000 ? `${link.speedMbps / 1000}G` : `${link.speedMbps}M`;
 
       linksSvg += `
         <g class="topo-link-group">
           <path d="${pathD}" class="topo-link ${speedClass} ${mediumClass}" />
-          ${link.speedMbps ? `
-            <text x="${(srcPos.x + tgtPos.x) / 2}" y="${midY - 4}" class="topo-link-label">
-              ${link.speedMbps >= 1000 ? (link.speedMbps / 1000) + 'G' : link.speedMbps + 'M'}
+          ${
+            link.speedMbps
+              ? `
+            <rect x="${midX - 18}" y="${midY - 10}" width="36" height="16" class="topo-link-pill" />
+            <text x="${midX}" y="${midY + 1}" class="topo-link-label">
+              ${escapeHtml(speedText)}
             </text>
-          ` : ''}
+          `
+              : ''
+          }
         </g>
       `;
     }
 
-    // Connect clients with subtle links
+    // Connect clients with subtle Bezier links
     if (!this.collapseClients) {
-      displayClients.forEach(c => {
+      displayClients.forEach((c) => {
         const cPos = nodePositions.get(`client-${c.mac}`);
         const parentHostId = c.connectedTo?.hostId || defaultParentId;
         const parentPos = nodePositions.get(parentHostId);
         if (cPos && parentPos) {
-          const midY = (parentPos.y + cPos.y) / 2;
+          const midY = parentPos.y + (cPos.y - parentPos.y) * 0.45;
           const isWired = c.connectionType === 'wired';
           linksSvg += `
-            <path d="M ${parentPos.x} ${parentPos.y} C ${parentPos.x} ${midY}, ${cPos.x} ${midY}, ${cPos.x} ${cPos.y}"
+            <path d="M ${parentPos.x} ${parentPos.y + 24} C ${parentPos.x} ${midY}, ${cPos.x} ${midY}, ${cPos.x} ${cPos.y - 18}"
                   class="topo-link ${isWired ? 'speed-1g' : 'wifi-station'}" opacity="0.4" />
           `;
         }
@@ -325,33 +414,41 @@ export class TopologyGraph {
 
     // Generate Nodes SVG
     let nodesSvg = '';
-    nodePositions.forEach((pos, id) => {
+    nodePositions.forEach((pos) => {
       if (pos.node) {
         // Core Infra Node (WAN, Gateway, AP, Switch)
         const n = pos.node;
-        const isGw = n.type === 'gateway';
         const isWan = n.type === 'wan';
         const isSelected = this.selectedNodeId === n.id;
-        const w = 150;
-        const h = 58;
+        const w = 176;
+        const h = 60;
+        const fullTitle = `${n.label || n.id} (${n.ip || (isWan ? 'Public IP' : '')})`;
+        const titleText = truncateLabel(n.label || n.id, 19);
+        const subText = truncateLabel(n.ip || (isWan ? 'Public IP' : ''), 22);
 
         nodesSvg += `
-          <g class="topo-node ${isSelected ? 'selected' : ''}" data-id="${escapeHtml(n.id)}" transform="translate(${pos.x - w / 2}, ${pos.y - h / 2})">
+          <g class="topo-node ${isSelected ? 'selected' : ''}"
+             data-id="${escapeHtml(n.id)}"
+             role="button"
+             tabindex="0"
+             aria-label="${escapeHtml(fullTitle)}"
+             transform="translate(${pos.x - w / 2}, ${pos.y - h / 2})">
+            <title>${escapeHtml(fullTitle)}</title>
             <rect width="${w}" height="${h}" class="topo-node-card" />
-            <circle cx="16" cy="20" r="5" fill="${n.status === 'online' ? 'var(--color-success)' : 'var(--color-danger)'}" />
-            <text x="30" y="24" class="topo-node-label" text-anchor="start">${escapeHtml(n.label || n.id)}</text>
-            <text x="30" y="42" class="topo-node-subtext" text-anchor="start">${escapeHtml(n.ip || (isWan ? 'Public IP' : ''))}</text>
+            <circle cx="16" cy="22" r="5" fill="${n.status === 'online' ? 'var(--color-success)' : 'var(--color-danger)'}" />
+            <text x="28" y="25" class="topo-node-label" text-anchor="start">${escapeHtml(titleText)}</text>
+            <text x="28" y="44" class="topo-node-subtext" text-anchor="start">${escapeHtml(subText)}</text>
           </g>
         `;
 
         // If clients are collapsed, show a cluster badge
         if (this.collapseClients && !isWan) {
-          const clientCount = displayClients.filter(c => (c.connectedTo?.hostId || defaultParentId) === n.id).length;
+          const clientCount = displayClients.filter((c) => (c.connectedTo?.hostId || defaultParentId) === n.id).length;
           if (clientCount > 0) {
             nodesSvg += `
-              <g class="client-cluster-badge-group" data-host-id="${escapeHtml(n.id)}" transform="translate(${pos.x + w / 2 - 20}, ${pos.y + h / 2 - 10})">
-                <rect width="40" height="20" rx="10" class="client-cluster-badge" />
-                <text x="20" y="10" class="client-cluster-text">+${clientCount}</text>
+              <g class="client-cluster-badge-group" data-host-id="${escapeHtml(n.id)}" transform="translate(${pos.x + w / 2 - 22}, ${pos.y + h / 2 - 10})">
+                <rect width="42" height="20" rx="10" class="client-cluster-badge" />
+                <text x="21" y="10" class="client-cluster-text">+${clientCount}</text>
               </g>
             `;
           }
@@ -361,19 +458,30 @@ export class TopologyGraph {
         const c = pos.client;
         const isWired = c.connectionType === 'wired';
         const r = 18;
+        const rawName = c.displayName || c.nickname || c.hostname || c.ip || c.mac;
+        const shortName = truncateLabel(rawName, 16);
+        const ipText = c.ip && c.ip !== '0.0.0.0' ? c.ip : c.mac;
+        const fullClientDesc = `${rawName} (${ipText})`;
 
         nodesSvg += `
-          <g class="topo-node topo-client-node" data-mac="${escapeHtml(c.mac)}" transform="translate(${pos.x}, ${pos.y})">
+          <g class="topo-node topo-client-node"
+             data-mac="${escapeHtml(c.mac)}"
+             role="button"
+             tabindex="0"
+             aria-label="${escapeHtml(fullClientDesc)}"
+             transform="translate(${pos.x}, ${pos.y})">
+            <title>${escapeHtml(fullClientDesc)}</title>
             <circle r="${r}" fill="var(--color-surface-elevated)" stroke="var(--color-border)" stroke-width="1.5" />
             <circle cx="${r - 5}" cy="${-r + 5}" r="3.5" fill="${isWired ? 'var(--color-band-wired)' : 'var(--color-band-5g)'}" />
-            <text y="${r + 14}" class="topo-node-label" font-size="10.5" text-anchor="middle">${escapeHtml(c.displayName || c.nickname || c.hostname || c.ip)}</text>
-            <text y="${r + 26}" class="topo-node-subtext" font-size="9" text-anchor="middle">${escapeHtml(c.ip)}</text>
+            <text x="0" y="${r + 15}" class="topo-node-label" font-size="11" text-anchor="middle">${escapeHtml(shortName)}</text>
+            <text x="0" y="${r + 29}" class="topo-node-subtext" font-size="9.5" text-anchor="middle">${escapeHtml(truncateLabel(ipText, 17))}</text>
           </g>
         `;
       }
     });
 
     this.svg.innerHTML = `
+      <title>Interactive Network Topology Map</title>
       <g class="topo-root-group" transform="translate(${this.panX}, ${this.panY}) scale(${this.zoom})">
         <!-- Links Layer -->
         <g class="topo-links-layer">${linksSvg}</g>
@@ -382,19 +490,33 @@ export class TopologyGraph {
       </g>
     `;
 
-    // Attach click events
-    this.svg.querySelectorAll('.topo-node').forEach(nodeEl => {
-      nodeEl.addEventListener('click', () => {
+    // Attach click & keyboard events
+    this.svg.querySelectorAll('.topo-node').forEach((nodeEl) => {
+      const activateNode = () => {
         const id = nodeEl.getAttribute('data-id');
         const mac = nodeEl.getAttribute('data-mac');
 
         if (id) {
           this.selectNode(id);
-          const found = this.nodes.find(n => n.id === id);
+          const found = this.nodes.find((n) => n.id === id);
           if (found && this.onNodeClick) this.onNodeClick(found);
         } else if (mac) {
-          const foundClient = this.clients.find(c => c.mac === mac);
+          const foundClient = this.clients.find((c) => c.mac === mac);
           if (foundClient && this.onNodeClick) this.onNodeClick(foundClient);
+        }
+      };
+
+      nodeEl.addEventListener('click', activateNode);
+      nodeEl.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          activateNode();
+        } else if (e.key === ' ') {
+          e.preventDefault();
+        }
+      });
+      nodeEl.addEventListener('keyup', (e) => {
+        if (e.key === ' ') {
+          activateNode();
         }
       });
     });

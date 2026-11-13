@@ -151,7 +151,6 @@
   font-size: 12px;
   font-weight: 600;
   fill: var(--color-text-primary);
-  text-anchor: middle;
   pointer-events: none;
 }
 
@@ -159,8 +158,21 @@
   font-family: var(--font-mono);
   font-size: 10px;
   fill: var(--color-text-secondary);
-  text-anchor: middle;
   pointer-events: none;
+}
+
+.topo-link-pill {
+  fill: var(--color-surface);
+  stroke: var(--color-border);
+  stroke-width: 1px;
+  rx: 6px;
+  ry: 6px;
+  pointer-events: none;
+}
+
+.topo-node:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 3px;
 }
 
 /* Client Cluster Badge */
