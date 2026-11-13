@@ -1050,8 +1050,8 @@ export class NetworkSimulator {
     return { nodes, links };
   }
 
-  generateMockArchive(hostId, versionOffset = 0) {
-    const host = this.getHost(hostId) || this.hosts[0];
+  generateMockArchive(hostId, versionOffset = 0, hostOverride = null) {
+    const host = hostOverride || this.getHost(hostId) || this.hosts[0];
     const isGw = host.role === 'gateway';
 
     const networkConfig = isGw

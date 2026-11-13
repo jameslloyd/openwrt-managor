@@ -1,9 +1,18 @@
 import { simulator } from './simulator.js';
+import { hostManager } from './hostManager.js';
 import { db } from '../storage/db.js';
 
 export class ClientEngine {
   async getClients(filter = {}) {
-    const clients = simulator.getClients(filter);
+    const hosts = await hostManager.getAllHosts();
+    const simHostIds = new Set(hosts.filter((h) => h.isSimulated).map((h) => h.id));
+    if (simHostIds.size === 0) {
+      return [];
+    }
+
+    const clients = simulator
+      .getClients(filter)
+      .filter((c) => !c.connectedTo?.hostId || simHostIds.has(c.connectedTo.hostId));
     const aliases = (await db.getClientAliases()) || {};
 
     return clients.map((c) => {
@@ -17,8 +26,17 @@ export class ClientEngine {
   }
 
   async getClientByMac(mac) {
+    const hosts = await hostManager.getAllHosts();
+    const simHostIds = new Set(hosts.filter((h) => h.isSimulated).map((h) => h.id));
+    if (simHostIds.size === 0) {
+      return null;
+    }
+
     const client = simulator.getClientByMac(mac);
     if (!client) return null;
+    if (client.connectedTo?.hostId && !simHostIds.has(client.connectedTo.hostId)) {
+      return null;
+    }
 
     const aliases = (await db.getClientAliases()) || {};
     const alias = aliases[client.mac.toLowerCase()];

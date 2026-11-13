@@ -219,40 +219,47 @@ export class TopologyGraph {
     const centerX = width / 2;
 
     // Tier 0: WAN Uplink
-    const wanNode = this.nodes.find(n => n.type === 'wan') || { id: 'wan-internet', label: 'WAN Uplink', type: 'wan' };
-    nodePositions.set(wanNode.id, { x: centerX, y: 50, node: wanNode });
+    const wanNode = this.nodes.find(n => n.type === 'wan');
+    if (wanNode) {
+      nodePositions.set(wanNode.id, { x: centerX, y: 50, node: wanNode });
+    }
 
     // Tier 1: Gateway
-    const gwNode = this.nodes.find(n => n.type === 'gateway') || { id: 'node-gw-01', label: 'Main Gateway', type: 'gateway' };
-    nodePositions.set(gwNode.id, { x: centerX, y: 160, node: gwNode });
+    const gwNode = this.nodes.find(n => n.type === 'gateway');
+    if (gwNode) {
+      nodePositions.set(gwNode.id, { x: centerX, y: 160, node: gwNode });
+    }
 
     // Tier 2: Access Points / Mesh Nodes & Switches
-    const apNodes = this.nodes.filter(n => n.type === 'ap' || n.type === 'switch');
+    const apNodes = this.nodes.filter(n => n.type === 'ap' || n.type === 'mesh' || n.type === 'switch');
     const apCount = apNodes.length || 1;
     const apSpacing = Math.min(260, width / (apCount + 1));
     const apStartX = centerX - ((apCount - 1) * apSpacing) / 2;
+    const apTierY = gwNode ? 280 : 180;
 
     apNodes.forEach((ap, idx) => {
       nodePositions.set(ap.id, {
         x: apStartX + idx * apSpacing,
-        y: 280,
+        y: apTierY,
         node: ap
       });
     });
+
+    const defaultParentId = gwNode?.id || apNodes[0]?.id || 'wan-internet';
 
     // Tier 3: Clients (if not collapsed)
     if (!this.collapseClients) {
       // Group clients by connected host
       const clientsByHost = new Map();
       displayClients.forEach(c => {
-        const hostId = c.connectedTo?.hostId || gwNode.id;
+        const hostId = c.connectedTo?.hostId || defaultParentId;
         if (!clientsByHost.has(hostId)) clientsByHost.set(hostId, []);
         clientsByHost.get(hostId).push(c);
       });
 
       // Position clients beneath their parent AP/GW
       clientsByHost.forEach((hostClients, hostId) => {
-        const parentPos = nodePositions.get(hostId) || { x: centerX, y: 280 };
+        const parentPos = nodePositions.get(hostId) || { x: centerX, y: apTierY };
         const cCount = hostClients.length;
         const cSpacing = 70;
         const cStart = parentPos.x - ((cCount - 1) * cSpacing) / 2;
@@ -303,7 +310,7 @@ export class TopologyGraph {
     if (!this.collapseClients) {
       displayClients.forEach(c => {
         const cPos = nodePositions.get(`client-${c.mac}`);
-        const parentHostId = c.connectedTo?.hostId || gwNode.id;
+        const parentHostId = c.connectedTo?.hostId || defaultParentId;
         const parentPos = nodePositions.get(parentHostId);
         if (cPos && parentPos) {
           const midY = (parentPos.y + cPos.y) / 2;
@@ -339,7 +346,7 @@ export class TopologyGraph {
 
         // If clients are collapsed, show a cluster badge
         if (this.collapseClients && !isWan) {
-          const clientCount = displayClients.filter(c => (c.connectedTo?.hostId || gwNode.id) === n.id).length;
+          const clientCount = displayClients.filter(c => (c.connectedTo?.hostId || defaultParentId) === n.id).length;
           if (clientCount > 0) {
             nodesSvg += `
               <g class="client-cluster-badge-group" data-host-id="${escapeHtml(n.id)}" transform="translate(${pos.x + w / 2 - 20}, ${pos.y + h / 2 - 10})">

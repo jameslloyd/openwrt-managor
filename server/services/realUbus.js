@@ -1,3 +1,5 @@
+import { config } from '../config.js';
+
 /**
  * Real OpenWrt HTTP ubus Client and Connection Tester
  */
@@ -109,10 +111,13 @@ export async function testHostConnection(hostConfig, simulator) {
     };
   }
 
-  // If host is explicitly simulated or matches a simulated IP
+  // If host is explicitly simulated or matches a simulated IP while demo mode is active
   const isSimulated =
-    hostConfig.isSimulated ||
-    (simulator && simulator.getHosts().some((h) => h.ip === hostConfig.ip));
+    hostConfig.isSimulated === true ||
+    (hostConfig.isSimulated !== false &&
+      config.demoMode &&
+      simulator &&
+      simulator.getHosts().some((h) => h.ip === hostConfig.ip));
 
   if (isSimulated) {
     const matched = simulator ? simulator.getHosts().find((h) => h.ip === hostConfig.ip) : null;

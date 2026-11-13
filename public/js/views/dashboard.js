@@ -29,9 +29,10 @@ export function renderDashboard(container) {
   const backupStatusLabel = hasBackups ? 'Up-to-Date' : 'Attention Needed';
 
   // Current WAN rates from latest history
+  const isDemo = Boolean(health?.demoMode);
   const latestThroughput = throughputHistory.length > 0
     ? throughputHistory[throughputHistory.length - 1]
-    : { rxBps: 12500000, txBps: 4200000 };
+    : (isDemo ? { rxBps: 12500000, txBps: 4200000 } : { rxBps: 0, txBps: 0 });
 
   container.innerHTML = `
     <div class="view-header">
@@ -146,41 +147,14 @@ export function renderDashboard(container) {
       <div class="activity-card">
         <h2 style="font-size: 15px; font-weight: 600;">Live Network Activity</h2>
         <ul class="activity-list">
-          <li class="activity-item">
-            <div class="activity-icon-badge info">${renderIcon('wifi', 'icon')}</div>
-            <div class="activity-content">
-              <div><strong>Client Roamed:</strong> MacBook Pro roamed from Living Room AP to Office AP (-78 dBm → -52 dBm)</div>
-              <div class="activity-time">2 minutes ago</div>
-            </div>
-          </li>
-          <li class="activity-item">
-            <div class="activity-icon-badge success">${renderIcon('check', 'icon')}</div>
-            <div class="activity-content">
-              <div><strong>Scheduled Backup Verified:</strong> SHA-256 validated for Main Gateway (42.2 KB)</div>
-              <div class="activity-time">35 minutes ago</div>
-            </div>
-          </li>
-          <li class="activity-item">
-            <div class="activity-icon-badge warning">${renderIcon('alertTriangle', 'icon')}</div>
-            <div class="activity-content">
-              <div><strong>WiFi Interference:</strong> Co-channel overlap detected on 2.4 GHz Channel 6</div>
-              <div class="activity-time">1 hour ago</div>
-            </div>
-          </li>
-          <li class="activity-item">
-            <div class="activity-icon-badge info">${renderIcon('database', 'icon')}</div>
-            <div class="activity-content">
-              <div><strong>TrueNAS Retention:</strong> Pruned 1 expired backup archive per retention policy</div>
-              <div class="activity-time">3 hours ago</div>
-            </div>
-          </li>
+          ${renderActivityItems({ isDemo, hosts, backups, warnings: wifiInterference?.warnings || [] })}
         </ul>
       </div>
     </div>
   `;
 
   // Render SVG Sparkline
-  renderSparkline(container.querySelector('#dash-sparkline-container'), throughputHistory);
+  renderSparkline(container.querySelector('#dash-sparkline-container'), throughputHistory, isDemo);
 
   // Attach quick actions
   container.querySelector('#dash-quick-refresh')?.addEventListener('click', () => {
@@ -302,7 +276,90 @@ function renderHostCard(host) {
   `;
 }
 
-function renderSparkline(container, history = []) {
+function renderActivityItems({ isDemo, hosts = [], backups = [], warnings = [] }) {
+  if (isDemo) {
+    return `
+      <li class="activity-item">
+        <div class="activity-icon-badge info">${renderIcon('wifi', 'icon')}</div>
+        <div class="activity-content">
+          <div><strong>Client Roamed:</strong> MacBook Pro roamed from Living Room AP to Office AP (-78 dBm → -52 dBm)</div>
+          <div class="activity-time">2 minutes ago</div>
+        </div>
+      </li>
+      <li class="activity-item">
+        <div class="activity-icon-badge success">${renderIcon('check', 'icon')}</div>
+        <div class="activity-content">
+          <div><strong>Scheduled Backup Verified:</strong> SHA-256 validated for Main Gateway (42.2 KB)</div>
+          <div class="activity-time">35 minutes ago</div>
+        </div>
+      </li>
+      <li class="activity-item">
+        <div class="activity-icon-badge warning">${renderIcon('alertTriangle', 'icon')}</div>
+        <div class="activity-content">
+          <div><strong>WiFi Interference:</strong> Co-channel overlap detected on 2.4 GHz Channel 6</div>
+          <div class="activity-time">1 hour ago</div>
+        </div>
+      </li>
+      <li class="activity-item">
+        <div class="activity-icon-badge info">${renderIcon('database', 'icon')}</div>
+        <div class="activity-content">
+          <div><strong>TrueNAS Retention:</strong> Pruned 1 expired backup archive per retention policy</div>
+          <div class="activity-time">3 hours ago</div>
+        </div>
+      </li>
+    `;
+  }
+
+  const items = [];
+  for (const h of hosts.slice(0, 3)) {
+    items.push(`
+      <li class="activity-item">
+        <div class="activity-icon-badge ${h.status === 'online' ? 'success' : 'warning'}">${renderIcon('router', 'icon')}</div>
+        <div class="activity-content">
+          <div><strong>Host Monitored:</strong> ${escapeHtml(h.name || h.hostname)} (${escapeHtml(h.ip)}) is ${escapeHtml(h.status || 'online')}</div>
+          <div class="activity-time">${h.lastSeen ? formatRelativeTime(h.lastSeen) : 'Just now'}</div>
+        </div>
+      </li>
+    `);
+  }
+  for (const b of backups.slice(0, 2)) {
+    items.push(`
+      <li class="activity-item">
+        <div class="activity-icon-badge info">${renderIcon('database', 'icon')}</div>
+        <div class="activity-content">
+          <div><strong>Backup Verified:</strong> SHA-256 validated for ${escapeHtml(b.hostName || b.hostId)}</div>
+          <div class="activity-time">${formatRelativeTime(b.timestamp)}</div>
+        </div>
+      </li>
+    `);
+  }
+  for (const w of warnings.slice(0, 2)) {
+    items.push(`
+      <li class="activity-item">
+        <div class="activity-icon-badge warning">${renderIcon('alertTriangle', 'icon')}</div>
+        <div class="activity-content">
+          <div><strong>WiFi Interference:</strong> ${escapeHtml(w.message)}</div>
+          <div class="activity-time">Active</div>
+        </div>
+      </li>
+    `);
+  }
+
+  if (items.length === 0) {
+    return `
+      <li class="activity-item">
+        <div class="activity-icon-badge info">${renderIcon('activity', 'icon')}</div>
+        <div class="activity-content">
+          <div><strong>No Recent Events:</strong> Add an OpenWrt host to begin live monitoring.</div>
+        </div>
+      </li>
+    `;
+  }
+
+  return items.join('');
+}
+
+function renderSparkline(container, history = [], isDemo = false) {
   if (!container) return;
 
   const width = container.clientWidth || 800;
@@ -312,17 +369,23 @@ function renderSparkline(container, history = []) {
   const chartW = width - pad.left - pad.right;
   const chartH = height - pad.top - pad.bottom;
 
-  // Synthesize at least 15 points if empty
+  // Synthesize baseline points if empty
   let points = [...history];
   if (points.length < 5) {
-    points = [
-      { rxBps: 8500000, txBps: 2100000 },
-      { rxBps: 11200000, txBps: 3400000 },
-      { rxBps: 14800000, txBps: 4100000 },
-      { rxBps: 12000000, txBps: 3800000 },
-      { rxBps: 16500000, txBps: 5200000 },
-      { rxBps: 13500000, txBps: 4600000 }
-    ];
+    points = isDemo
+      ? [
+          { rxBps: 8500000, txBps: 2100000 },
+          { rxBps: 11200000, txBps: 3400000 },
+          { rxBps: 14800000, txBps: 4100000 },
+          { rxBps: 12000000, txBps: 3800000 },
+          { rxBps: 16500000, txBps: 5200000 },
+          { rxBps: 13500000, txBps: 4600000 }
+        ]
+      : [
+          { rxBps: 0, txBps: 0 },
+          { rxBps: 0, txBps: 0 },
+          ...points
+        ];
   }
 
   const maxVal = Math.max(...points.map(p => Math.max(p.rxBps, p.txBps)), 1000000);

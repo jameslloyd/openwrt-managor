@@ -14,8 +14,36 @@ export class BackupEngine {
 
   async init(demoMode = config.demoMode) {
     await fs.mkdir(this.backupDir, { recursive: true });
-    if (demoMode) {
+    const hosts = await db.getHosts();
+    const hasRealHosts = Array.isArray(hosts) && hosts.some((h) => !h.isSimulated);
+    const settings = await db.getSettings();
+    const isDemo = demoMode && (!settings || settings.demoMode !== false) && !hasRealHosts;
+
+    if (hasRealHosts) {
+      await this.removeDemoBackups();
+    } else if (isDemo) {
       await this.seedDemoBackups();
+    }
+  }
+
+  /**
+   * Removes demo backup archives and directories for simulated hosts.
+   */
+  async removeDemoBackups(simHostIds = null) {
+    const defaultDemoIds = simulator.getHosts().map((h) => h.id);
+    const targetIds = Array.from(new Set([...defaultDemoIds, ...(simHostIds || [])]));
+    const resolvedBackupDir = path.resolve(this.backupDir);
+
+    for (const hostId of targetIds) {
+      try {
+        this.validateHostId(hostId);
+        const safeHostDir = path.resolve(resolvedBackupDir, hostId);
+        if (safeHostDir.startsWith(resolvedBackupDir + path.sep)) {
+          await fs.rm(safeHostDir, { recursive: true, force: true });
+        }
+      } catch {
+        // Ignore cleanup errors for missing dirs
+      }
     }
   }
 
@@ -64,9 +92,10 @@ export class BackupEngine {
 
   async createSimulatedBackup(hostId, timestamp = new Date().toISOString(), versionOffset = 0, triggerType = 'manual') {
     this.validateHostId(hostId);
-    const host = simulator.getHost(hostId);
+    const dbHosts = (await db.getHosts()) || [];
+    const host = dbHosts.find((h) => h.id === hostId) || simulator.getHost(hostId);
     const hostName = host ? host.name : hostId;
-    const { archiveBuffer, sha256, sizeBytes, filesCount, filesList } = simulator.generateMockArchive(hostId, versionOffset);
+    const { archiveBuffer, sha256, sizeBytes, filesCount, filesList } = simulator.generateMockArchive(hostId, versionOffset, host);
 
     const resolvedBackupDir = path.resolve(this.backupDir);
     const safeHostDir = path.resolve(resolvedBackupDir, hostId);
@@ -222,9 +251,12 @@ export class BackupEngine {
 
   async runBackup(hostId, triggerType = 'manual') {
     const jobId = `job-bak-${Date.now()}`;
-    const targetHosts = hostId === 'all'
-      ? (await simulator.getHosts()).map((h) => h.id)
-      : [hostId];
+    let targetHosts = [hostId];
+    if (hostId === 'all') {
+      const dbHosts = (await db.getHosts()) || [];
+      const activeHosts = dbHosts.length > 0 ? dbHosts : (config.demoMode ? simulator.getHosts() : []);
+      targetHosts = activeHosts.map((h) => h.id);
+    }
 
     const results = [];
     for (const id of targetHosts) {

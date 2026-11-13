@@ -287,14 +287,23 @@ export async function handleApiRequest(req, res, pathname, searchParams) {
     // -------------------------------------------------------------
     // WiFi Spectrum & Interference APIs
     // -------------------------------------------------------------
-    if (pathname === '/api/wifi/channels' && req.method === 'GET') {
-      const bands = simulator.getWifiBands();
-      sendJson(res, 200, { bands });
-      return true;
-    }
+    if ((pathname === '/api/wifi/channels' || pathname === '/api/wifi/interference') && req.method === 'GET') {
+      const hosts = await hostManager.getAllHosts();
+      const simHostIds = new Set(hosts.filter((h) => h.isSimulated).map((h) => h.id));
+      const rawBands = simulator.getWifiBands();
+      const bands = {};
+      for (const [bandName, bandInfo] of Object.entries(rawBands)) {
+        bands[bandName] = {
+          ...bandInfo,
+          radios: (bandInfo.radios || []).filter((r) => simHostIds.has(r.hostId)),
+        };
+      }
 
-    if (pathname === '/api/wifi/interference' && req.method === 'GET') {
-      const bands = simulator.getWifiBands();
+      if (pathname === '/api/wifi/channels') {
+        sendJson(res, 200, { bands });
+        return true;
+      }
+
       const analysis = analyzeInterference(bands);
       sendJson(res, 200, analysis);
       return true;
@@ -471,6 +480,15 @@ export async function handleApiRequest(req, res, pathname, searchParams) {
 
     if (pathname === '/api/simulator/reset' && req.method === 'POST') {
       const status = simulator.reset();
+      const hosts = (await db.getHosts()) || [];
+      const hasRealHosts = hosts.some((h) => !h.isSimulated);
+      if (!hasRealHosts) {
+        config.demoMode = true;
+        const currentSettings = (await db.getSettings()) || {};
+        await db.saveSettings({ ...currentSettings, demoMode: true });
+        await db.saveHosts(simulator.getHosts());
+        await backupEngine.seedDemoBackups();
+      }
       sendJson(res, 200, status);
       return true;
     }

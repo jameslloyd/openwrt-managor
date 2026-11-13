@@ -317,3 +317,64 @@ test('Security: Host ID and path traversal input rejection in backups API', asyn
   const badQueryRes = await fetch(`${baseUrl}/api/backups?hostId=../etc`);
   assert.equal(badQueryRes.status, 400);
 });
+
+test('API: Adding a real host removes all demo data (hosts, backups, clients, wifi, topology, demoMode)', async () => {
+  // Add a real host (isSimulated: false)
+  const createRes = await fetch(`${baseUrl}/api/hosts`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: 'Production Router',
+      ip: '10.0.0.1',
+      role: 'gateway',
+      isSimulated: false,
+    }),
+  });
+  assert.equal(createRes.status, 201);
+  const realHost = await createRes.json();
+  assert.equal(realHost.isSimulated, false);
+
+  // 1. Only the real host remains in /api/hosts (demo hosts removed)
+  const hostsRes = await fetch(`${baseUrl}/api/hosts`);
+  const hosts = await hostsRes.json();
+  assert.equal(hosts.length, 1);
+  assert.equal(hosts[0].id, realHost.id);
+  assert.equal(hosts.some((h) => h.isSimulated), false);
+
+  // 2. Demo backups removed from /api/backups
+  const backupsRes = await fetch(`${baseUrl}/api/backups`);
+  const backups = await backupsRes.json();
+  assert.equal(backups.length, 0);
+
+  // 3. Demo clients removed from /api/clients
+  const clientsRes = await fetch(`${baseUrl}/api/clients`);
+  const clients = await clientsRes.json();
+  assert.equal(clients.length, 0);
+
+  // 4. Demo radios removed from /api/wifi/channels & /api/wifi/interference
+  const wifiRes = await fetch(`${baseUrl}/api/wifi/channels`);
+  const wifiData = await wifiRes.json();
+  assert.equal(wifiData.bands['2.4GHz'].radios.length, 0);
+  assert.equal(wifiData.bands['5GHz'].radios.length, 0);
+  assert.equal(wifiData.bands['6GHz'].radios.length, 0);
+
+  const interRes = await fetch(`${baseUrl}/api/wifi/interference`);
+  const interData = await interRes.json();
+  assert.equal(interData.warnings.length, 0);
+
+  // 5. Topology only includes WAN + the real host (no demo nodes or demo clients)
+  const topoRes = await fetch(`${baseUrl}/api/topology`);
+  const topoData = await topoRes.json();
+  assert.equal(topoData.nodes.length, 2);
+  assert.ok(topoData.nodes.some((n) => n.id === realHost.id));
+  assert.equal(topoData.nodes.some((n) => n.id === 'node-gw-01'), false);
+
+  // 6. Health & settings report demoMode: false
+  const healthRes = await fetch(`${baseUrl}/api/health`);
+  const healthData = await healthRes.json();
+  assert.equal(healthData.demoMode, false);
+
+  // Cleanup: delete the real host and reset simulator for clean state
+  await fetch(`${baseUrl}/api/hosts/${realHost.id}`, { method: 'DELETE' });
+  await fetch(`${baseUrl}/api/simulator/reset`, { method: 'POST' });
+});

@@ -1,3 +1,4 @@
+import { config } from '../config.js';
 import { db } from '../storage/db.js';
 import { simulator } from './simulator.js';
 import { testHostConnection } from './realUbus.js';
@@ -18,12 +19,65 @@ export class HostManager {
   }
 
   async init(demoMode = true) {
-    let hosts = await db.getHosts();
-    if ((!hosts || hosts.length === 0) && demoMode) {
+    let hosts = (await db.getHosts()) || [];
+    const settings = await db.getSettings();
+    const hasRealHosts = hosts.some((h) => !h.isSimulated);
+
+    if (hasRealHosts) {
+      hosts = await this.removeDemoData(hosts);
+      await db.saveHosts(hosts);
+      return;
+    }
+
+    if (settings && settings.demoMode === false) {
+      config.demoMode = false;
+      return;
+    }
+
+    if (hosts.length === 0 && demoMode && config.demoMode) {
       // Seed initial simulated hosts
       hosts = simulator.getHosts();
       await db.saveHosts(hosts);
     }
+  }
+
+  /**
+   * Purges all simulated demo hosts, demo backups, demo client aliases, and demo history.
+   */
+  async removeDemoData(currentHosts = null) {
+    const hosts = currentHosts || (await db.getHosts()) || [];
+    const simHostIds = hosts.filter((h) => h.isSimulated).map((h) => h.id);
+    const realHosts = hosts.filter((h) => !h.isSimulated);
+
+    // Disable demo mode in runtime config and persisted settings
+    config.demoMode = false;
+    const settings = (await db.getSettings()) || {};
+    if (settings.demoMode !== false) {
+      await db.saveSettings({ ...settings, demoMode: false });
+    }
+
+    // Remove demo backups for simulated hosts
+    await backupEngine.removeDemoBackups(simHostIds);
+
+    // Clear demo telemetry history
+    await db.saveHistory([]);
+
+    // Remove demo client aliases
+    const aliases = (await db.getClientAliases()) || {};
+    const demoMacs = new Set(simulator.getClients().map((c) => c.mac.toLowerCase()));
+    let aliasesChanged = false;
+    const cleanedAliases = { ...aliases };
+    for (const mac of Object.keys(cleanedAliases)) {
+      if (demoMacs.has(mac.toLowerCase())) {
+        delete cleanedAliases[mac];
+        aliasesChanged = true;
+      }
+    }
+    if (aliasesChanged) {
+      await db.saveClientAliases(cleanedAliases);
+    }
+
+    return realHosts;
   }
 
   startPolling(intervalMs = 10000) {
@@ -87,8 +141,12 @@ export class HostManager {
   }
 
   async getAllHosts({ sanitized = true } = {}) {
-    const hosts = await db.getHosts();
-    const list = (!hosts || hosts.length === 0) ? simulator.getHosts() : hosts;
+    let hosts = await db.getHosts();
+    if (Array.isArray(hosts) && hosts.some((h) => !h.isSimulated) && hosts.some((h) => h.isSimulated)) {
+      hosts = await this.removeDemoData(hosts);
+      await db.saveHosts(hosts);
+    }
+    const list = (!hosts || hosts.length === 0) ? (config.demoMode ? simulator.getHosts() : []) : hosts;
     if (sanitized) {
       return list.map(sanitizeHost);
     }
@@ -103,7 +161,14 @@ export class HostManager {
   }
 
   async createHost(data) {
-    const hosts = await this.getAllHosts({ sanitized: false });
+    let hosts = await this.getAllHosts({ sanitized: false });
+    const isSimulated = Boolean(data.isSimulated);
+
+    // When adding a real host, purge all demo data and simulated hosts
+    if (!isSimulated) {
+      hosts = await this.removeDemoData(hosts);
+    }
+
     const id = data.id || `node-${(data.role || 'ap')}-${Date.now().toString(36)}`;
     const newHost = {
       id,
@@ -118,7 +183,7 @@ export class HostManager {
       username: data.username || 'root',
       password: data.password || '',
       sshPort: data.sshPort || 22,
-      isSimulated: Boolean(data.isSimulated),
+      isSimulated,
       status: 'online',
       firmware: data.firmware || 'OpenWrt 23.05.4',
       uptimeSec: 3600,

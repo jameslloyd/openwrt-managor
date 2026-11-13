@@ -115,10 +115,24 @@ class Store {
         }
       }
 
-      // Keep max 30 points of throughput history
+      // Keep max 30 points of throughput history (reset if leaving demo mode)
+      const wasDemo = this.state.health?.demoMode ?? true;
+      const isNowDemo = health?.demoMode ?? false;
+      const baseHistory = (wasDemo && !isNowDemo) ? [] : this.state.throughputHistory;
+
       const now = new Date();
-      const history = [...this.state.throughputHistory, { timestamp: now, rxBps: wanRxBps, txBps: wanTxBps }];
+      const history = [...baseHistory, { timestamp: now, rxBps: wanRxBps, txBps: wanTxBps }];
       if (history.length > 30) history.shift();
+
+      let selectedNode = this.state.selectedNode;
+      if (selectedNode && selectedNode.id !== 'wan-internet' && !hosts.some(h => h.id === selectedNode.id)) {
+        selectedNode = null;
+      }
+
+      let selectedClient = this.state.selectedClient;
+      if (selectedClient && !clients.some(c => c.mac === selectedClient.mac)) {
+        selectedClient = null;
+      }
 
       this.setState({
         health,
@@ -128,6 +142,8 @@ class Store {
         wifiChannels,
         wifiInterference,
         backups,
+        selectedNode,
+        selectedClient,
         throughputHistory: history,
         lastPollTime: now,
         connectionLost: false,

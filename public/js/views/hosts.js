@@ -155,7 +155,8 @@ export function renderHosts(container) {
         toast.success('Host Added', `Added ${name} to monitoring fleet`);
       }
       closeModal('host-form-dialog');
-      store.poll();
+      await store.poll();
+      renderHosts(container);
     } catch (err) {
       toast.error('Failed to Save Host', err.message);
     }
@@ -174,7 +175,7 @@ export function renderHosts(container) {
     feedbackBox.innerHTML = `<div>Testing connection to ${escapeHtml(ip || 'router')} via ${escapeHtml(protocol)}...</div>`;
 
     try {
-      const res = await api.testHostConnection({ ip, username, password, protocol });
+      const res = await api.testHostConnection({ ip, username, password, protocol, isSimulated: false });
       if (res.success) {
         feedbackBox.className = 'probe-feedback-box success';
         feedbackBox.innerHTML = `
@@ -259,7 +260,8 @@ export function renderHosts(container) {
         try {
           await api.deleteHost(hostId);
           toast.success('Host Removed', `Removed ${hostId}`);
-          store.poll();
+          await store.poll();
+          renderHosts(container);
         } catch (err) {
           toast.error('Removal Failed', err.message);
         }
