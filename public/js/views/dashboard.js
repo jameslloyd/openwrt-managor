@@ -191,6 +191,8 @@ export function renderDashboard(container) {
           ip: host.ip,
           mac: host.mac,
           model: host.model,
+          firmware: host.firmware,
+          updates: host.updates,
           status: host.status,
           metrics: {
             cpuUsagePct: host.cpuUsagePct ?? 0,
@@ -230,13 +232,16 @@ function renderHostCard(host) {
   const has2g = radios.some(r => r.band === '2.4GHz');
   const has5g = radios.some(r => r.band === '5GHz');
   const has6g = radios.some(r => r.band === '6GHz');
+  const pkgCount = host.updates?.packagesCount || 0;
+  const fwAvailable = Boolean(host.updates?.firmwareUpdateAvailable);
+  const availFwVer = host.updates?.availableFirmwareVersion || host.updates?.attendedSysupgrade?.availableVersion;
 
   return `
     <div class="node-card">
       <div class="node-card-header">
         <div>
           <div class="node-name">${escapeHtml(host.name || host.hostname || host.id)}</div>
-          <div class="node-model">${escapeHtml(host.model || 'OpenWrt Device')}</div>
+          <div class="node-model">${escapeHtml(host.model || 'OpenWrt Device')} • ${escapeHtml(host.firmware || 'OpenWrt')}</div>
         </div>
         <span class="status-pill ${isOnline ? 'online' : 'offline'}">
           <span class="status-dot ${isOnline ? 'online' : 'offline'}"></span>
@@ -249,6 +254,21 @@ function renderHostCard(host) {
         <span>•</span>
         <span>Uptime: ${formatUptime(host.uptimeSec)}</span>
       </div>
+
+      ${pkgCount > 0 || fwAvailable ? `
+        <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
+          ${fwAvailable
+            ? `<a href="#/hosts" class="status-pill warning" style="font-size: 11px; padding: 2px 8px; text-decoration: none;">
+                ${renderIcon('zap', 'icon icon-sm')} Firmware ${escapeHtml(availFwVer || 'Update')} Available
+              </a>`
+            : ''}
+          ${pkgCount > 0
+            ? `<a href="#/hosts" class="status-pill info" style="font-size: 11px; padding: 2px 8px; text-decoration: none;">
+                ${renderIcon('download', 'icon icon-sm')} ${pkgCount} Package Update${pkgCount === 1 ? '' : 's'}
+              </a>`
+            : ''}
+        </div>
+      ` : ''}
 
       <div class="node-progress-group">
         <div class="progress-label-row">
@@ -289,6 +309,31 @@ function renderHostCard(host) {
 
 function renderActivityItems({ hosts = [], backups = [], warnings = [] }) {
   const items = [];
+  for (const h of hosts) {
+    if (h.updates?.firmwareUpdateAvailable) {
+      const availFw = h.updates.availableFirmwareVersion || h.updates.attendedSysupgrade?.availableVersion || 'New';
+      items.push(`
+        <li class="activity-item">
+          <div class="activity-icon-badge warning">${renderIcon('zap', 'icon')}</div>
+          <div class="activity-content">
+            <div><strong>Attended Sysupgrade:</strong> OpenWrt ${escapeHtml(availFw)} is available for ${escapeHtml(h.name || h.hostname)}</div>
+            <div class="activity-time"><a href="#/hosts" style="color: var(--color-primary); text-decoration: none;">Review &amp; Upgrade →</a></div>
+          </div>
+        </li>
+      `);
+    }
+    if ((h.updates?.packagesCount || 0) > 0) {
+      items.push(`
+        <li class="activity-item">
+          <div class="activity-icon-badge info">${renderIcon('download', 'icon')}</div>
+          <div class="activity-content">
+            <div><strong>Software Updates:</strong> ${h.updates.packagesCount} package update${h.updates.packagesCount === 1 ? '' : 's'} available on ${escapeHtml(h.name || h.hostname)}</div>
+            <div class="activity-time"><a href="#/hosts" style="color: var(--color-primary); text-decoration: none;">Update Packages →</a></div>
+          </div>
+        </li>
+      `);
+    }
+  }
   for (const h of hosts.slice(0, 3)) {
     items.push(`
       <li class="activity-item">

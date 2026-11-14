@@ -8,6 +8,7 @@ import { api } from '../api.js';
 import { toast } from './toast.js';
 import { formatBytes, formatBps, formatUptime, formatRssi, formatMac, escapeHtml, resolveClientSideVendor } from '../utils/formatters.js';
 import { renderIcon } from '../utils/icons.js';
+import { openHostUpdatesModal } from '../views/hosts.js';
 
 let drawerEl = null;
 let backdropEl = null;
@@ -148,6 +149,32 @@ export function renderNodeDetails(node) {
           </div>
         </div>
       </div>
+
+      <!-- Software & Attended Sysupgrade -->
+      <div class="drawer-section">
+        <div class="drawer-section-title">Software &amp; Attended Sysupgrade</div>
+        <div style="background: var(--color-surface-elevated); padding: 12px; border-radius: var(--radius-md); display: flex; flex-direction: column; gap: 8px; font-size: 12.5px;">
+          <div style="display: flex; align-items: center; justify-content: space-between;">
+            <span style="color: var(--color-text-secondary);">Installed Firmware:</span>
+            <span style="font-weight: 600;">${escapeHtml(node.firmware || 'OpenWrt')}</span>
+          </div>
+          <div style="display: flex; align-items: center; justify-content: space-between;">
+            <span style="color: var(--color-text-secondary);">Attended Sysupgrade:</span>
+            ${node.updates?.firmwareUpdateAvailable
+              ? `<span class="status-pill warning" style="font-size: 11px;">OpenWrt ${escapeHtml(node.updates.availableFirmwareVersion || 'Update')} Available</span>`
+              : `<span class="status-pill success" style="font-size: 11px;">Up to Date</span>`}
+          </div>
+          <div style="display: flex; align-items: center; justify-content: space-between;">
+            <span style="color: var(--color-text-secondary);">Package Updates:</span>
+            <span style="font-weight: 600; color: ${(node.updates?.packagesCount || 0) > 0 ? 'var(--color-warning)' : 'var(--color-success)'};">
+              ${(node.updates?.packagesCount || 0) > 0 ? `${node.updates.packagesCount} available` : '0 pending'}
+            </span>
+          </div>
+          <button type="button" class="btn btn-secondary" id="drawer-manage-updates-btn" style="margin-top: 4px; width: 100%; justify-content: center;">
+            ${renderIcon('download', 'icon icon-sm')} Manage Packages &amp; Firmware Updates
+          </button>
+        </div>
+      </div>
     </div>
     <div class="drawer-footer">
       <a href="http://${node.ip || ''}" target="_blank" rel="noopener noreferrer" class="btn btn-secondary">
@@ -164,6 +191,18 @@ export function renderNodeDetails(node) {
 
   // Attach event handlers
   drawerEl.querySelector('.drawer-close-btn').addEventListener('click', closeDrawer);
+
+  const manageUpdatesBtn = drawerEl.querySelector('#drawer-manage-updates-btn');
+  if (manageUpdatesBtn) {
+    manageUpdatesBtn.addEventListener('click', () => {
+      closeDrawer();
+      window.location.hash = '#/hosts';
+      setTimeout(() => {
+        const mainContent = document.getElementById('main-content');
+        openHostUpdatesModal(mainContent, node.id);
+      }, 60);
+    });
+  }
 
   const backupBtn = drawerEl.querySelector('#drawer-backup-btn');
   if (backupBtn) {

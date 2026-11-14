@@ -5,7 +5,12 @@ import { createServer } from '../server/index.js';
 import { db } from '../server/storage/db.js';
 import { backupEngine } from '../server/services/backupEngine.js';
 import { hostManager } from '../server/services/hostManager.js';
-import { parseSshTelemetryOutput } from '../server/services/realUbus.js';
+import {
+  parseSshTelemetryOutput,
+  parseOpkgUpgradable,
+  evaluateAttendedSysupgrade,
+  compareOpenWrtVersions,
+} from '../server/services/realUbus.js';
 import { analyzeInterference } from '../server/services/wifiEngine.js';
 import {
   resolveMacManufacturer,
@@ -819,4 +824,103 @@ test('Backup Schedules: updating schedule persists cron, computes nextRun, syncs
   const afterSchedules = await db.getSchedules();
   assert.equal(afterSchedules[0].lastRun, futureDate.toISOString());
   assert.ok(new Date(afterSchedules[0].nextRun).getTime() > futureDate.getTime());
+});
+
+test('Package Updates & Attended Sysupgrade: parses opkg/apk updates and advises when new OpenWrt firmware is available', async () => {
+  // 1. Version comparison
+  assert.ok(compareOpenWrtVersions('23.05.5', '23.05.2') > 0);
+  assert.ok(compareOpenWrtVersions('24.10.0', '23.05.5') > 0);
+  assert.equal(compareOpenWrtVersions('23.05.5', '23.05.5'), 0);
+
+  // 2. Parse opkg list-upgradable and apk version output
+  const rawUpgradable = [
+    'luci-app-firewall - git-23.093.42303-2352132 - 24.086.45142~09d5a38',
+    'dnsmasq-full - 2.90-r2 - 2.90-r3',
+    'curl - 8.6.0-r1 - 8.7.1-r1',
+    'openssl-util - 3.0.13-r1 - 3.0.15-r1',
+    'Collected errors:',
+    ' * resolve_conffiles: Existing conffile /etc/config/dhcp is different',
+  ].join('\n');
+
+  const pkgs = parseOpkgUpgradable(rawUpgradable);
+  assert.equal(pkgs.length, 4);
+  // Core/security packages (dnsmasq-full, openssl-util) should be sorted first
+  assert.equal(pkgs[0].name, 'dnsmasq-full');
+  assert.equal(pkgs[0].currentVersion, '2.90-r2');
+  assert.equal(pkgs[0].newVersion, '2.90-r3');
+  assert.equal(pkgs[0].isSecurityOrCore, true);
+  assert.equal(pkgs[1].name, 'openssl-util');
+  assert.equal(pkgs[1].isSecurityOrCore, true);
+
+  // 3. Full SSH telemetry output with opkg updates + Attended Sysupgrade (auc) output
+  const mockSshOut = [
+    '===BOARD===',
+    JSON.stringify({
+      hostname: 'Gateway-MT6000',
+      model: 'GL.iNet GL-MT6000',
+      board_name: 'glinet,gl-mt6000',
+      release: {
+        distribution: 'OpenWrt',
+        version: '23.05.2',
+        revision: 'r23630-842932a63d',
+        target: 'mediatek/filogic',
+        description: 'OpenWrt 23.05.2 r23630-842932a63d',
+      },
+    }),
+    '===OPKG_UPGRADABLE===',
+    rawUpgradable,
+    '===ASU_STATUS===',
+    'auc - 0.3.2-1',
+    'luci-app-attendedsysupgrade - git-24.086.45142-09d5a38',
+    'HAS_BIN:auc',
+    "attendedsysupgrade.server.url='https://sysupgrade.openwrt.org'",
+    '===ASU_CHECK===',
+    'auc (0.3.2-1)',
+    'Server: https://sysupgrade.openwrt.org',
+    'Running: 23.05.2 r23630-842932a63d on mediatek/filogic (glinet,gl-mt6000)',
+    'Available: 23.05.5 r24106-10cc5fcd00',
+    '---VERSIONS_JSON---',
+    JSON.stringify({
+      versions_list: ['23.05.5', '24.10.0'],
+      stable_version: '24.10.0',
+    }),
+  ].join('\n');
+
+  const hostObj = { id: 'gw-mt6000', name: 'Main Gateway', ip: '192.168.1.1', role: 'gateway' };
+  const telemetry = parseSshTelemetryOutput(hostObj, mockSshOut);
+
+  assert.equal(telemetry.updates.packagesCount, 4);
+  assert.equal(telemetry.updates.firmwareUpdateAvailable, true);
+  assert.equal(telemetry.updates.availableFirmwareVersion, '23.05.5');
+  assert.equal(telemetry.updates.attendedSysupgrade.installed, true);
+  assert.equal(telemetry.updates.attendedSysupgrade.cliTool, 'auc');
+  assert.equal(telemetry.updates.attendedSysupgrade.currentVersion, '23.05.2');
+  assert.equal(telemetry.updates.attendedSysupgrade.availableVersion, '23.05.5');
+  assert.equal(telemetry.updates.attendedSysupgrade.availableRevision, 'r24106-10cc5fcd00');
+  assert.equal(telemetry.updates.attendedSysupgrade.target, 'mediatek/filogic');
+  assert.equal(telemetry.updates.attendedSysupgrade.boardName, 'glinet,gl-mt6000');
+  assert.ok(telemetry.updates.attendedSysupgrade.advisory.includes('23.05.5'));
+
+  // 4. Verify GET /api/hosts/:id/updates returns the host's software & firmware update advisory
+  const created = await hostManager.createHost({
+    id: 'gw-mt6000',
+    name: 'Main Gateway',
+    ip: '192.168.1.1',
+    role: 'gateway',
+  });
+  assert.equal(created.id, 'gw-mt6000');
+
+  const hosts = await db.getHosts();
+  const idx = hosts.findIndex((h) => h.id === 'gw-mt6000');
+  hostManager.applyTelemetryToHost(hosts[idx], telemetry);
+  await db.saveHosts(hosts);
+
+  const apiRes = await fetch(`${baseUrl}/api/hosts/gw-mt6000/updates`);
+  assert.equal(apiRes.status, 200);
+  const apiData = await apiRes.json();
+  assert.equal(apiData.updates.packagesCount, 4);
+  assert.equal(apiData.updates.firmwareUpdateAvailable, true);
+  assert.equal(apiData.updates.availableFirmwareVersion, '23.05.5');
+
+  await hostManager.deleteHost('gw-mt6000', true);
 });

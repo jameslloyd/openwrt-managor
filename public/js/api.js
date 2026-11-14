@@ -75,6 +75,15 @@ export const api = {
     }
     return request('/api/hosts/test', { method: 'POST', body: idOrData });
   },
+  getHostUpdates: (id) => request(`/api/hosts/${encodeURIComponent(id)}/updates`),
+  checkHostUpdates: (id = 'all') =>
+    id === 'all'
+      ? request('/api/hosts/updates/check', { method: 'POST', body: { hostId: 'all' } })
+      : request(`/api/hosts/${encodeURIComponent(id)}/updates/check`, { method: 'POST' }),
+  upgradeHostPackages: (id, packages = 'all') =>
+    request(`/api/hosts/${encodeURIComponent(id)}/updates/upgrade`, { method: 'POST', body: { packages } }),
+  runAttendedSysupgrade: (id, action = 'check') =>
+    request(`/api/hosts/${encodeURIComponent(id)}/updates/attended-sysupgrade`, { method: 'POST', body: { action } }),
 
   // Topology
   getTopology: () => request('/api/topology'),

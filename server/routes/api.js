@@ -198,7 +198,83 @@ export async function handleApiRequest(req, res, pathname, searchParams) {
       return true;
     }
 
-    // Dynamic Host routes: /api/hosts/:id, /api/hosts/:id/test
+    // Dynamic Host routes: /api/hosts/updates/check, /api/hosts/:id/updates/*, /api/hosts/:id, /api/hosts/:id/test
+    if (pathname === '/api/hosts/updates/check' && req.method === 'POST') {
+      const body = await parseJsonBody(req);
+      if (body && body.hostId && body.hostId !== 'all') {
+        const resSingle = await hostManager.checkUpdatesForHost(body.hostId);
+        if (!resSingle) {
+          sendError(res, 404, `Host ${body.hostId} not found`, 'HOST_NOT_FOUND');
+          return true;
+        }
+        sendJson(res, 200, resSingle);
+        return true;
+      }
+      const resAll = await hostManager.checkUpdatesForAllHosts();
+      sendJson(res, 200, resAll);
+      return true;
+    }
+
+    const hostUpdatesGetMatch = pathname.match(/^\/api\/hosts\/([^/]+)\/updates$/);
+    if (hostUpdatesGetMatch && req.method === 'GET') {
+      const hostId = hostUpdatesGetMatch[1];
+      const host = await hostManager.getHost(hostId);
+      if (!host) {
+        sendError(res, 404, `Host ${hostId} not found`, 'HOST_NOT_FOUND');
+        return true;
+      }
+      sendJson(res, 200, {
+        hostId: host.id,
+        hostName: host.name || host.hostname,
+        firmware: host.firmware,
+        updates: host.updates,
+      });
+      return true;
+    }
+
+    const hostUpdatesCheckMatch = pathname.match(/^\/api\/hosts\/([^/]+)\/updates\/check$/);
+    if (hostUpdatesCheckMatch && req.method === 'POST') {
+      const hostId = hostUpdatesCheckMatch[1];
+      const host = await hostManager.getHost(hostId);
+      if (!host) {
+        sendError(res, 404, `Host ${hostId} not found`, 'HOST_NOT_FOUND');
+        return true;
+      }
+      const checkRes = await hostManager.checkUpdatesForHost(hostId);
+      sendJson(res, 200, checkRes);
+      return true;
+    }
+
+    const hostUpdatesUpgradeMatch = pathname.match(/^\/api\/hosts\/([^/]+)\/updates\/upgrade$/);
+    if (hostUpdatesUpgradeMatch && req.method === 'POST') {
+      const hostId = hostUpdatesUpgradeMatch[1];
+      const host = await hostManager.getHost(hostId);
+      if (!host) {
+        sendError(res, 404, `Host ${hostId} not found`, 'HOST_NOT_FOUND');
+        return true;
+      }
+      const body = await parseJsonBody(req);
+      const packages = body?.packages || 'all';
+      const upgradeRes = await hostManager.upgradePackagesForHost(hostId, packages);
+      sendJson(res, 200, upgradeRes);
+      return true;
+    }
+
+    const hostAsuMatch = pathname.match(/^\/api\/hosts\/([^/]+)\/updates\/attended-sysupgrade$/);
+    if (hostAsuMatch && req.method === 'POST') {
+      const hostId = hostAsuMatch[1];
+      const host = await hostManager.getHost(hostId);
+      if (!host) {
+        sendError(res, 404, `Host ${hostId} not found`, 'HOST_NOT_FOUND');
+        return true;
+      }
+      const body = await parseJsonBody(req);
+      const action = ['check', 'install', 'upgrade'].includes(body?.action) ? body.action : 'check';
+      const asuRes = await hostManager.attendedSysupgradeForHost(hostId, { action });
+      sendJson(res, 200, asuRes);
+      return true;
+    }
+
     const hostTestMatch = pathname.match(/^\/api\/hosts\/([^/]+)\/test$/);
     if (hostTestMatch && req.method === 'POST') {
       const hostId = hostTestMatch[1];

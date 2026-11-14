@@ -191,6 +191,303 @@ export function validateHostParameters(hostConfig) {
   return null;
 }
 
+const KNOWN_OPENWRT_RELEASES = [
+  '19.07.10',
+  '21.02.7',
+  '22.03.7',
+  '23.05.0',
+  '23.05.1',
+  '23.05.2',
+  '23.05.3',
+  '23.05.4',
+  '23.05.5',
+  '24.10.0',
+];
+
+/**
+ * Compares two OpenWrt semantic/release versions (e.g. "23.05.2" vs "23.05.5" or "24.10.0-rc5").
+ * Returns > 0 if vA > vB, < 0 if vA < vB, 0 if equal.
+ */
+export function compareOpenWrtVersions(vA, vB) {
+  if (!vA || !vB) return 0;
+  const clean = (v) => String(v).trim().replace(/^v/i, '');
+  const aStr = clean(vA);
+  const bStr = clean(vB);
+  if (aStr === bStr) return 0;
+
+  const parse = (s) => {
+    const [core, pre] = s.split('-');
+    const nums = core.split('.').map((n) => parseInt(n, 10) || 0);
+    while (nums.length < 3) nums.push(0);
+    // Final release ranks higher than -rcN
+    let rcRank = 999;
+    if (pre) {
+      const m = pre.match(/rc(\d+)/i);
+      rcRank = m ? parseInt(m[1], 10) : 0;
+    }
+    return { nums, rcRank };
+  };
+
+  const pA = parse(aStr);
+  const pB = parse(bStr);
+  for (let i = 0; i < 3; i++) {
+    if (pA.nums[i] !== pB.nums[i]) return pA.nums[i] - pB.nums[i];
+  }
+  return pA.rcRank - pB.rcRank;
+}
+
+/**
+ * Parses `opkg list-upgradable` (or `apk version -l '<'`) output into structured package update entries.
+ */
+export function parseOpkgUpgradable(text) {
+  const packages = [];
+  if (!text) return packages;
+
+  const seen = new Set();
+  for (const rawLine of String(text).split('\n')) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('Collected errors:') || line.startsWith('* ') || line.startsWith('Downloading ')) {
+      continue;
+    }
+
+    // Standard opkg format: "pkg-name - 1.0.0-r1 - 1.0.1-r1"
+    const opkgMatch = line.match(/^([a-zA-Z0-9.+_-]+)\s+-\s+(\S+)\s+-\s+(\S+)$/);
+    if (opkgMatch) {
+      const [, name, currentVersion, newVersion] = opkgMatch;
+      if (currentVersion !== newVersion && !seen.has(name)) {
+        seen.add(name);
+        packages.push({
+          name,
+          currentVersion,
+          newVersion,
+          isSecurityOrCore: /^(kernel|base-files|dnsmasq|dropbear|openssl|libopenssl|libustream|wolfssl|libwolfssl|hostapd|wpad|firewall|nftables|ubus|ubox|procd|uci|auc|owut|luci-app-attendedsysupgrade)/.test(
+            name
+          ),
+        });
+      }
+      continue;
+    }
+
+    // OpenWrt 24.10+/SNAPSHOT apk format: "pkg-name-1.0.0-r1 < 1.0.1-r1"
+    const apkMatch = line.match(/^([a-zA-Z0-9.+_-]+)-(\d[^\s<]*)\s*<\s*(\S+)/);
+    if (apkMatch) {
+      const [, name, currentVersion, newVersion] = apkMatch;
+      if (currentVersion !== newVersion && !seen.has(name)) {
+        seen.add(name);
+        packages.push({
+          name,
+          currentVersion,
+          newVersion,
+          isSecurityOrCore: /^(kernel|base-files|dnsmasq|dropbear|openssl|libopenssl|hostapd|wpad|firewall|nftables|ubus|procd|uci|auc|owut)/.test(
+            name
+          ),
+        });
+      }
+    }
+  }
+
+  return packages.sort((a, b) => {
+    if (a.isSecurityOrCore !== b.isSecurityOrCore) return a.isSecurityOrCore ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
+}
+
+/**
+ * Evaluates Attended Sysupgrade status and available OpenWrt firmware updates.
+ */
+export function evaluateAttendedSysupgrade({
+  board = null,
+  firmware = '',
+  releaseTxt = '',
+  asuStatusTxt = '',
+  asuCheckTxt = '',
+} = {}) {
+  // 1. Extract current version, revision, target, and boardName
+  let currentVersion = board?.release?.version || '';
+  let currentRevision = board?.release?.revision || '';
+  let target = board?.release?.target || '';
+  let boardName = board?.board_name || '';
+
+  if (releaseTxt) {
+    if (!currentVersion) {
+      const m = releaseTxt.match(/DISTRIB_RELEASE=['"]?([^'"\n]+)['"]?/);
+      if (m) currentVersion = m[1].trim();
+    }
+    if (!currentRevision) {
+      const m = releaseTxt.match(/DISTRIB_REVISION=['"]?([^'"\n]+)['"]?/);
+      if (m) currentRevision = m[1].trim();
+    }
+    if (!target) {
+      const m = releaseTxt.match(/DISTRIB_TARGET=['"]?([^'"\n]+)['"]?/);
+      if (m) target = m[1].trim();
+    }
+  }
+
+  if (!currentVersion && firmware) {
+    const vMatch = String(firmware).match(/(\d{2}\.\d{2}\.\d+(?:-rc\d+)?|SNAPSHOT)/i);
+    if (vMatch) currentVersion = vMatch[1];
+    const rMatch = String(firmware).match(/\b(r\d+-[0-9a-f]+)\b/i);
+    if (!currentRevision && rMatch) currentRevision = rMatch[1];
+  }
+
+  // 2. Parse installed Attended Sysupgrade packages & CLI tool
+  const installedPackages = [];
+  let cliTool = null;
+  let serverUrl = 'https://sysupgrade.openwrt.org';
+
+  for (const rawLine of String(asuStatusTxt || '').split('\n')) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    const pkgMatch = line.match(/^(auc|owut|luci-app-attendedsysupgrade|attendedsysupgrade-common)\s+-\s+(\S+)/);
+    if (pkgMatch) {
+      installedPackages.push({ name: pkgMatch[1], version: pkgMatch[2] });
+      if (pkgMatch[1] === 'owut') cliTool = 'owut';
+      else if (pkgMatch[1] === 'auc' && !cliTool) cliTool = 'auc';
+      continue;
+    }
+    if (line === 'HAS_BIN:owut') {
+      cliTool = 'owut';
+      continue;
+    }
+    if (line === 'HAS_BIN:auc' && !cliTool) {
+      cliTool = 'auc';
+      continue;
+    }
+    const urlMatch = line.match(/^attendedsysupgrade\..*\.url=['"]?([^'"\n]+)['"]?/);
+    if (urlMatch && urlMatch[1]) {
+      serverUrl = urlMatch[1].trim().replace(/\/+$/, '');
+    }
+  }
+
+  const installed = installedPackages.length > 0 || Boolean(cliTool);
+
+  // 3. Parse `auc -n` / `owut check` output and `.versions.json` from `asuCheckTxt`
+  const [cliOutputPart, versionsJsonPart] = String(asuCheckTxt || '').split('---VERSIONS_JSON---');
+  let cliAvailableVersion = null;
+  let cliAvailableRevision = null;
+
+  if (cliOutputPart) {
+    for (const rawLine of cliOutputPart.split('\n')) {
+      const line = rawLine.trim();
+      // auc -n format: "Available: 23.05.5 r24106-10cc5fcd00"
+      const aucAvail = line.match(/^Available:\s*(\d{2}\.\d{2}\.\d+(?:-rc\d+)?|SNAPSHOT)(?:\s+(r\d+-[0-9a-f]+))?/i);
+      if (aucAvail) {
+        cliAvailableVersion = aucAvail[1];
+        if (aucAvail[2]) cliAvailableRevision = aucAvail[2];
+        continue;
+      }
+      // owut check format: "version-to   23.05.5 r24106-10cc5fcd00"
+      const owutAvail = line.match(/^version-to\s+(\d{2}\.\d{2}\.\d+(?:-rc\d+)?|SNAPSHOT)(?:\s+(r\d+-[0-9a-f]+))?/i);
+      if (owutAvail) {
+        cliAvailableVersion = owutAvail[1];
+        if (owutAvail[2]) cliAvailableRevision = owutAvail[2];
+      }
+    }
+  }
+
+  // Merge known OpenWrt releases with live .versions.json if present
+  const releaseSet = new Set(KNOWN_OPENWRT_RELEASES);
+  let upstreamStable = null;
+  if (versionsJsonPart && versionsJsonPart.trim()) {
+    try {
+      const vJson = JSON.parse(versionsJsonPart.trim());
+      if (Array.isArray(vJson.versions_list)) {
+        for (const v of vJson.versions_list) {
+          if (typeof v === 'string' && /^\d{2}\.\d{2}\.\d+$/.test(v)) {
+            releaseSet.add(v);
+          }
+        }
+      }
+      if (typeof vJson.stable_version === 'string' && vJson.stable_version) {
+        upstreamStable = vJson.stable_version;
+        releaseSet.add(vJson.stable_version);
+      }
+    } catch {
+      // Ignore malformed JSON
+    }
+  }
+  if (cliAvailableVersion && /^\d{2}\.\d{2}\.\d+/.test(cliAvailableVersion)) {
+    releaseSet.add(cliAvailableVersion);
+  }
+
+  const allReleases = Array.from(releaseSet)
+    .filter((v) => !v.includes('-rc'))
+    .sort(compareOpenWrtVersions);
+
+  const latestStable = upstreamStable || allReleases[allReleases.length - 1] || '24.10.0';
+  let latestSameBranch = null;
+
+  if (currentVersion && /^\d{2}\.\d{2}/.test(currentVersion)) {
+    const branchPrefix = currentVersion.split('.').slice(0, 2).join('.');
+    const sameBranchReleases = allReleases.filter((v) => v.startsWith(`${branchPrefix}.`));
+    if (sameBranchReleases.length > 0) {
+      latestSameBranch = sameBranchReleases[sameBranchReleases.length - 1];
+    }
+  }
+
+  // Determine if a firmware update is available
+  let availableVersion = null;
+  let availableRevision = cliAvailableRevision || null;
+  let majorUpgradeVersion = null;
+  let releaseType = 'up-to-date';
+  let firmwareUpdateAvailable = false;
+
+  if (cliAvailableVersion && (!currentVersion || compareOpenWrtVersions(cliAvailableVersion, currentVersion) > 0 || (cliAvailableRevision && cliAvailableRevision !== currentRevision))) {
+    availableVersion = cliAvailableVersion;
+    firmwareUpdateAvailable = true;
+    const curBranch = currentVersion ? currentVersion.split('.').slice(0, 2).join('.') : '';
+    const newBranch = cliAvailableVersion.split('.').slice(0, 2).join('.');
+    releaseType = curBranch && curBranch !== newBranch ? 'major' : 'maintenance';
+  } else if (currentVersion && /^\d{2}\.\d{2}\.\d+/.test(currentVersion)) {
+    if (latestSameBranch && compareOpenWrtVersions(latestSameBranch, currentVersion) > 0) {
+      availableVersion = latestSameBranch;
+      firmwareUpdateAvailable = true;
+      releaseType = 'maintenance';
+      if (latestStable && compareOpenWrtVersions(latestStable, latestSameBranch) > 0) {
+        majorUpgradeVersion = latestStable;
+      }
+    } else if (latestStable && compareOpenWrtVersions(latestStable, currentVersion) > 0) {
+      availableVersion = latestStable;
+      majorUpgradeVersion = latestStable;
+      firmwareUpdateAvailable = true;
+      releaseType = 'major';
+    }
+  }
+
+  let advisory = 'Firmware is up to date.';
+  if (firmwareUpdateAvailable && availableVersion) {
+    const typeLabel = releaseType === 'maintenance' ? 'maintenance release' : 'major release';
+    advisory = `OpenWrt ${availableVersion}${availableRevision ? ` (${availableRevision})` : ''} ${typeLabel} is available via Attended Sysupgrade (currently running ${currentVersion || 'OpenWrt'}).`;
+    if (majorUpgradeVersion && majorUpgradeVersion !== availableVersion) {
+      advisory += ` Major branch upgrade OpenWrt ${majorUpgradeVersion} is also available.`;
+    }
+    if (!installed) {
+      advisory += ' Install the Attended Sysupgrade package (auc / luci-app-attendedsysupgrade) on this router to build and flash a custom sysupgrade image preserving all installed packages.';
+    }
+  } else if (currentVersion) {
+    advisory = `Running latest OpenWrt ${currentVersion}${currentRevision ? ` (${currentRevision})` : ''} firmware.`;
+  }
+
+  return {
+    installed,
+    cliTool,
+    packages: installedPackages,
+    serverUrl,
+    currentVersion: currentVersion || 'Unknown',
+    currentRevision: currentRevision || '',
+    target: target || 'Generic',
+    boardName: boardName || '',
+    firmwareUpdateAvailable,
+    availableVersion,
+    availableRevision,
+    latestSameBranch,
+    latestStable,
+    majorUpgradeVersion,
+    releaseType,
+    advisory,
+  };
+}
+
 function parseCpuLine(line) {
   if (!line || !line.startsWith('cpu ')) return null;
   const parts = line
@@ -489,6 +786,12 @@ export async function pollRealHost(hostConfig, prevSample = null) {
     'cat /proc/net/arp 2>/dev/null; echo "---IPNEIGH---"; ip -4 neigh show 2>/dev/null',
     'echo "===RDNS==="',
     'gw=$(ip route show default 2>/dev/null | awk \'/default/{print $3; exit}\'); [ -z "$gw" ] && gw=$(uci -q get network.lan.gateway 2>/dev/null); for smac in $(iw dev 2>/dev/null | awk \'$1=="Interface"{print $2}\' | while read iface; do iw dev "$iface" station dump 2>/dev/null | awk \'/^Station/{print tolower($2)}\'; done); do sip=$(awk \'tolower($4)=="\'$smac\'" && $3!="0x0"{print $1; exit}\' /proc/net/arp 2>/dev/null); if [ -n "$sip" ]; then rname=$(nslookup "$sip" ${gw:+"$gw"} 2>/dev/null | awk \'/name =/{print $NF; exit} /^Address 1:/ && NF>=4{print $4; exit}\'); echo "$smac $sip $rname"; fi; done',
+    'echo "===OPKG_UPGRADABLE==="',
+    'if command -v opkg >/dev/null 2>&1; then if [ -z "$(ls -A /var/opkg-lists 2>/dev/null)" ]; then opkg update >/dev/null 2>&1; fi; opkg list-upgradable 2>/dev/null; elif command -v apk >/dev/null 2>&1; then apk version -l "<" 2>/dev/null; fi',
+    'echo "===ASU_STATUS==="',
+    'if command -v opkg >/dev/null 2>&1; then opkg list-installed 2>/dev/null | grep -E "^(auc|owut|luci-app-attendedsysupgrade|attendedsysupgrade-common) "; fi; command -v auc >/dev/null 2>&1 && echo "HAS_BIN:auc"; command -v owut >/dev/null 2>&1 && echo "HAS_BIN:owut"; uci -q show attendedsysupgrade 2>/dev/null',
+    'echo "===ASU_CHECK==="',
+    'if [ ! -f /tmp/.openwrt_mgr_asu_cache ] || [ $(( $(date +%s) - $(date -r /tmp/.openwrt_mgr_asu_cache +%s 2>/dev/null || echo 0) )) -gt 3600 ]; then ( if command -v auc >/dev/null 2>&1; then auc -n 2>&1; elif command -v owut >/dev/null 2>&1; then owut check 2>&1; fi; echo "---VERSIONS_JSON---"; uclient-fetch -T 3 -qO- https://downloads.openwrt.org/.versions.json 2>/dev/null || wget -T 3 -qO- https://downloads.openwrt.org/.versions.json 2>/dev/null ) > /tmp/.openwrt_mgr_asu_cache 2>/dev/null; fi; cat /tmp/.openwrt_mgr_asu_cache 2>/dev/null',
   ].join('; ');
 
   try {
@@ -584,6 +887,9 @@ export function parseSshTelemetryOutput(hostConfig, stdout, prevSample = null) {
   const ethersTxt = getSectionText('ETHERS');
   const arpTxt = getSectionText('ARP');
   const rdnsTxt = getSectionText('RDNS');
+  const opkgUpgradableTxt = getSectionText('OPKG_UPGRADABLE');
+  const asuStatusTxt = getSectionText('ASU_STATUS');
+  const asuCheckTxt = getSectionText('ASU_CHECK');
 
   // 1. Identity, Model & Firmware
   let hostname = board?.hostname || hostConfig.hostname || hostConfig.name;
@@ -1163,6 +1469,24 @@ export function parseSshTelemetryOutput(hostConfig, stdout, prevSample = null) {
     iwInterfaces
   );
 
+  // 13. Parse available package updates (`opkg list-upgradable`) & Attended Sysupgrade firmware advisory
+  const upgradablePackages = parseOpkgUpgradable(opkgUpgradableTxt);
+  const attendedSysupgrade = evaluateAttendedSysupgrade({
+    board,
+    firmware,
+    releaseTxt,
+    asuStatusTxt,
+    asuCheckTxt,
+  });
+  const updates = {
+    packagesCount: upgradablePackages.length,
+    packages: upgradablePackages,
+    firmwareUpdateAvailable: attendedSysupgrade.firmwareUpdateAvailable,
+    availableFirmwareVersion: attendedSysupgrade.availableVersion,
+    attendedSysupgrade,
+    lastChecked: new Date().toISOString(),
+  };
+
   const clientBytes = {};
   for (const c of clients) {
     clientBytes[c.mac] = { rxBytes: c.rxBytesTotal || 0, txBytes: c.txBytesTotal || 0 };
@@ -1184,6 +1508,7 @@ export function parseSshTelemetryOutput(hostConfig, stdout, prevSample = null) {
     radios,
     neighbors,
     clients,
+    updates,
     dhcpMap: Object.fromEntries(dhcpByMac),
     arpMap: Object.fromEntries(arpByMac),
     rdnsMap: Object.fromEntries(rdnsByMac),
@@ -1194,6 +1519,170 @@ export function parseSshTelemetryOutput(hostConfig, stdout, prevSample = null) {
       clientBytes,
       radioSurvey: radioSurveyCounters,
     },
+  };
+}
+
+/**
+ * Forces a fresh package list update (`opkg update` / `apk update`) and Attended Sysupgrade check on a host.
+ */
+export async function checkHostUpdates(hostConfig) {
+  const script = [
+    'echo "===BOARD==="',
+    'ubus call system board 2>/dev/null',
+    'echo "===RELEASE==="',
+    'cat /etc/openwrt_release 2>/dev/null',
+    'echo "===OPKG_UPDATE==="',
+    'if command -v opkg >/dev/null 2>&1; then opkg update 2>&1; elif command -v apk >/dev/null 2>&1; then apk update 2>&1; fi',
+    'echo "===OPKG_UPGRADABLE==="',
+    'if command -v opkg >/dev/null 2>&1; then opkg list-upgradable 2>/dev/null; elif command -v apk >/dev/null 2>&1; then apk version -l "<" 2>/dev/null; fi',
+    'echo "===ASU_STATUS==="',
+    'if command -v opkg >/dev/null 2>&1; then opkg list-installed 2>/dev/null | grep -E "^(auc|owut|luci-app-attendedsysupgrade|attendedsysupgrade-common) "; fi; command -v auc >/dev/null 2>&1 && echo "HAS_BIN:auc"; command -v owut >/dev/null 2>&1 && echo "HAS_BIN:owut"; uci -q show attendedsysupgrade 2>/dev/null',
+    'echo "===ASU_CHECK==="',
+    '( if command -v auc >/dev/null 2>&1; then auc -n 2>&1; elif command -v owut >/dev/null 2>&1; then owut check 2>&1; fi; echo "---VERSIONS_JSON---"; uclient-fetch -T 4 -qO- https://downloads.openwrt.org/.versions.json 2>/dev/null || wget -T 4 -qO- https://downloads.openwrt.org/.versions.json 2>/dev/null ) | tee /tmp/.openwrt_mgr_asu_cache',
+  ].join('; ');
+
+  const { stdout } = await execSshCommand(hostConfig, script, { timeoutMs: 35000 });
+  const parsed = parseSshTelemetryOutput(hostConfig, stdout);
+
+  const sections = {};
+  let currentKey = null;
+  for (const line of String(stdout || '').split('\n')) {
+    const m = line.match(/^===([A-Z0-9_]+)===\r?$/);
+    if (m) {
+      currentKey = m[1];
+      sections[currentKey] = [];
+    } else if (currentKey) {
+      sections[currentKey].push(line);
+    }
+  }
+  const opkgUpdateLog = (sections.OPKG_UPDATE || []).join('\n').trim();
+  const [asuCliLog] = ((sections.ASU_CHECK || []).join('\n').trim()).split('---VERSIONS_JSON---');
+
+  return {
+    success: true,
+    firmware: parsed.firmware,
+    updates: parsed.updates,
+    output: [opkgUpdateLog, asuCliLog?.trim()].filter(Boolean).join('\n\n'),
+  };
+}
+
+/**
+ * Upgrades selected or all upgradable packages on an OpenWrt host via SSH.
+ */
+export async function upgradeHostPackages(hostConfig, packages = 'all') {
+  let pkgArgs = [];
+  if (packages !== 'all' && !(Array.isArray(packages) && packages.includes('all'))) {
+    const list = Array.isArray(packages) ? packages : [packages];
+    for (const p of list) {
+      const name = String(p || '').trim();
+      if (!name || !/^[a-zA-Z0-9.+_-]+$/.test(name)) {
+        throw new Error(`Invalid package name: ${name}`);
+      }
+      pkgArgs.push(name);
+    }
+    if (pkgArgs.length === 0) {
+      throw new Error('No packages specified for upgrade');
+    }
+  }
+
+  const upgradeCmd =
+    pkgArgs.length > 0
+      ? `if command -v opkg >/dev/null 2>&1; then opkg upgrade ${pkgArgs.join(' ')} 2>&1; elif command -v apk >/dev/null 2>&1; then apk add --upgrade ${pkgArgs.join(' ')} 2>&1; fi`
+      : `if command -v opkg >/dev/null 2>&1; then pkgs=$(opkg list-upgradable 2>/dev/null | awk -F' - ' 'NF>=3{print $1}'); if [ -n "$pkgs" ]; then opkg upgrade $pkgs 2>&1; else echo "All packages are already up to date."; fi; elif command -v apk >/dev/null 2>&1; then apk upgrade 2>&1; fi`;
+
+  const script = [
+    'echo "===BOARD==="',
+    'ubus call system board 2>/dev/null',
+    'echo "===RELEASE==="',
+    'cat /etc/openwrt_release 2>/dev/null',
+    'echo "===UPGRADE_LOG==="',
+    upgradeCmd,
+    'echo "===OPKG_UPGRADABLE==="',
+    'if command -v opkg >/dev/null 2>&1; then opkg list-upgradable 2>/dev/null; elif command -v apk >/dev/null 2>&1; then apk version -l "<" 2>/dev/null; fi',
+    'echo "===ASU_STATUS==="',
+    'if command -v opkg >/dev/null 2>&1; then opkg list-installed 2>/dev/null | grep -E "^(auc|owut|luci-app-attendedsysupgrade|attendedsysupgrade-common) "; fi; command -v auc >/dev/null 2>&1 && echo "HAS_BIN:auc"; command -v owut >/dev/null 2>&1 && echo "HAS_BIN:owut"; uci -q show attendedsysupgrade 2>/dev/null',
+    'echo "===ASU_CHECK==="',
+    'cat /tmp/.openwrt_mgr_asu_cache 2>/dev/null',
+  ].join('; ');
+
+  const { stdout } = await execSshCommand(hostConfig, script, { timeoutMs: 60000 });
+  const parsed = parseSshTelemetryOutput(hostConfig, stdout);
+
+  const sections = {};
+  let currentKey = null;
+  for (const line of String(stdout || '').split('\n')) {
+    const m = line.match(/^===([A-Z0-9_]+)===\r?$/);
+    if (m) {
+      currentKey = m[1];
+      sections[currentKey] = [];
+    } else if (currentKey) {
+      sections[currentKey].push(line);
+    }
+  }
+  const upgradeLog = (sections.UPGRADE_LOG || []).join('\n').trim();
+
+  return {
+    success: true,
+    output: upgradeLog || 'Package upgrade completed.',
+    updates: parsed.updates,
+  };
+}
+
+/**
+ * Performs an Attended Sysupgrade action on an OpenWrt host:
+ * - action: 'install' -> installs `auc` / `owut` and `luci-app-attendedsysupgrade`
+ * - action: 'check'   -> runs `auc -n` / `owut check`
+ * - action: 'upgrade' -> triggers `auc -y` / `owut upgrade` to build & apply the new firmware image
+ */
+export async function performAttendedSysupgradeAction(hostConfig, { action = 'check' } = {}) {
+  let actionCmd = '';
+  if (action === 'install') {
+    actionCmd =
+      'if command -v opkg >/dev/null 2>&1; then opkg update 2>&1 && (opkg install auc luci-app-attendedsysupgrade 2>&1 || opkg install owut luci-app-attendedsysupgrade 2>&1 || opkg install auc 2>&1); elif command -v apk >/dev/null 2>&1; then apk update 2>&1 && apk add owut luci-app-attendedsysupgrade 2>&1; fi';
+  } else if (action === 'upgrade') {
+    actionCmd =
+      'if command -v auc >/dev/null 2>&1; then auc -y 2>&1; elif command -v owut >/dev/null 2>&1; then owut upgrade 2>&1; else echo "Attended Sysupgrade CLI (auc / owut) is not installed. Click Install Attended Sysupgrade first."; exit 1; fi';
+  } else {
+    actionCmd =
+      'if command -v auc >/dev/null 2>&1; then auc -n 2>&1; elif command -v owut >/dev/null 2>&1; then owut check 2>&1; else echo "Attended Sysupgrade CLI (auc / owut) is not installed on this router."; fi';
+  }
+
+  const script = [
+    'echo "===BOARD==="',
+    'ubus call system board 2>/dev/null',
+    'echo "===RELEASE==="',
+    'cat /etc/openwrt_release 2>/dev/null',
+    'echo "===ACTION_LOG==="',
+    actionCmd,
+    'echo "===OPKG_UPGRADABLE==="',
+    'if command -v opkg >/dev/null 2>&1; then opkg list-upgradable 2>/dev/null; elif command -v apk >/dev/null 2>&1; then apk version -l "<" 2>/dev/null; fi',
+    'echo "===ASU_STATUS==="',
+    'if command -v opkg >/dev/null 2>&1; then opkg list-installed 2>/dev/null | grep -E "^(auc|owut|luci-app-attendedsysupgrade|attendedsysupgrade-common) "; fi; command -v auc >/dev/null 2>&1 && echo "HAS_BIN:auc"; command -v owut >/dev/null 2>&1 && echo "HAS_BIN:owut"; uci -q show attendedsysupgrade 2>/dev/null',
+    'echo "===ASU_CHECK==="',
+    '( if command -v auc >/dev/null 2>&1; then auc -n 2>&1; elif command -v owut >/dev/null 2>&1; then owut check 2>&1; fi; echo "---VERSIONS_JSON---"; uclient-fetch -T 4 -qO- https://downloads.openwrt.org/.versions.json 2>/dev/null || wget -T 4 -qO- https://downloads.openwrt.org/.versions.json 2>/dev/null ) | tee /tmp/.openwrt_mgr_asu_cache',
+  ].join('; ');
+
+  const { stdout } = await execSshCommand(hostConfig, script, { timeoutMs: 90000 });
+  const parsed = parseSshTelemetryOutput(hostConfig, stdout);
+
+  const sections = {};
+  let currentKey = null;
+  for (const line of String(stdout || '').split('\n')) {
+    const m = line.match(/^===([A-Z0-9_]+)===\r?$/);
+    if (m) {
+      currentKey = m[1];
+      sections[currentKey] = [];
+    } else if (currentKey) {
+      sections[currentKey].push(line);
+    }
+  }
+  const actionLog = (sections.ACTION_LOG || []).join('\n').trim();
+
+  return {
+    success: true,
+    action,
+    output: actionLog || `Attended Sysupgrade (${action}) completed.`,
+    updates: parsed.updates,
   };
 }
 

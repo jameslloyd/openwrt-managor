@@ -1,7 +1,15 @@
 import { config } from '../config.js';
 import { db } from '../storage/db.js';
 import { simulator } from './simulator.js';
-import { testHostConnection, pollRealHost, scanHostWirelessNetworks } from './realUbus.js';
+import {
+  testHostConnection,
+  pollRealHost,
+  scanHostWirelessNetworks,
+  checkHostUpdates,
+  upgradeHostPackages,
+  performAttendedSysupgradeAction,
+  evaluateAttendedSysupgrade,
+} from './realUbus.js';
 import { backupEngine } from './backupEngine.js';
 import { triangulateBandNeighbors } from './wifiEngine.js';
 import { lookupVendor, resolveWirelessNetworkManufacturer } from './ouiVendor.js';
@@ -9,6 +17,17 @@ import { lookupVendor, resolveWirelessNetworkManufacturer } from './ouiVendor.js
 export function sanitizeHost(host) {
   if (!host) return null;
   const { password, sshPrivateKey, ...safe } = host;
+  if (!safe.updates) {
+    const asu = evaluateAttendedSysupgrade({ firmware: safe.firmware || 'OpenWrt' });
+    safe.updates = {
+      packagesCount: 0,
+      packages: [],
+      firmwareUpdateAvailable: asu.firmwareUpdateAvailable,
+      availableFirmwareVersion: asu.availableVersion,
+      attendedSysupgrade: asu,
+      lastChecked: null,
+    };
+  }
   return {
     ...safe,
     hasPassword: Boolean(password),
@@ -145,6 +164,9 @@ export class HostManager {
     }
     if (telemetry.rdnsMap) {
       this.rdnsByHost.set(host.id, telemetry.rdnsMap);
+    }
+    if (telemetry.updates) {
+      host.updates = telemetry.updates;
     }
     if (telemetry.sample) {
       this.prevSamples.set(host.id, telemetry.sample);
@@ -663,6 +685,119 @@ export class HostManager {
       }
     }
     return testHostConnection(configToTest, simulator);
+  }
+
+  async checkUpdatesForHost(hostId) {
+    const hosts = await this.getAllHosts({ sanitized: false });
+    const idx = hosts.findIndex((h) => h.id === hostId);
+    if (idx === -1) return null;
+
+    const host = hosts[idx];
+    const res = await checkHostUpdates(host);
+    if (res.firmware) host.firmware = res.firmware;
+    if (res.updates) host.updates = res.updates;
+    host.lastSeen = new Date().toISOString();
+    hosts[idx] = host;
+    await db.saveHosts(hosts);
+
+    return {
+      hostId: host.id,
+      hostName: host.name || host.hostname,
+      updates: host.updates,
+      output: res.output || '',
+      host: sanitizeHost(host),
+    };
+  }
+
+  async checkUpdatesForAllHosts() {
+    const hosts = await this.getAllHosts({ sanitized: false });
+    const results = [];
+    for (let i = 0; i < hosts.length; i++) {
+      const host = hosts[i];
+      if (host.isSimulated) continue;
+      try {
+        const res = await checkHostUpdates(host);
+        if (res.firmware) host.firmware = res.firmware;
+        if (res.updates) host.updates = res.updates;
+        host.lastSeen = new Date().toISOString();
+        hosts[i] = host;
+        results.push({
+          hostId: host.id,
+          hostName: host.name || host.hostname,
+          success: true,
+          updates: host.updates,
+        });
+      } catch (err) {
+        results.push({
+          hostId: host.id,
+          hostName: host.name || host.hostname,
+          success: false,
+          error: err.message,
+        });
+      }
+    }
+    await db.saveHosts(hosts);
+    return {
+      checkedCount: results.length,
+      results,
+      hosts: hosts.map(sanitizeHost),
+    };
+  }
+
+  async upgradePackagesForHost(hostId, packages = 'all') {
+    const hosts = await this.getAllHosts({ sanitized: false });
+    const idx = hosts.findIndex((h) => h.id === hostId);
+    if (idx === -1) return null;
+
+    const host = hosts[idx];
+    const res = await upgradeHostPackages(host, packages);
+    if (res.updates) {
+      host.updates = res.updates;
+    }
+    host.lastSeen = new Date().toISOString();
+    hosts[idx] = host;
+    await db.saveHosts(hosts);
+
+    return {
+      success: true,
+      hostId: host.id,
+      output: res.output,
+      updates: host.updates,
+      host: sanitizeHost(host),
+    };
+  }
+
+  async attendedSysupgradeForHost(hostId, { action = 'check' } = {}) {
+    const hosts = await this.getAllHosts({ sanitized: false });
+    const idx = hosts.findIndex((h) => h.id === hostId);
+    if (idx === -1) return null;
+
+    const host = hosts[idx];
+    if (action === 'upgrade') {
+      // Automatically create a pre-upgrade TrueNAS snapshot before flashing new firmware
+      try {
+        await backupEngine.runBackup(host.id, 'pre-upgrade');
+      } catch {
+        // Proceed even if backup snapshot fails
+      }
+    }
+
+    const res = await performAttendedSysupgradeAction(host, { action });
+    if (res.updates) {
+      host.updates = res.updates;
+    }
+    host.lastSeen = new Date().toISOString();
+    hosts[idx] = host;
+    await db.saveHosts(hosts);
+
+    return {
+      success: true,
+      action,
+      hostId: host.id,
+      output: res.output,
+      updates: host.updates,
+      host: sanitizeHost(host),
+    };
   }
 }
 
