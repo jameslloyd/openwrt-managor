@@ -901,6 +901,33 @@ test('Package Updates & Attended Sysupgrade: parses opkg/apk updates and advises
   assert.equal(telemetry.updates.attendedSysupgrade.boardName, 'glinet,gl-mt6000');
   assert.ok(telemetry.updates.attendedSysupgrade.advisory.includes('23.05.5'));
 
+  // 3b. Verify Attended Sysupgrade detection for LuCI-only, apk (owut), UCI config, default, and explicit ASU_NONE
+  const luciOnlyAsu = evaluateAttendedSysupgrade({
+    firmware: 'OpenWrt 23.05.4',
+    asuStatusTxt: "HAS_LUCI:luci-app-attendedsysupgrade\nattendedsysupgrade.server.url='https://sysupgrade.openwrt.org'",
+  });
+  assert.equal(luciOnlyAsu.installed, true);
+  assert.equal(luciOnlyAsu.cliTool, 'luci-app');
+
+  const apkOwutAsu = evaluateAttendedSysupgrade({
+    firmware: 'OpenWrt 24.10.0',
+    asuStatusTxt: 'owut-2024.10.0-r1\nluci-app-attendedsysupgrade-24.10.0-r1',
+  });
+  assert.equal(apkOwutAsu.installed, true);
+  assert.equal(apkOwutAsu.cliTool, 'owut');
+
+  const unpolledDefaultAsu = evaluateAttendedSysupgrade({
+    firmware: 'OpenWrt 23.05.4',
+  });
+  assert.equal(unpolledDefaultAsu.installed, true);
+
+  const explicitNoneAsu = evaluateAttendedSysupgrade({
+    firmware: 'OpenWrt 23.05.4',
+    asuStatusTxt: 'ASU_NONE',
+  });
+  assert.equal(explicitNoneAsu.installed, false);
+  assert.equal(explicitNoneAsu.statusVerified, true);
+
   // 4. Verify GET /api/hosts/:id/updates returns the host's software & firmware update advisory
   const created = await hostManager.createHost({
     id: 'gw-mt6000',

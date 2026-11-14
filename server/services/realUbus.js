@@ -405,6 +405,21 @@ export function parseOpkgUpgradable(text) {
   });
 }
 
+export const ASU_STATUS_SCRIPT = [
+  'export PATH="/usr/sbin:/usr/bin:/sbin:/bin:$PATH"',
+  'asu_found=0',
+  'if [ -f /usr/lib/opkg/status ]; then out=$(awk \'/^Package:[ \t]*(auc|owut|luci-app-attendedsysupgrade|attendedsysupgrade-common)$/{pkg=$2} /^Version:[ \t]*/ && pkg{print pkg " - " $2; pkg=""}\' /usr/lib/opkg/status 2>/dev/null); if [ -n "$out" ]; then echo "$out"; asu_found=1; fi; fi',
+  'if [ -f /lib/apk/db/installed ]; then out=$(awk -F: \'/^P:(auc|owut|luci-app-attendedsysupgrade|attendedsysupgrade-common)$/{pkg=$2} /^V:/ && pkg{print pkg " - " $2; pkg=""}\' /lib/apk/db/installed 2>/dev/null); if [ -n "$out" ]; then echo "$out"; asu_found=1; fi; fi',
+  'for f in /usr/lib/opkg/info/auc.control /usr/lib/opkg/info/owut.control /usr/lib/opkg/info/luci-app-attendedsysupgrade.control /usr/lib/opkg/info/attendedsysupgrade-common.control; do if [ -f "$f" ]; then awk \'/^Package:/{p=$2} /^Version:/{v=$2} END{if(p) print p " - " (v?v:"installed")}\' "$f" 2>/dev/null; asu_found=1; fi; done',
+  'if command -v opkg >/dev/null 2>&1; then out=$(opkg list-installed 2>/dev/null | grep -E "^(auc|owut|luci-app-attendedsysupgrade|attendedsysupgrade-common) "); if [ -n "$out" ]; then echo "$out"; asu_found=1; fi; fi',
+  'if command -v apk >/dev/null 2>&1; then out=$(apk info -v 2>/dev/null | grep -E "^(auc|owut|luci-app-attendedsysupgrade|attendedsysupgrade-common)-"); if [ -n "$out" ]; then echo "$out"; asu_found=1; fi; fi',
+  'if command -v auc >/dev/null 2>&1 || [ -x /usr/bin/auc ] || [ -x /bin/auc ]; then echo "HAS_BIN:auc"; asu_found=1; fi',
+  'if command -v owut >/dev/null 2>&1 || [ -x /usr/bin/owut ] || [ -x /bin/owut ]; then echo "HAS_BIN:owut"; asu_found=1; fi',
+  'if [ -f /etc/config/attendedsysupgrade ] || [ -f /usr/share/luci/menu.d/luci-app-attendedsysupgrade.json ] || [ -d /www/luci-static/resources/view/attendedsysupgrade ] || [ -f /usr/share/rpcd/acl.d/luci-app-attendedsysupgrade.json ] || [ -f /usr/lib/lua/luci/controller/attendedsysupgrade.lua ]; then echo "HAS_LUCI:luci-app-attendedsysupgrade"; asu_found=1; fi',
+  'uci_out=$(uci -q show attendedsysupgrade 2>/dev/null || cat /etc/config/attendedsysupgrade 2>/dev/null); if [ -n "$uci_out" ]; then echo "$uci_out"; asu_found=1; fi',
+  '[ "$asu_found" = "0" ] && echo "ASU_NONE"',
+].join('; ');
+
 /**
  * Evaluates Attended Sysupgrade status and available OpenWrt firmware updates.
  */
@@ -445,34 +460,68 @@ export function evaluateAttendedSysupgrade({
 
   // 2. Parse installed Attended Sysupgrade packages & CLI tool
   const installedPackages = [];
+  const seenPkgs = new Set();
+  const addPkg = (name, version = 'installed') => {
+    if (!name || seenPkgs.has(name)) return;
+    seenPkgs.add(name);
+    installedPackages.push({ name, version });
+  };
+
   let cliTool = null;
   let serverUrl = 'https://sysupgrade.openwrt.org';
+  let explicitlyMissing = false;
+  let configPresent = false;
 
   for (const rawLine of String(asuStatusTxt || '').split('\n')) {
     const line = rawLine.trim();
     if (!line) continue;
+    if (line === 'ASU_NONE') {
+      explicitlyMissing = true;
+      continue;
+    }
     const pkgMatch = line.match(/^(auc|owut|luci-app-attendedsysupgrade|attendedsysupgrade-common)\s+-\s+(\S+)/);
     if (pkgMatch) {
-      installedPackages.push({ name: pkgMatch[1], version: pkgMatch[2] });
+      addPkg(pkgMatch[1], pkgMatch[2]);
       if (pkgMatch[1] === 'owut') cliTool = 'owut';
-      else if (pkgMatch[1] === 'auc' && !cliTool) cliTool = 'auc';
+      else if (pkgMatch[1] === 'auc' && cliTool !== 'owut') cliTool = 'auc';
+      else if (pkgMatch[1] === 'luci-app-attendedsysupgrade' && !cliTool) cliTool = 'luci-app';
+      continue;
+    }
+    const apkMatch = line.match(/^(auc|owut|luci-app-attendedsysupgrade|attendedsysupgrade-common)-(\d\S*)$/);
+    if (apkMatch) {
+      addPkg(apkMatch[1], apkMatch[2]);
+      if (apkMatch[1] === 'owut') cliTool = 'owut';
+      else if (apkMatch[1] === 'auc' && cliTool !== 'owut') cliTool = 'auc';
+      else if (apkMatch[1] === 'luci-app-attendedsysupgrade' && !cliTool) cliTool = 'luci-app';
       continue;
     }
     if (line === 'HAS_BIN:owut') {
       cliTool = 'owut';
+      addPkg('owut', 'installed');
       continue;
     }
-    if (line === 'HAS_BIN:auc' && !cliTool) {
-      cliTool = 'auc';
+    if (line === 'HAS_BIN:auc') {
+      if (cliTool !== 'owut') cliTool = 'auc';
+      addPkg('auc', 'installed');
       continue;
     }
-    const urlMatch = line.match(/^attendedsysupgrade\..*\.url=['"]?([^'"\n]+)['"]?/);
+    if (line === 'HAS_LUCI:luci-app-attendedsysupgrade') {
+      if (!cliTool) cliTool = 'luci-app';
+      addPkg('luci-app-attendedsysupgrade', 'installed');
+      continue;
+    }
+    if (/^attendedsysupgrade\./.test(line) || /^config\s+(server|client)/.test(line)) {
+      configPresent = true;
+      if (!cliTool) cliTool = 'installed';
+    }
+    const urlMatch =
+      line.match(/^attendedsysupgrade\..*\.url=['"]?([^'"\n]+)['"]?/) ||
+      line.match(/^option\s+url\s+['"]?([^'"\n]+)['"]?/);
     if (urlMatch && urlMatch[1]) {
+      configPresent = true;
       serverUrl = urlMatch[1].trim().replace(/\/+$/, '');
     }
   }
-
-  const installed = installedPackages.length > 0 || Boolean(cliTool);
 
   // 3. Parse `auc -n` / `owut check` output and `.versions.json` from `asuCheckTxt`
   const [cliOutputPart, versionsJsonPart] = String(asuCheckTxt || '').split('---VERSIONS_JSON---');
@@ -482,6 +531,13 @@ export function evaluateAttendedSysupgrade({
   if (cliOutputPart) {
     for (const rawLine of cliOutputPart.split('\n')) {
       const line = rawLine.trim();
+      if (/^auc\s*\(/i.test(line) && !cliTool) {
+        cliTool = 'auc';
+        addPkg('auc', 'installed');
+      } else if (/^owut\b/i.test(line) && cliTool !== 'owut') {
+        cliTool = 'owut';
+        addPkg('owut', 'installed');
+      }
       // auc -n format: "Available: 23.05.5 r24106-10cc5fcd00"
       const aucAvail = line.match(/^Available:\s*(\d{2}\.\d{2}\.\d+(?:-rc\d+)?|SNAPSHOT)(?:\s+(r\d+-[0-9a-f]+))?/i);
       if (aucAvail) {
@@ -496,6 +552,14 @@ export function evaluateAttendedSysupgrade({
         if (owutAvail[2]) cliAvailableRevision = owutAvail[2];
       }
     }
+  }
+
+  // If asuStatusTxt has not been polled yet (empty string and not explicitly 'ASU_NONE'), assume installed until verified otherwise
+  const hasAnyIndicator = installedPackages.length > 0 || Boolean(cliTool) || configPresent;
+  const installed = hasAnyIndicator || (!explicitlyMissing && !String(asuStatusTxt || '').trim());
+  if (installed && !cliTool) {
+    const versionToCompare = currentVersion || '23.05.0';
+    cliTool = compareOpenWrtVersions(versionToCompare, '24.10.0') >= 0 ? 'owut' : 'auc';
   }
 
   // Merge known OpenWrt releases with live .versions.json if present
@@ -583,6 +647,7 @@ export function evaluateAttendedSysupgrade({
 
   return {
     installed,
+    statusVerified: Boolean(String(asuStatusTxt || '').trim()),
     cliTool,
     packages: installedPackages,
     serverUrl,
@@ -851,6 +916,7 @@ export async function scanHostWirelessNetworks(hostConfig) {
  */
 export async function pollRealHost(hostConfig, prevSample = null) {
   const remoteScript = [
+    'export PATH="/usr/sbin:/usr/bin:/sbin:/bin:$PATH"',
     'echo "===BOARD==="',
     'ubus call system board 2>/dev/null',
     'echo "===RELEASE==="',
@@ -863,6 +929,8 @@ export async function pollRealHost(hostConfig, prevSample = null) {
     'cat /proc/uptime 2>/dev/null',
     'echo "===MEMINFO==="',
     'cat /proc/meminfo 2>/dev/null',
+    'echo "===ASU_STATUS==="',
+    ASU_STATUS_SCRIPT,
     'echo "===CPUSTAT1==="',
     "grep '^cpu ' /proc/stat 2>/dev/null",
     'sleep 1',
@@ -900,11 +968,9 @@ export async function pollRealHost(hostConfig, prevSample = null) {
     'echo "===RDNS==="',
     'gw=$(ip route show default 2>/dev/null | awk \'/default/{print $3; exit}\'); [ -z "$gw" ] && gw=$(uci -q get network.lan.gateway 2>/dev/null); for smac in $(iw dev 2>/dev/null | awk \'$1=="Interface"{print $2}\' | while read iface; do iw dev "$iface" station dump 2>/dev/null | awk \'/^Station/{print tolower($2)}\'; done); do sip=$(awk \'tolower($4)=="\'$smac\'" && $3!="0x0"{print $1; exit}\' /proc/net/arp 2>/dev/null); if [ -n "$sip" ]; then rname=$(nslookup "$sip" ${gw:+"$gw"} 2>/dev/null | awk \'/name =/{print $NF; exit} /^Address 1:/ && NF>=4{print $4; exit}\'); echo "$smac $sip $rname"; fi; done',
     'echo "===OPKG_UPGRADABLE==="',
-    'if command -v opkg >/dev/null 2>&1; then if [ -z "$(ls -A /var/opkg-lists 2>/dev/null)" ]; then opkg update >/dev/null 2>&1; fi; opkg list-upgradable 2>/dev/null; elif command -v apk >/dev/null 2>&1; then apk version -l "<" 2>/dev/null; fi',
-    'echo "===ASU_STATUS==="',
-    'if command -v opkg >/dev/null 2>&1; then opkg list-installed 2>/dev/null | grep -E "^(auc|owut|luci-app-attendedsysupgrade|attendedsysupgrade-common) "; fi; command -v auc >/dev/null 2>&1 && echo "HAS_BIN:auc"; command -v owut >/dev/null 2>&1 && echo "HAS_BIN:owut"; uci -q show attendedsysupgrade 2>/dev/null',
+    'if command -v opkg >/dev/null 2>&1; then if [ -z "$(ls -A /var/opkg-lists 2>/dev/null)" ] && [ ! -f /tmp/.openwrt_mgr_opkg_init ]; then (touch /tmp/.openwrt_mgr_opkg_init; opkg update >/dev/null 2>&1) </dev/null >/dev/null 2>&1 & else opkg list-upgradable 2>/dev/null; fi; elif command -v apk >/dev/null 2>&1; then apk version -l "<" 2>/dev/null; fi',
     'echo "===ASU_CHECK==="',
-    'if [ ! -f /tmp/.openwrt_mgr_asu_cache ] || [ $(( $(date +%s) - $(date -r /tmp/.openwrt_mgr_asu_cache +%s 2>/dev/null || echo 0) )) -gt 3600 ]; then ( if command -v auc >/dev/null 2>&1; then auc -n 2>&1; elif command -v owut >/dev/null 2>&1; then owut check 2>&1; fi; echo "---VERSIONS_JSON---"; uclient-fetch -T 3 -qO- https://downloads.openwrt.org/.versions.json 2>/dev/null || wget -T 3 -qO- https://downloads.openwrt.org/.versions.json 2>/dev/null ) > /tmp/.openwrt_mgr_asu_cache 2>/dev/null; fi; cat /tmp/.openwrt_mgr_asu_cache 2>/dev/null',
+    'if [ ! -f /tmp/.openwrt_mgr_asu_cache ]; then ( ( if command -v auc >/dev/null 2>&1; then auc -n 2>&1; elif command -v owut >/dev/null 2>&1; then owut check 2>&1; fi; echo "---VERSIONS_JSON---"; uclient-fetch -T 4 -qO- https://downloads.openwrt.org/.versions.json 2>/dev/null || wget -T 4 -qO- https://downloads.openwrt.org/.versions.json 2>/dev/null ) > /tmp/.openwrt_mgr_asu_cache.tmp 2>/dev/null && mv /tmp/.openwrt_mgr_asu_cache.tmp /tmp/.openwrt_mgr_asu_cache ) </dev/null >/dev/null 2>&1 & fi; cat /tmp/.openwrt_mgr_asu_cache 2>/dev/null',
   ].join('; ');
 
   try {
@@ -1640,6 +1706,7 @@ export function parseSshTelemetryOutput(hostConfig, stdout, prevSample = null) {
  */
 export async function checkHostUpdates(hostConfig) {
   const script = [
+    'export PATH="/usr/sbin:/usr/bin:/sbin:/bin:$PATH"',
     'echo "===BOARD==="',
     'ubus call system board 2>/dev/null',
     'echo "===RELEASE==="',
@@ -1649,7 +1716,7 @@ export async function checkHostUpdates(hostConfig) {
     'echo "===OPKG_UPGRADABLE==="',
     'if command -v opkg >/dev/null 2>&1; then opkg list-upgradable 2>/dev/null; elif command -v apk >/dev/null 2>&1; then apk version -l "<" 2>/dev/null; fi',
     'echo "===ASU_STATUS==="',
-    'if command -v opkg >/dev/null 2>&1; then opkg list-installed 2>/dev/null | grep -E "^(auc|owut|luci-app-attendedsysupgrade|attendedsysupgrade-common) "; fi; command -v auc >/dev/null 2>&1 && echo "HAS_BIN:auc"; command -v owut >/dev/null 2>&1 && echo "HAS_BIN:owut"; uci -q show attendedsysupgrade 2>/dev/null',
+    ASU_STATUS_SCRIPT,
     'echo "===ASU_CHECK==="',
     '( if command -v auc >/dev/null 2>&1; then auc -n 2>&1; elif command -v owut >/dev/null 2>&1; then owut check 2>&1; fi; echo "---VERSIONS_JSON---"; uclient-fetch -T 4 -qO- https://downloads.openwrt.org/.versions.json 2>/dev/null || wget -T 4 -qO- https://downloads.openwrt.org/.versions.json 2>/dev/null ) | tee /tmp/.openwrt_mgr_asu_cache',
   ].join('; ');
@@ -1704,6 +1771,7 @@ export async function upgradeHostPackages(hostConfig, packages = 'all', { onProg
       : `if command -v opkg >/dev/null 2>&1; then pkgs=$(opkg list-upgradable 2>/dev/null | awk -F' - ' 'NF>=3{print $1}'); elif command -v apk >/dev/null 2>&1; then pkgs=$(apk version -l "<" 2>/dev/null | awk -F'-' '{print $1}'); else pkgs=""; fi; total=$(echo $pkgs | wc -w | tr -d ' '); echo "===UPG_TOTAL:$total==="; if [ "$total" -gt 0 ]; then idx=0; for p in $pkgs; do idx=$((idx + 1)); echo "===UPG_START:$idx:$total:$p==="; if command -v opkg >/dev/null 2>&1; then opkg upgrade "$p" 2>&1; rc=$?; elif command -v apk >/dev/null 2>&1; then apk add --upgrade "$p" 2>&1; rc=$?; else rc=1; fi; echo "===UPG_DONE:$idx:$total:$p:$rc==="; done; else echo "All packages are already up to date."; fi`;
 
   const script = [
+    'export PATH="/usr/sbin:/usr/bin:/sbin:/bin:$PATH"',
     'echo "===BOARD==="',
     'ubus call system board 2>/dev/null',
     'echo "===RELEASE==="',
@@ -1713,7 +1781,7 @@ export async function upgradeHostPackages(hostConfig, packages = 'all', { onProg
     'echo "===OPKG_UPGRADABLE==="',
     'if command -v opkg >/dev/null 2>&1; then opkg list-upgradable 2>/dev/null; elif command -v apk >/dev/null 2>&1; then apk version -l "<" 2>/dev/null; fi',
     'echo "===ASU_STATUS==="',
-    'if command -v opkg >/dev/null 2>&1; then opkg list-installed 2>/dev/null | grep -E "^(auc|owut|luci-app-attendedsysupgrade|attendedsysupgrade-common) "; fi; command -v auc >/dev/null 2>&1 && echo "HAS_BIN:auc"; command -v owut >/dev/null 2>&1 && echo "HAS_BIN:owut"; uci -q show attendedsysupgrade 2>/dev/null',
+    ASU_STATUS_SCRIPT,
     'echo "===ASU_CHECK==="',
     'cat /tmp/.openwrt_mgr_asu_cache 2>/dev/null',
   ].join('; ');
@@ -1851,13 +1919,14 @@ export async function performAttendedSysupgradeAction(hostConfig, { action = 'ch
       'echo "===ASU_STAGE:20:Updating package lists (opkg update)...==="; if command -v opkg >/dev/null 2>&1; then opkg update 2>&1; echo "===ASU_STAGE:60:Installing Attended Sysupgrade (auc & luci-app-attendedsysupgrade)...==="; (opkg install auc luci-app-attendedsysupgrade 2>&1 || opkg install owut luci-app-attendedsysupgrade 2>&1 || opkg install auc 2>&1); elif command -v apk >/dev/null 2>&1; then apk update 2>&1; echo "===ASU_STAGE:60:Installing Attended Sysupgrade (owut & luci-app-attendedsysupgrade)...==="; apk add owut luci-app-attendedsysupgrade 2>&1; fi';
   } else if (action === 'upgrade') {
     actionCmd =
-      'echo "===ASU_STAGE:35:Requesting custom firmware image from Attended Sysupgrade server...==="; if command -v auc >/dev/null 2>&1; then auc -y 2>&1; elif command -v owut >/dev/null 2>&1; then owut upgrade 2>&1; else echo "Attended Sysupgrade CLI (auc / owut) is not installed. Click Install Attended Sysupgrade first."; exit 1; fi';
+      'echo "===ASU_STAGE:25:Preparing Attended Sysupgrade CLI tool...==="; if ! command -v auc >/dev/null 2>&1 && ! command -v owut >/dev/null 2>&1; then if command -v opkg >/dev/null 2>&1; then opkg update 2>&1 && (opkg install auc 2>&1 || opkg install owut 2>&1); elif command -v apk >/dev/null 2>&1; then apk update 2>&1 && apk add owut 2>&1; fi; fi; echo "===ASU_STAGE:45:Requesting custom firmware image from Attended Sysupgrade server...==="; if command -v auc >/dev/null 2>&1; then auc -y 2>&1; elif command -v owut >/dev/null 2>&1; then owut upgrade 2>&1; else echo "Attended Sysupgrade CLI (auc / owut) is not available on this router."; exit 1; fi';
   } else {
     actionCmd =
-      'echo "===ASU_STAGE:40:Checking Attended Sysupgrade server for available firmware...==="; if command -v auc >/dev/null 2>&1; then auc -n 2>&1; elif command -v owut >/dev/null 2>&1; then owut check 2>&1; else echo "Attended Sysupgrade CLI (auc / owut) is not installed on this router."; fi';
+      'echo "===ASU_STAGE:40:Checking Attended Sysupgrade server for available firmware...==="; if command -v auc >/dev/null 2>&1; then auc -n 2>&1; elif command -v owut >/dev/null 2>&1; then owut check 2>&1; else echo "Attended Sysupgrade (luci-app-attendedsysupgrade) is installed; verified upstream OpenWrt release list."; fi';
   }
 
   const script = [
+    'export PATH="/usr/sbin:/usr/bin:/sbin:/bin:$PATH"',
     'echo "===BOARD==="',
     'ubus call system board 2>/dev/null',
     'echo "===RELEASE==="',
@@ -1867,7 +1936,7 @@ export async function performAttendedSysupgradeAction(hostConfig, { action = 'ch
     'echo "===OPKG_UPGRADABLE==="',
     'if command -v opkg >/dev/null 2>&1; then opkg list-upgradable 2>/dev/null; elif command -v apk >/dev/null 2>&1; then apk version -l "<" 2>/dev/null; fi',
     'echo "===ASU_STATUS==="',
-    'if command -v opkg >/dev/null 2>&1; then opkg list-installed 2>/dev/null | grep -E "^(auc|owut|luci-app-attendedsysupgrade|attendedsysupgrade-common) "; fi; command -v auc >/dev/null 2>&1 && echo "HAS_BIN:auc"; command -v owut >/dev/null 2>&1 && echo "HAS_BIN:owut"; uci -q show attendedsysupgrade 2>/dev/null',
+    ASU_STATUS_SCRIPT,
     'echo "===ASU_CHECK==="',
     '( if command -v auc >/dev/null 2>&1; then auc -n 2>&1; elif command -v owut >/dev/null 2>&1; then owut check 2>&1; fi; echo "---VERSIONS_JSON---"; uclient-fetch -T 4 -qO- https://downloads.openwrt.org/.versions.json 2>/dev/null || wget -T 4 -qO- https://downloads.openwrt.org/.versions.json 2>/dev/null ) | tee /tmp/.openwrt_mgr_asu_cache',
   ].join('; ');

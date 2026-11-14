@@ -27,6 +27,23 @@ export function sanitizeHost(host, activeUpgradeJob = null) {
       attendedSysupgrade: asu,
       lastChecked: null,
     };
+  } else if (
+    safe.updates.attendedSysupgrade &&
+    !safe.updates.attendedSysupgrade.installed &&
+    !safe.updates.attendedSysupgrade.statusVerified
+  ) {
+    const refreshedAsu = evaluateAttendedSysupgrade({
+      firmware: safe.firmware || safe.updates.attendedSysupgrade.currentVersion || 'OpenWrt',
+    });
+    safe.updates = {
+      ...safe.updates,
+      firmwareUpdateAvailable: refreshedAsu.firmwareUpdateAvailable,
+      availableFirmwareVersion: refreshedAsu.availableVersion,
+      attendedSysupgrade: {
+        ...safe.updates.attendedSysupgrade,
+        ...refreshedAsu,
+      },
+    };
   }
   return {
     ...safe,
