@@ -8,6 +8,15 @@ import { clientEngine } from '../services/clientEngine.js';
 import { simulator } from '../services/simulator.js';
 import { analyzeInterference } from '../services/wifiEngine.js';
 import { backupEngine } from '../services/backupEngine.js';
+import {
+  resolveHostByIdentifier,
+  buildAgentHostPayload,
+  buildFleetAgentStatus,
+  generateAgentApiKey,
+  verifyAgentRequestAuth,
+  getAgentToolManifest,
+  getOpenApiSpec,
+} from '../services/agentApi.js';
 
 const startTime = Date.now();
 
@@ -55,7 +64,7 @@ function sendJson(res, statusCode, data) {
     'Content-Length': Buffer.byteLength(payload),
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-API-Key',
   });
   res.end(payload);
 }
@@ -77,13 +86,219 @@ export async function handleApiRequest(req, res, pathname, searchParams) {
     res.writeHead(204, {
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-API-Key',
     });
     res.end();
     return true;
   }
 
   try {
+    // -------------------------------------------------------------
+    // Hermes & External Agent REST API (/api/agent/*, /api/v1/*, /api/openapi.json)
+    // -------------------------------------------------------------
+    const reqProto = req.headers['x-forwarded-proto'] || 'http';
+    const reqHost = req.headers.host || `localhost:${config.port}`;
+    const originBaseUrl = `${reqProto}://${reqHost}`;
+
+    if ((pathname === '/api/openapi.json' || pathname === '/api/v1/openapi.json') && req.method === 'GET') {
+      sendJson(res, 200, getOpenApiSpec(originBaseUrl));
+      return true;
+    }
+
+    if ((pathname === '/api/agent/manifest' || pathname === '/api/v1/agent/manifest') && req.method === 'GET') {
+      sendJson(res, 200, getAgentToolManifest(originBaseUrl));
+      return true;
+    }
+
+    if (pathname.startsWith('/api/agent/') || pathname.startsWith('/api/v1/')) {
+      const authCheck = await verifyAgentRequestAuth(req, searchParams);
+      if (!authCheck.allowed) {
+        sendError(res, authCheck.statusCode || 401, authCheck.message, authCheck.code || 'UNAUTHORIZED');
+        return true;
+      }
+
+      // Normalize /api/v1/* and /api/agent/* subpaths
+      const subPath = pathname.startsWith('/api/agent/')
+        ? pathname.slice('/api/agent'.length)
+        : pathname.slice('/api/v1'.length);
+
+      // GET /api/agent/status | /api/v1/status | /api/v1/fleet/status
+      if ((subPath === '/status' || subPath === '/fleet/status') && req.method === 'GET') {
+        if (searchParams.get('refresh') === 'true') {
+          await hostManager.pollAllHosts();
+        }
+        const statusPayload = await buildFleetAgentStatus();
+        sendJson(res, 200, statusPayload);
+        return true;
+      }
+
+      // GET /api/agent/hosts | /api/v1/hosts
+      if (subPath === '/hosts' && req.method === 'GET') {
+        if (searchParams.get('refresh') === 'true') {
+          await hostManager.pollAllHosts();
+        }
+        const [hosts, clients, backups] = await Promise.all([
+          hostManager.getAllHosts(),
+          clientEngine.getClients(),
+          backupEngine.listBackups(),
+        ]);
+        const q = (searchParams.get('q') || '').trim().toLowerCase();
+        const statusFilter = (searchParams.get('status') || '').trim().toLowerCase();
+        const roleFilter = (searchParams.get('role') || '').trim().toLowerCase();
+        const updatesFilter = searchParams.get('updates') === 'true';
+
+        let items = hosts.map((h) => buildAgentHostPayload(h, clients, backups));
+        if (q) {
+          items = items.filter(
+            (h) =>
+              (h.name && h.name.toLowerCase().includes(q)) ||
+              (h.hostname && h.hostname.toLowerCase().includes(q)) ||
+              (h.ip && h.ip.toLowerCase().includes(q)) ||
+              (h.mac && h.mac.toLowerCase().includes(q)) ||
+              (h.model && h.model.toLowerCase().includes(q)) ||
+              (h.vendor && h.vendor.toLowerCase().includes(q))
+          );
+        }
+        if (statusFilter === 'online' || statusFilter === 'offline') {
+          items = items.filter((h) => h.status === statusFilter);
+        }
+        if (roleFilter) {
+          items = items.filter((h) => (h.role || '').toLowerCase() === roleFilter);
+        }
+        if (updatesFilter) {
+          items = items.filter((h) => h.updates.packagesCount > 0 || h.updates.firmwareUpdateAvailable);
+        }
+
+        sendJson(res, 200, {
+          timestamp: new Date().toISOString(),
+          count: items.length,
+          onlineCount: items.filter((h) => h.online).length,
+          offlineCount: items.filter((h) => !h.online).length,
+          hosts: items,
+        });
+        return true;
+      }
+
+      // POST /api/agent/hosts/:idOrName/poll | /api/v1/hosts/:idOrName/poll
+      const agentHostPollMatch = subPath.match(/^\/hosts\/([^/]+)\/poll$/);
+      if (agentHostPollMatch && req.method === 'POST') {
+        const idOrName = decodeURIComponent(agentHostPollMatch[1]);
+        if (idOrName.toLowerCase() === 'all') {
+          await hostManager.pollAllHosts();
+          const statusPayload = await buildFleetAgentStatus();
+          sendJson(res, 200, { polled: 'all', ...statusPayload });
+          return true;
+        }
+        const resolved = await resolveHostByIdentifier(idOrName);
+        if (!resolved) {
+          sendError(res, 404, `OpenWrt host "${idOrName}" not found`, 'HOST_NOT_FOUND');
+          return true;
+        }
+        const freshHost = (await hostManager.pollSingleHost(resolved.id)) || resolved;
+        const [clients, backups] = await Promise.all([clientEngine.getClients(), backupEngine.listBackups()]);
+        const payload = buildAgentHostPayload(freshHost, clients, backups);
+        sendJson(res, 200, {
+          timestamp: new Date().toISOString(),
+          polled: true,
+          host: payload,
+          clients: clients.filter((c) => c.connectedTo?.hostId === freshHost.id),
+        });
+        return true;
+      }
+
+      // GET /api/agent/hosts/:idOrName | /api/v1/hosts/:idOrName
+      const agentHostMatch = subPath.match(/^\/hosts\/([^/]+)$/);
+      if (agentHostMatch && req.method === 'GET') {
+        const idOrName = decodeURIComponent(agentHostMatch[1]);
+        let resolved = await resolveHostByIdentifier(idOrName);
+        if (!resolved) {
+          sendError(res, 404, `OpenWrt host "${idOrName}" not found`, 'HOST_NOT_FOUND');
+          return true;
+        }
+        if (searchParams.get('refresh') === 'true') {
+          resolved = (await hostManager.pollSingleHost(resolved.id)) || resolved;
+        }
+        const [clients, backups] = await Promise.all([clientEngine.getClients(), backupEngine.listBackups()]);
+        const hostPayload = buildAgentHostPayload(resolved, clients, backups);
+        const hostClients = clients.filter((c) => c.connectedTo?.hostId === resolved.id);
+        const hostBackups = backups.filter((b) => b.hostId === resolved.id);
+
+        sendJson(res, 200, {
+          timestamp: new Date().toISOString(),
+          host: hostPayload,
+          clients: hostClients,
+          backups: hostBackups,
+        });
+        return true;
+      }
+
+      // GET /api/agent/clients | /api/v1/clients
+      if (subPath === '/clients' && req.method === 'GET') {
+        const q = searchParams.get('q') || '';
+        const type = searchParams.get('type') || '';
+        const hostParam = searchParams.get('host') || searchParams.get('hostId') || '';
+        let resolvedHostId = '';
+        if (hostParam) {
+          const matchedHost = await resolveHostByIdentifier(hostParam);
+          resolvedHostId = matchedHost ? matchedHost.id : hostParam;
+        }
+        const clients = await clientEngine.getClients({ q, hostId: resolvedHostId, type });
+        sendJson(res, 200, {
+          timestamp: new Date().toISOString(),
+          count: clients.length,
+          wifiCount: clients.filter((c) => c.connectionType === 'wifi').length,
+          wiredCount: clients.filter((c) => c.connectionType === 'wired').length,
+          clients,
+        });
+        return true;
+      }
+
+      // GET /api/agent/updates | /api/v1/updates
+      if (subPath === '/updates' && req.method === 'GET') {
+        const hosts = await hostManager.getAllHosts();
+        const jobs = hostManager.getAllUpgradeJobs();
+        const hostUpdates = hosts.map((h) => ({
+          hostId: h.id,
+          hostName: h.name || h.hostname,
+          ip: h.ip,
+          online: h.status === 'online',
+          firmware: h.firmware,
+          packagesCount: h.updates?.packagesCount || 0,
+          packages: h.updates?.packages || [],
+          firmwareUpdateAvailable: Boolean(h.updates?.firmwareUpdateAvailable),
+          availableFirmwareVersion: h.updates?.availableFirmwareVersion || null,
+          attendedSysupgrade: h.updates?.attendedSysupgrade || null,
+          activeUpgradeJob: h.activeUpgradeJob || null,
+          lastChecked: h.updates?.lastChecked || null,
+        }));
+        sendJson(res, 200, {
+          timestamp: new Date().toISOString(),
+          packagesPendingTotal: hostUpdates.reduce((acc, h) => acc + h.packagesCount, 0),
+          firmwareUpdatesAvailableCount: hostUpdates.filter((h) => h.firmwareUpdateAvailable).length,
+          activeJobsCount: jobs.filter((j) => j.status === 'running').length,
+          hosts: hostUpdates,
+          jobs,
+        });
+        return true;
+      }
+
+      // GET /api/agent/wifi | /api/v1/wifi
+      if (subPath === '/wifi' && req.method === 'GET') {
+        await hostManager.getAllHosts();
+        const bands = hostManager.getLiveWifiBands();
+        const analysis = analyzeInterference(bands);
+        sendJson(res, 200, {
+          timestamp: new Date().toISOString(),
+          healthScore: analysis.summary?.healthScore ?? 100,
+          status: analysis.summary?.status || 'healthy',
+          warningsCount: analysis.warnings?.length ?? 0,
+          warnings: analysis.warnings || [],
+          bands,
+        });
+        return true;
+      }
+    }
+
     // -------------------------------------------------------------
     // System & Health APIs
     // -------------------------------------------------------------
@@ -127,20 +342,51 @@ export async function handleApiRequest(req, res, pathname, searchParams) {
       return true;
     }
 
+    if (pathname === '/api/settings/agent-key/regenerate' && req.method === 'POST') {
+      const current = (await db.getSettings()) || {};
+      const newKey = generateAgentApiKey();
+      const updated = {
+        ...current,
+        agentApi: {
+          enabled: true,
+          requireApiKey: current.agentApi?.requireApiKey ?? false,
+          ...(current.agentApi || {}),
+          apiKey: newKey,
+        },
+      };
+      await db.saveSettings(updated);
+      sendJson(res, 200, { apiKey: newKey, agentApi: updated.agentApi });
+      return true;
+    }
+
     if (pathname === '/api/settings') {
       if (req.method === 'GET') {
-        const settings = await db.getSettings();
+        const settings = (await db.getSettings()) || {};
+        if (!settings.agentApi) {
+          settings.agentApi = { enabled: true, requireApiKey: false, apiKey: '' };
+        }
         sendJson(res, 200, settings);
         return true;
       }
       if (req.method === 'PUT') {
         const body = await parseJsonBody(req);
         const current = (await db.getSettings()) || {};
+        const mergedAgentApi = {
+          enabled: true,
+          requireApiKey: false,
+          apiKey: '',
+          ...(current.agentApi || {}),
+          ...(body.agentApi || {}),
+        };
+        if (mergedAgentApi.requireApiKey && !mergedAgentApi.apiKey) {
+          mergedAgentApi.apiKey = generateAgentApiKey();
+        }
         const updated = {
           ...current,
           ...body,
           retention: { ...current.retention, ...(body.retention || {}) },
           alerts: { ...current.alerts, ...(body.alerts || {}) },
+          agentApi: mergedAgentApi,
         };
         await db.saveSettings(updated);
 

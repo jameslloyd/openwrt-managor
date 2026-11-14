@@ -17,6 +17,11 @@ export const defaultSettings = {
     highMemoryThresholdPct: 90,
     wifiInterferenceAlerts: true,
   },
+  agentApi: {
+    enabled: true,
+    requireApiKey: false,
+    apiKey: '',
+  },
 };
 
 export const defaultSchedules = [

@@ -1051,3 +1051,119 @@ test('Package Updates & Attended Sysupgrade: parses opkg/apk updates and advises
 
   await hostManager.deleteHost('gw-mt6000', true);
 });
+
+test('Hermes & Agent REST API: exposes OpenAPI spec, manifest, fleet status, flexible host lookup, and optional API key auth', async () => {
+  // 1. Verify OpenAPI 3.1 spec and Agent Tool Manifest endpoints
+  const openApiRes = await fetch(`${baseUrl}/api/openapi.json`);
+  assert.equal(openApiRes.status, 200);
+  const openApiSpec = await openApiRes.json();
+  assert.equal(openApiSpec.openapi, '3.1.0');
+  assert.ok(openApiSpec.paths['/api/agent/status']);
+  assert.ok(openApiSpec.paths['/api/agent/hosts/{idOrName}']);
+
+  const manifestRes = await fetch(`${baseUrl}/api/agent/manifest`);
+  assert.equal(manifestRes.status, 200);
+  const manifestData = await manifestRes.json();
+  assert.equal(manifestData.nameForModel, 'openwrt_manager');
+  assert.ok(Array.isArray(manifestData.tools));
+  assert.ok(manifestData.tools.some((t) => t.name === 'get_openwrt_fleet_status'));
+  assert.ok(manifestData.tools.some((t) => t.name === 'get_openwrt_host_status'));
+
+  // 2. Register two OpenWrt hosts and query fleet status via GET /api/agent/status and GET /api/v1/status
+  await hostManager.createHost({
+    id: 'gw-hermes',
+    name: 'Core Gateway',
+    hostname: 'OpenWrt-GW',
+    ip: '192.168.10.1',
+    role: 'gateway',
+    model: 'GL.iNet GL-MT6000',
+    firmware: 'OpenWrt 23.05.2',
+  });
+  await hostManager.createHost({
+    id: 'ap-office',
+    name: 'Office Access Point',
+    hostname: 'OpenWrt-Office-AP',
+    ip: '192.168.10.2',
+    role: 'ap',
+    model: 'Ubiquiti UniFi 6 LR',
+    firmware: 'OpenWrt 24.10.0',
+  });
+
+  const statusRes = await fetch(`${baseUrl}/api/agent/status`);
+  assert.equal(statusRes.status, 200);
+  const statusData = await statusRes.json();
+  assert.equal(statusData.summary.hostsTotal, 2);
+  assert.equal(statusData.summary.hostsOnline, 2);
+  assert.ok(statusData.summary.textSummary.includes('2 of 2 OpenWrt host(s) online'));
+  assert.equal(statusData.hosts.length, 2);
+
+  // Also verify /api/v1/status alias
+  const v1StatusRes = await fetch(`${baseUrl}/api/v1/status`);
+  assert.equal(v1StatusRes.status, 200);
+  const v1StatusData = await v1StatusRes.json();
+  assert.equal(v1StatusData.summary.hostsTotal, 2);
+
+  // 3. Verify flexible host lookup by display name, IP address, slug, or ID via GET /api/agent/hosts/:idOrName
+  const byNameRes = await fetch(`${baseUrl}/api/agent/hosts/${encodeURIComponent('Office Access Point')}`);
+  assert.equal(byNameRes.status, 200);
+  const byNameData = await byNameRes.json();
+  assert.equal(byNameData.host.id, 'ap-office');
+  assert.equal(byNameData.host.ip, '192.168.10.2');
+
+  const byIpRes = await fetch(`${baseUrl}/api/agent/hosts/192.168.10.1`);
+  assert.equal(byIpRes.status, 200);
+  const byIpData = await byIpRes.json();
+  assert.equal(byIpData.host.id, 'gw-hermes');
+  assert.equal(byIpData.host.name, 'Core Gateway');
+
+  const bySlugRes = await fetch(`${baseUrl}/api/v1/hosts/office-access-point`);
+  assert.equal(bySlugRes.status, 200);
+  const bySlugData = await bySlugRes.json();
+  assert.equal(bySlugData.host.id, 'ap-office');
+
+  // 4. Verify filtering on GET /api/agent/hosts
+  const apOnlyRes = await fetch(`${baseUrl}/api/agent/hosts?role=ap`);
+  const apOnlyData = await apOnlyRes.json();
+  assert.equal(apOnlyData.count, 1);
+  assert.equal(apOnlyData.hosts[0].id, 'ap-office');
+
+  // 5. Verify optional API Key authentication for external agents
+  const keyGenRes = await fetch(`${baseUrl}/api/settings/agent-key/regenerate`, { method: 'POST' });
+  assert.equal(keyGenRes.status, 200);
+  const { apiKey } = await keyGenRes.json();
+  assert.ok(apiKey.startsWith('owrt_'));
+
+  await fetch(`${baseUrl}/api/settings`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      agentApi: { enabled: true, requireApiKey: true, apiKey },
+    }),
+  });
+
+  // Unauthenticated request should be rejected with 401
+  const unauthRes = await fetch(`${baseUrl}/api/agent/status`);
+  assert.equal(unauthRes.status, 401);
+
+  // Authenticated via X-API-Key or Bearer token should succeed with 200
+  const authHeaderRes = await fetch(`${baseUrl}/api/agent/status`, {
+    headers: { 'X-API-Key': apiKey },
+  });
+  assert.equal(authHeaderRes.status, 200);
+
+  const bearerRes = await fetch(`${baseUrl}/api/v1/hosts/192.168.10.1`, {
+    headers: { Authorization: `Bearer ${apiKey}` },
+  });
+  assert.equal(bearerRes.status, 200);
+
+  // Reset requireApiKey back to false and clean up hosts
+  await fetch(`${baseUrl}/api/settings`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      agentApi: { enabled: true, requireApiKey: false, apiKey },
+    }),
+  });
+  await hostManager.deleteHost('gw-hermes', true);
+  await hostManager.deleteHost('ap-office', true);
+});

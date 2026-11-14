@@ -61,6 +61,15 @@ export const api = {
   getSystemInfo: () => request('/api/system/info'),
   getSettings: () => request('/api/settings'),
   updateSettings: (data) => request('/api/settings', { method: 'PUT', body: data }),
+  regenerateAgentApiKey: () => request('/api/settings/agent-key/regenerate', { method: 'POST' }),
+
+  // Hermes & External Agent REST API
+  getAgentStatus: (apiKey = '') =>
+    request('/api/agent/status', {
+      headers: apiKey ? { 'X-API-Key': apiKey } : {},
+    }),
+  getAgentManifest: () => request('/api/agent/manifest'),
+  getOpenApiSpec: () => request('/api/openapi.json'),
 
   // Hosts
   getHosts: () => request('/api/hosts'),
