@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -95,6 +95,119 @@ export async function execSshCommand(hostConfig, remoteCommand, { timeoutMs = 10
     timeout: timeoutMs,
     maxBuffer: 16 * 1024 * 1024,
     encoding: binary ? 'buffer' : 'utf8',
+  });
+}
+
+/**
+ * Executes a command on a remote OpenWrt host via SSH and streams stdout/stderr lines in real time.
+ */
+export async function execSshCommandStream(hostConfig, remoteCommand, { timeoutMs = 120000, onLine = null } = {}) {
+  const askpass = ensureAskpassScript();
+  const useSshpass = Boolean(hostConfig.password) && (await checkSshpass());
+
+  const port =
+    hostConfig.protocol === 'ssh'
+      ? hostConfig.port && hostConfig.port !== 80 && hostConfig.port !== 443
+        ? hostConfig.port
+        : hostConfig.sshPort || 22
+      : hostConfig.sshPort || 22;
+
+  const sshArgs = [
+    '-p',
+    String(port),
+    '-o',
+    'StrictHostKeyChecking=no',
+    '-o',
+    'UserKnownHostsFile=/dev/null',
+    '-o',
+    'LogLevel=ERROR',
+    '-o',
+    'ConnectTimeout=6',
+    '-o',
+    'ServerAliveInterval=5',
+    '-o',
+    'ServerAliveCountMax=2',
+    '-o',
+    'NumberOfPasswordPrompts=1',
+    '-o',
+    'HostKeyAlgorithms=+ssh-rsa',
+    '-o',
+    'PubkeyAcceptedAlgorithms=+ssh-rsa',
+    `${hostConfig.username || 'root'}@${hostConfig.ip}`,
+    remoteCommand,
+  ];
+
+  const env = {
+    ...process.env,
+    SSH_ASKPASS: askpass,
+    SSH_ASKPASS_REQUIRE: 'force',
+    DISPLAY: ':0',
+    OPENWRT_SSH_PASS: hostConfig.password || '',
+    SSHPASS: hostConfig.password || '',
+  };
+
+  const cmd = useSshpass ? 'sshpass' : 'ssh';
+  const args = useSshpass ? ['-e', 'ssh', ...sshArgs] : sshArgs;
+
+  return new Promise((resolve, reject) => {
+    const child = spawn(cmd, args, { env });
+    let stdout = '';
+    let stderr = '';
+    let lineBuf = '';
+    let settled = false;
+
+    const timer = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        child.kill('SIGTERM');
+        reject(new Error(`SSH command timed out after ${Math.round(timeoutMs / 1000)}s`));
+      }
+    }, timeoutMs);
+
+    const flushLines = (chunkStr) => {
+      lineBuf += chunkStr;
+      const lines = lineBuf.split('\n');
+      lineBuf = lines.pop() || '';
+      if (typeof onLine === 'function') {
+        for (const raw of lines) {
+          onLine(raw.replace(/\r$/, ''));
+        }
+      }
+    };
+
+    child.stdout.on('data', (chunk) => {
+      const str = chunk.toString('utf8');
+      stdout += str;
+      flushLines(str);
+    });
+
+    child.stderr.on('data', (chunk) => {
+      const str = chunk.toString('utf8');
+      stderr += str;
+      flushLines(str);
+    });
+
+    child.on('error', (err) => {
+      clearTimeout(timer);
+      if (!settled) {
+        settled = true;
+        reject(err);
+      }
+    });
+
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (settled) return;
+      settled = true;
+      if (lineBuf && typeof onLine === 'function') {
+        onLine(lineBuf.replace(/\r$/, ''));
+      }
+      if (code !== 0 && !stdout.trim()) {
+        reject(new Error(stderr.trim() || `SSH command exited with code ${code}`));
+      } else {
+        resolve({ stdout, stderr, code });
+      }
+    });
   });
 }
 
@@ -1567,9 +1680,9 @@ export async function checkHostUpdates(hostConfig) {
 }
 
 /**
- * Upgrades selected or all upgradable packages on an OpenWrt host via SSH.
+ * Upgrades selected or all upgradable packages on an OpenWrt host via SSH with real-time step-by-step progress callbacks.
  */
-export async function upgradeHostPackages(hostConfig, packages = 'all') {
+export async function upgradeHostPackages(hostConfig, packages = 'all', { onProgress = null } = {}) {
   let pkgArgs = [];
   if (packages !== 'all' && !(Array.isArray(packages) && packages.includes('all'))) {
     const list = Array.isArray(packages) ? packages : [packages];
@@ -1587,8 +1700,8 @@ export async function upgradeHostPackages(hostConfig, packages = 'all') {
 
   const upgradeCmd =
     pkgArgs.length > 0
-      ? `if command -v opkg >/dev/null 2>&1; then opkg upgrade ${pkgArgs.join(' ')} 2>&1; elif command -v apk >/dev/null 2>&1; then apk add --upgrade ${pkgArgs.join(' ')} 2>&1; fi`
-      : `if command -v opkg >/dev/null 2>&1; then pkgs=$(opkg list-upgradable 2>/dev/null | awk -F' - ' 'NF>=3{print $1}'); if [ -n "$pkgs" ]; then opkg upgrade $pkgs 2>&1; else echo "All packages are already up to date."; fi; elif command -v apk >/dev/null 2>&1; then apk upgrade 2>&1; fi`;
+      ? `pkgs="${pkgArgs.join(' ')}"; total=${pkgArgs.length}; echo "===UPG_TOTAL:$total==="; idx=0; for p in $pkgs; do idx=$((idx + 1)); echo "===UPG_START:$idx:$total:$p==="; if command -v opkg >/dev/null 2>&1; then opkg upgrade "$p" 2>&1; rc=$?; elif command -v apk >/dev/null 2>&1; then apk add --upgrade "$p" 2>&1; rc=$?; else rc=1; fi; echo "===UPG_DONE:$idx:$total:$p:$rc==="; done`
+      : `if command -v opkg >/dev/null 2>&1; then pkgs=$(opkg list-upgradable 2>/dev/null | awk -F' - ' 'NF>=3{print $1}'); elif command -v apk >/dev/null 2>&1; then pkgs=$(apk version -l "<" 2>/dev/null | awk -F'-' '{print $1}'); else pkgs=""; fi; total=$(echo $pkgs | wc -w | tr -d ' '); echo "===UPG_TOTAL:$total==="; if [ "$total" -gt 0 ]; then idx=0; for p in $pkgs; do idx=$((idx + 1)); echo "===UPG_START:$idx:$total:$p==="; if command -v opkg >/dev/null 2>&1; then opkg upgrade "$p" 2>&1; rc=$?; elif command -v apk >/dev/null 2>&1; then apk add --upgrade "$p" 2>&1; rc=$?; else rc=1; fi; echo "===UPG_DONE:$idx:$total:$p:$rc==="; done; else echo "All packages are already up to date."; fi`;
 
   const script = [
     'echo "===BOARD==="',
@@ -1605,24 +1718,121 @@ export async function upgradeHostPackages(hostConfig, packages = 'all') {
     'cat /tmp/.openwrt_mgr_asu_cache 2>/dev/null',
   ].join('; ');
 
-  const { stdout } = await execSshCommand(hostConfig, script, { timeoutMs: 60000 });
-  const parsed = parseSshTelemetryOutput(hostConfig, stdout);
+  let inUpgradeLog = false;
+  let totalCount = pkgArgs.length || 0;
+  let completedCount = 0;
+  const completedPackages = [];
+  const failedPackages = [];
+  const cleanLogLines = [];
 
-  const sections = {};
-  let currentKey = null;
-  for (const line of String(stdout || '').split('\n')) {
-    const m = line.match(/^===([A-Z0-9_]+)===\r?$/);
-    if (m) {
-      currentKey = m[1];
-      sections[currentKey] = [];
-    } else if (currentKey) {
-      sections[currentKey].push(line);
+  const handleStreamLine = (line) => {
+    const secMatch = line.match(/^===([A-Z0-9_]+)===$/);
+    if (secMatch) {
+      inUpgradeLog = secMatch[1] === 'UPGRADE_LOG';
+      if (secMatch[1] === 'OPKG_UPGRADABLE' && typeof onProgress === 'function') {
+        onProgress({
+          phase: 'Verifying remaining upgradable packages...',
+          progressPct: 95,
+        });
+      }
+      return;
     }
+
+    const totalMatch = line.match(/^===UPG_TOTAL:(\d+)===$/);
+    if (totalMatch) {
+      totalCount = Number(totalMatch[1]) || 0;
+      if (typeof onProgress === 'function') {
+        onProgress({
+          packagesTotal: totalCount,
+          packagesCompleted: 0,
+          progressPct: totalCount > 0 ? 8 : 90,
+          phase: totalCount > 0 ? `Preparing to upgrade ${totalCount} package${totalCount === 1 ? '' : 's'}...` : 'All packages up to date',
+        });
+      }
+      return;
+    }
+
+    const startMatch = line.match(/^===UPG_START:(\d+):(\d+):(.+)===$/);
+    if (startMatch) {
+      const idx = Number(startMatch[1]);
+      const tot = Number(startMatch[2]) || totalCount || 1;
+      const pkg = startMatch[3].trim();
+      const pct = Math.min(92, Math.max(10, Math.round(((idx - 0.5) / tot) * 85) + 5));
+      const msg = `[${idx}/${tot}] Upgrading ${pkg}...`;
+      cleanLogLines.push(msg);
+      if (typeof onProgress === 'function') {
+        onProgress({
+          currentPackage: pkg,
+          packagesTotal: tot,
+          packagesCompleted: completedCount,
+          completedPackages: [...completedPackages],
+          failedPackages: [...failedPackages],
+          progressPct: pct,
+          phase: `Upgrading ${pkg} (${idx} of ${tot})...`,
+          logLine: msg,
+          logs: [...cleanLogLines],
+        });
+      }
+      return;
+    }
+
+    const doneMatch = line.match(/^===UPG_DONE:(\d+):(\d+):([^:]+):(\d+)===$/);
+    if (doneMatch) {
+      const idx = Number(doneMatch[1]);
+      const tot = Number(doneMatch[2]) || totalCount || 1;
+      const pkg = doneMatch[3].trim();
+      const rc = Number(doneMatch[4]);
+      completedCount = idx;
+      if (rc === 0) {
+        completedPackages.push(pkg);
+      } else {
+        failedPackages.push(pkg);
+      }
+      const pct = Math.min(94, Math.max(12, Math.round((idx / tot) * 85) + 8));
+      const statusMsg = rc === 0 ? `✓ Upgraded ${pkg} (${idx}/${tot})` : `⚠ ${pkg} exited with status ${rc}`;
+      cleanLogLines.push(statusMsg);
+      if (typeof onProgress === 'function') {
+        onProgress({
+          currentPackage: pkg,
+          packagesTotal: tot,
+          packagesCompleted: completedCount,
+          completedPackages: [...completedPackages],
+          failedPackages: [...failedPackages],
+          progressPct: pct,
+          phase: idx < tot ? `Completed ${pkg} (${idx} of ${tot})` : `Finalizing package configuration (${tot}/${tot})...`,
+          logLine: statusMsg,
+          logs: [...cleanLogLines],
+        });
+      }
+      return;
+    }
+
+    if (inUpgradeLog && line.trim()) {
+      cleanLogLines.push(line);
+      if (typeof onProgress === 'function') {
+        onProgress({ logLine: line, logs: [...cleanLogLines] });
+      }
+    }
+  };
+
+  let stdout = '';
+  if (typeof hostConfig.mockStreamRunner === 'function') {
+    const mockRes = await hostConfig.mockStreamRunner(script, { onLine: handleStreamLine, handleStreamLine });
+    stdout = typeof mockRes === 'string' ? mockRes : mockRes?.stdout || '';
+  } else {
+    const streamRes = await execSshCommandStream(hostConfig, script, { timeoutMs: 120000, onLine: handleStreamLine });
+    stdout = streamRes.stdout;
   }
-  const upgradeLog = (sections.UPGRADE_LOG || []).join('\n').trim();
+
+  const parsed = parseSshTelemetryOutput(hostConfig, stdout);
+  const upgradeLog = cleanLogLines.join('\n').trim();
 
   return {
-    success: true,
+    success: failedPackages.length === 0,
+    packagesTotal: totalCount || completedPackages.length,
+    packagesCompleted: completedPackages.length,
+    completedPackages,
+    failedPackages,
     output: upgradeLog || 'Package upgrade completed.',
     updates: parsed.updates,
   };
@@ -1634,17 +1844,17 @@ export async function upgradeHostPackages(hostConfig, packages = 'all') {
  * - action: 'check'   -> runs `auc -n` / `owut check`
  * - action: 'upgrade' -> triggers `auc -y` / `owut upgrade` to build & apply the new firmware image
  */
-export async function performAttendedSysupgradeAction(hostConfig, { action = 'check' } = {}) {
+export async function performAttendedSysupgradeAction(hostConfig, { action = 'check', onProgress = null } = {}) {
   let actionCmd = '';
   if (action === 'install') {
     actionCmd =
-      'if command -v opkg >/dev/null 2>&1; then opkg update 2>&1 && (opkg install auc luci-app-attendedsysupgrade 2>&1 || opkg install owut luci-app-attendedsysupgrade 2>&1 || opkg install auc 2>&1); elif command -v apk >/dev/null 2>&1; then apk update 2>&1 && apk add owut luci-app-attendedsysupgrade 2>&1; fi';
+      'echo "===ASU_STAGE:20:Updating package lists (opkg update)...==="; if command -v opkg >/dev/null 2>&1; then opkg update 2>&1; echo "===ASU_STAGE:60:Installing Attended Sysupgrade (auc & luci-app-attendedsysupgrade)...==="; (opkg install auc luci-app-attendedsysupgrade 2>&1 || opkg install owut luci-app-attendedsysupgrade 2>&1 || opkg install auc 2>&1); elif command -v apk >/dev/null 2>&1; then apk update 2>&1; echo "===ASU_STAGE:60:Installing Attended Sysupgrade (owut & luci-app-attendedsysupgrade)...==="; apk add owut luci-app-attendedsysupgrade 2>&1; fi';
   } else if (action === 'upgrade') {
     actionCmd =
-      'if command -v auc >/dev/null 2>&1; then auc -y 2>&1; elif command -v owut >/dev/null 2>&1; then owut upgrade 2>&1; else echo "Attended Sysupgrade CLI (auc / owut) is not installed. Click Install Attended Sysupgrade first."; exit 1; fi';
+      'echo "===ASU_STAGE:35:Requesting custom firmware image from Attended Sysupgrade server...==="; if command -v auc >/dev/null 2>&1; then auc -y 2>&1; elif command -v owut >/dev/null 2>&1; then owut upgrade 2>&1; else echo "Attended Sysupgrade CLI (auc / owut) is not installed. Click Install Attended Sysupgrade first."; exit 1; fi';
   } else {
     actionCmd =
-      'if command -v auc >/dev/null 2>&1; then auc -n 2>&1; elif command -v owut >/dev/null 2>&1; then owut check 2>&1; else echo "Attended Sysupgrade CLI (auc / owut) is not installed on this router."; fi';
+      'echo "===ASU_STAGE:40:Checking Attended Sysupgrade server for available firmware...==="; if command -v auc >/dev/null 2>&1; then auc -n 2>&1; elif command -v owut >/dev/null 2>&1; then owut check 2>&1; else echo "Attended Sysupgrade CLI (auc / owut) is not installed on this router."; fi';
   }
 
   const script = [
@@ -1662,21 +1872,40 @@ export async function performAttendedSysupgradeAction(hostConfig, { action = 'ch
     '( if command -v auc >/dev/null 2>&1; then auc -n 2>&1; elif command -v owut >/dev/null 2>&1; then owut check 2>&1; fi; echo "---VERSIONS_JSON---"; uclient-fetch -T 4 -qO- https://downloads.openwrt.org/.versions.json 2>/dev/null || wget -T 4 -qO- https://downloads.openwrt.org/.versions.json 2>/dev/null ) | tee /tmp/.openwrt_mgr_asu_cache',
   ].join('; ');
 
-  const { stdout } = await execSshCommand(hostConfig, script, { timeoutMs: 90000 });
-  const parsed = parseSshTelemetryOutput(hostConfig, stdout);
+  let inActionLog = false;
+  const cleanLogLines = [];
 
-  const sections = {};
-  let currentKey = null;
-  for (const line of String(stdout || '').split('\n')) {
-    const m = line.match(/^===([A-Z0-9_]+)===\r?$/);
-    if (m) {
-      currentKey = m[1];
-      sections[currentKey] = [];
-    } else if (currentKey) {
-      sections[currentKey].push(line);
+  const handleStreamLine = (line) => {
+    const secMatch = line.match(/^===([A-Z0-9_]+)===$/);
+    if (secMatch) {
+      inActionLog = secMatch[1] === 'ACTION_LOG';
+      return;
     }
-  }
-  const actionLog = (sections.ACTION_LOG || []).join('\n').trim();
+    const stageMatch = line.match(/^===ASU_STAGE:(\d+):(.+)===$/);
+    if (stageMatch) {
+      const pct = Number(stageMatch[1]) || 50;
+      const phase = stageMatch[2].trim();
+      cleanLogLines.push(phase);
+      if (typeof onProgress === 'function') {
+        onProgress({ progressPct: pct, phase, logLine: phase });
+      }
+      return;
+    }
+    if (inActionLog && line.trim()) {
+      cleanLogLines.push(line);
+      if (typeof onProgress === 'function') {
+        onProgress({ logLine: line });
+      }
+    }
+  };
+
+  const { stdout } =
+    typeof hostConfig.mockStreamRunner === 'function'
+      ? await hostConfig.mockStreamRunner(script, handleStreamLine)
+      : await execSshCommandStream(hostConfig, script, { timeoutMs: 120000, onLine: handleStreamLine });
+
+  const parsed = parseSshTelemetryOutput(hostConfig, stdout);
+  const actionLog = cleanLogLines.join('\n').trim();
 
   return {
     success: true,

@@ -18,6 +18,8 @@ class Store {
       wifiInterference: { summary: { status: 'healthy', warningsCount: 0, healthScore: 100 }, warnings: [] },
       backups: [],
       schedules: [],
+      upgradeJobs: [],
+      dismissedJobIds: new Set(),
       simulator: null,
 
       // UI Selection State
@@ -38,6 +40,8 @@ class Store {
 
     this.listeners = new Map();
     this.pollTimer = null;
+    this.fastUpgradeTimer = null;
+    this.isPollingUpgrade = false;
     this.pollIntervalMs = 10000;
   }
 
@@ -84,6 +88,61 @@ class Store {
       clearInterval(this.pollTimer);
       this.pollTimer = null;
     }
+    if (this.fastUpgradeTimer) {
+      clearInterval(this.fastUpgradeTimer);
+      this.fastUpgradeTimer = null;
+    }
+  }
+
+  syncFastUpgradePolling() {
+    const hasRunningJob =
+      (Array.isArray(this.state.upgradeJobs) && this.state.upgradeJobs.some((j) => j.status === 'running')) ||
+      (Array.isArray(this.state.hosts) && this.state.hosts.some((h) => h.activeUpgradeJob?.status === 'running'));
+
+    if (hasRunningJob && !this.fastUpgradeTimer) {
+      this.fastUpgradeTimer = setInterval(() => this.pollUpgradeProgress(), 1500);
+    } else if (!hasRunningJob && this.fastUpgradeTimer) {
+      clearInterval(this.fastUpgradeTimer);
+      this.fastUpgradeTimer = null;
+    }
+  }
+
+  async pollUpgradeProgress() {
+    if (this.isPollingUpgrade) return;
+    this.isPollingUpgrade = true;
+    try {
+      const prevRunningIds = new Set(
+        (this.state.upgradeJobs || []).filter((j) => j.status === 'running').map((j) => j.id)
+      );
+
+      const [jobsRes, hosts] = await Promise.all([
+        api.getUpgradeJobs().catch(() => ({ jobs: this.state.upgradeJobs || [] })),
+        api.getHosts().catch(() => this.state.hosts || []),
+      ]);
+      const upgradeJobs = Array.isArray(jobsRes?.jobs) ? jobsRes.jobs : this.state.upgradeJobs || [];
+
+      this.setState({
+        upgradeJobs,
+        hosts: Array.isArray(hosts) && hosts.length > 0 ? hosts : this.state.hosts,
+      });
+
+      this.emit('upgrade-progress', { upgradeJobs, hosts: this.state.hosts });
+
+      const finishedAny = upgradeJobs.some((j) => prevRunningIds.has(j.id) && j.status !== 'running');
+      if (finishedAny) {
+        this.emit('data-refreshed', this.state);
+      }
+
+      this.syncFastUpgradePolling();
+    } finally {
+      this.isPollingUpgrade = false;
+    }
+  }
+
+  dismissUpgradeJob(jobId) {
+    if (!jobId) return;
+    this.state.dismissedJobIds.add(jobId);
+    this.emit('upgrade-progress', { upgradeJobs: this.state.upgradeJobs, hosts: this.state.hosts });
   }
 
   async poll(force = false) {
@@ -92,7 +151,7 @@ class Store {
     this.emit('fetch-start');
 
     try {
-      const [health, hosts, topology, clients, wifiChannels, wifiInterference, backups, schedulesRes, settings] = await Promise.all([
+      const [health, hosts, topology, clients, wifiChannels, wifiInterference, backups, schedulesRes, settings, jobsRes] = await Promise.all([
         api.getHealth().catch(() => null),
         api.getHosts().catch(() => []),
         api.getTopology().catch(() => ({ nodes: [], links: [] })),
@@ -101,13 +160,17 @@ class Store {
         api.getWifiInterference().catch(() => ({ summary: { healthScore: 100 }, warnings: [] })),
         api.getBackups().catch(() => []),
         api.getBackupSchedules().catch(() => ({ schedules: [] })),
-        api.getSettings().catch(() => null)
+        api.getSettings().catch(() => null),
+        api.getUpgradeJobs().catch(() => ({ jobs: [] }))
       ]);
       const schedules = Array.isArray(schedulesRes?.schedules)
         ? schedulesRes.schedules
         : Array.isArray(schedulesRes)
           ? schedulesRes
           : this.state.schedules || [];
+      const upgradeJobs = Array.isArray(jobsRes?.jobs)
+        ? jobsRes.jobs
+        : this.state.upgradeJobs || [];
 
       // Calculate aggregated WAN throughput for the sparkline
       let wanRxBps = 0;
@@ -151,6 +214,7 @@ class Store {
         wifiInterference,
         backups,
         schedules,
+        upgradeJobs,
         selectedNode,
         selectedClient,
         throughputHistory: history,
@@ -160,6 +224,8 @@ class Store {
         isFetching: false
       });
 
+      this.syncFastUpgradePolling();
+      this.emit('upgrade-progress', { upgradeJobs, hosts });
       this.emit('data-refreshed', this.state);
     } catch (err) {
       console.warn('Polling error:', err);

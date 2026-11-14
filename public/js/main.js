@@ -11,7 +11,7 @@ import { renderTopology, updateTopologyData } from './views/topology.js';
 import { renderClients, updateClientsData } from './views/clients.js';
 import { renderWifi } from './views/wifi.js';
 import { renderBackups } from './views/backups.js';
-import { renderHosts } from './views/hosts.js';
+import { renderHosts, openHostUpdatesModal } from './views/hosts.js';
 import { renderSettings } from './views/settings.js';
 import { toast } from './components/toast.js';
 import { renderIcon } from './utils/icons.js';
@@ -163,6 +163,113 @@ function setupKeyboardShortcuts() {
   });
 }
 
+const notifiedCompletedJobIds = new Set();
+
+function updateGlobalUpgradeBanner() {
+  const banner = document.getElementById('global-upgrade-tracker');
+  if (!banner) return;
+
+  const dismissed = store.state.dismissedJobIds || new Set();
+  const allJobs = Array.isArray(store.state.upgradeJobs) ? store.state.upgradeJobs : [];
+
+  // Toast once when a background job completes or fails
+  for (const j of allJobs) {
+    if (j.status !== 'running' && !notifiedCompletedJobIds.has(j.id)) {
+      notifiedCompletedJobIds.add(j.id);
+      if (j.status === 'completed') {
+        toast.success(
+          `Upgrade Completed (${j.hostName})`,
+          j.phase || 'Background software upgrade finished successfully.'
+        );
+      } else if (j.status === 'failed') {
+        toast.error(
+          `Upgrade Failed (${j.hostName})`,
+          j.error || j.phase || 'Background software upgrade encountered an error.'
+        );
+      }
+    }
+  }
+
+  // Show running jobs, or recently finished jobs (within last 60 seconds) that haven't been dismissed
+  const nowMs = Date.now();
+  const visibleJobs = allJobs.filter((j) => {
+    if (dismissed.has(j.id)) return false;
+    if (j.status === 'running') return true;
+    if (j.completedAt && nowMs - new Date(j.completedAt).getTime() < 60000) return true;
+    return false;
+  });
+
+  if (visibleJobs.length === 0) {
+    banner.style.display = 'none';
+    banner.innerHTML = '';
+    return;
+  }
+
+  const job = visibleJobs.find((j) => j.status === 'running') || visibleJobs[0];
+  const isRunning = job.status === 'running';
+  const isCompleted = job.status === 'completed';
+  const isFailed = job.status === 'failed';
+  const pct = Math.max(0, Math.min(100, Math.round(job.progressPct || (isCompleted ? 100 : 5))));
+  const progressClass = isCompleted ? 'success' : isFailed ? 'warning' : '';
+
+  banner.style.display = 'flex';
+  banner.innerHTML = `
+    <div style="display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap;">
+      <div style="display: flex; align-items: center; gap: 10px;">
+        ${isRunning
+          ? `<progress class="loading-spinner" aria-label="Upgrading software on ${escapeHtml(job.hostName)}"></progress>`
+          : isCompleted
+            ? `<span class="status-pill success" style="padding: 2px 8px;">✓ Done</span>`
+            : `<span class="status-pill danger" style="padding: 2px 8px;">✕ Error</span>`}
+        <div>
+          <span style="font-weight: 700; color: var(--color-text-primary);">
+            ${escapeHtml(job.hostName)}:
+          </span>
+          <span style="color: var(--color-text-secondary); margin-left: 4px;">
+            ${escapeHtml(job.phase || 'Running software upgrade in background...')}
+          </span>
+          ${job.currentPackage
+            ? `<span class="font-mono" style="margin-left: 6px; font-size: 11.5px; color: var(--color-primary); font-weight: 600;">[${escapeHtml(job.currentPackage)}]</span>`
+            : ''}
+        </div>
+      </div>
+
+      <div style="display: flex; align-items: center; gap: 12px; flex: 1; max-width: 440px; min-width: 240px; justify-content: flex-end;">
+        <div style="flex: 1; min-width: 110px;">
+          <progress class="custom-progress ${progressClass}" max="100" value="${pct}" aria-label="Software upgrade progress ${pct}%"></progress>
+        </div>
+        <span class="font-mono" style="font-size: 12px; font-weight: 700; min-width: 42px; text-align: right; color: ${isCompleted ? 'var(--color-success)' : isFailed ? 'var(--color-danger)' : 'var(--color-primary)'};">
+          ${pct}%
+        </span>
+        <button type="button" class="btn btn-secondary" id="banner-view-upgrade-btn" data-host-id="${escapeHtml(job.hostId)}" style="height: 26px; padding: 0 10px; font-size: 11.5px;">
+          View Live Progress
+        </button>
+        ${!isRunning
+          ? `<button type="button" class="btn-icon" id="banner-dismiss-upgrade-btn" data-job-id="${escapeHtml(job.id)}" style="width: 24px; height: 24px;" aria-label="Dismiss upgrade banner" title="Dismiss">
+              ${renderIcon('x', 'icon icon-sm')}
+            </button>`
+          : ''}
+      </div>
+    </div>
+  `;
+
+  banner.querySelector('#banner-view-upgrade-btn')?.addEventListener('click', () => {
+    const targetHostId = job.hostId;
+    if (getActiveRoute() !== 'hosts') {
+      navigateTo('hosts');
+      setTimeout(() => {
+        openHostUpdatesModal(document.getElementById('main-content'), targetHostId);
+      }, 60);
+    } else {
+      openHostUpdatesModal(document.getElementById('main-content'), targetHostId);
+    }
+  });
+
+  banner.querySelector('#banner-dismiss-upgrade-btn')?.addEventListener('click', () => {
+    store.dismissUpgradeJob(job.id);
+  });
+}
+
 function initApp() {
   initDrawer();
   setupKeyboardShortcuts();
@@ -171,8 +278,13 @@ function initApp() {
   window.addEventListener('hashchange', dispatchView);
 
   // Store listeners
+  store.on('upgrade-progress', () => {
+    updateGlobalUpgradeBanner();
+  });
+
   store.on('data-refreshed', (state) => {
     updateTopBarAndFooter(state);
+    updateGlobalUpgradeBanner();
     const activeRoute = getActiveRoute();
     if (activeRoute === 'topology') {
       updateTopologyData();

@@ -922,5 +922,105 @@ test('Package Updates & Attended Sysupgrade: parses opkg/apk updates and advises
   assert.equal(apiData.updates.firmwareUpdateAvailable, true);
   assert.equal(apiData.updates.availableFirmwareVersion, '23.05.5');
 
+  // 5. Verify background software upgrade job execution and real-time step-by-step progress tracking
+  let releaseSecondPackage;
+  const secondPackageGate = new Promise((resolve) => {
+    releaseSecondPackage = resolve;
+  });
+
+  hostManager.customStreamRunners.set('gw-mt6000', async (_cmd, { onLine }) => {
+    const emit = (line) => {
+      if (onLine) onLine(line);
+      return line;
+    };
+    const lines = [];
+    lines.push(emit('Downloading https://downloads.openwrt.org/releases/23.05.5/packages/Packages.gz'));
+    lines.push(emit('===UPG_TOTAL:3==='));
+    lines.push(emit('===UPG_START:1:3:dnsmasq-full==='));
+    lines.push(emit('Upgrading dnsmasq-full on root from 2.90-r2 to 2.90-r3...'));
+    lines.push(emit('Configuring dnsmasq-full.'));
+    lines.push(emit('===UPG_DONE:1:3:dnsmasq-full:0==='));
+    lines.push(emit('===UPG_START:2:3:openssl-util==='));
+    lines.push(emit('Upgrading openssl-util on root from 3.0.13-r1 to 3.0.15-r1...'));
+
+    // Pause mid-upgrade so we can assert the live in-progress API state
+    await secondPackageGate;
+
+    lines.push(emit('===UPG_DONE:2:3:openssl-util:0==='));
+    lines.push(emit('===UPG_START:3:3:curl==='));
+    lines.push(emit('Upgrading curl on root from 8.6.0-r1 to 8.7.1-r1...'));
+    lines.push(emit('===UPG_DONE:3:3:curl:0==='));
+    lines.push(emit('===BOARD==='));
+    lines.push(
+      emit(
+        JSON.stringify({
+          hostname: 'Gateway-MT6000',
+          model: 'GL.iNet GL-MT6000',
+          board_name: 'glinet,gl-mt6000',
+          release: {
+            distribution: 'OpenWrt',
+            version: '23.05.2',
+            revision: 'r23630-842932a63d',
+            target: 'mediatek/filogic',
+          },
+        })
+      )
+    );
+    lines.push(emit('===OPKG_UPGRADABLE==='));
+    lines.push(emit('===ASU_STATUS==='));
+    lines.push(emit('auc - 0.3.2-1'));
+    lines.push(emit('HAS_BIN:auc'));
+    lines.push(emit('===ASU_CHECK==='));
+    return lines.join('\n');
+  });
+
+  // Trigger background upgrade via POST /api/hosts/gw-mt6000/updates/upgrade
+  const startUpgradeRes = await fetch(`${baseUrl}/api/hosts/gw-mt6000/updates/upgrade`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ packages: ['dnsmasq-full', 'openssl-util', 'curl'] }),
+  });
+  assert.equal(startUpgradeRes.status, 200);
+  const startUpgradeData = await startUpgradeRes.json();
+  assert.equal(startUpgradeData.background, true);
+  assert.ok(startUpgradeData.jobId);
+
+  // Give the async stream runner a tick to reach the mid-upgrade pause gate
+  await new Promise((r) => setTimeout(r, 20));
+
+  // Query live progress via GET /api/hosts/gw-mt6000/updates/job and GET /api/hosts/updates/jobs
+  const liveJobRes = await fetch(`${baseUrl}/api/hosts/gw-mt6000/updates/job`);
+  assert.equal(liveJobRes.status, 200);
+  const liveJobData = await liveJobRes.json();
+  assert.equal(liveJobData.job.status, 'running');
+  assert.equal(liveJobData.job.packagesTotal, 3);
+  assert.equal(liveJobData.job.packagesCompleted, 1);
+  assert.equal(liveJobData.job.currentPackage, 'openssl-util');
+  assert.deepEqual(liveJobData.job.completedPackages, ['dnsmasq-full']);
+  assert.ok(liveJobData.job.progressPct > 20 && liveJobData.job.progressPct < 90);
+
+  const jobsListRes = await fetch(`${baseUrl}/api/hosts/updates/jobs?activeOnly=true`);
+  const jobsListData = await jobsListRes.json();
+  assert.equal(jobsListData.jobs.length, 1);
+  assert.equal(jobsListData.jobs[0].id, startUpgradeData.jobId);
+
+  // Release the gate and wait for background job completion
+  releaseSecondPackage();
+  const internalJob = hostManager.getUpgradeJob(startUpgradeData.jobId);
+  if (internalJob && internalJob._promise) {
+    await internalJob._promise;
+  }
+
+  const finalJobRes = await fetch(`${baseUrl}/api/hosts/gw-mt6000/updates/job`);
+  const finalJobData = await finalJobRes.json();
+  assert.equal(finalJobData.job.status, 'completed');
+  assert.equal(finalJobData.job.progressPct, 100);
+  assert.equal(finalJobData.job.packagesCompleted, 3);
+  assert.deepEqual(finalJobData.job.completedPackages, ['dnsmasq-full', 'openssl-util', 'curl']);
+
+  const afterUpdatesRes = await fetch(`${baseUrl}/api/hosts/gw-mt6000/updates`);
+  const afterUpdatesData = await afterUpdatesRes.json();
+  assert.equal(afterUpdatesData.updates.packagesCount, 0);
+
   await hostManager.deleteHost('gw-mt6000', true);
 });

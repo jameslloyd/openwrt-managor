@@ -14,9 +14,9 @@ import { backupEngine } from './backupEngine.js';
 import { triangulateBandNeighbors } from './wifiEngine.js';
 import { lookupVendor, resolveWirelessNetworkManufacturer } from './ouiVendor.js';
 
-export function sanitizeHost(host) {
+export function sanitizeHost(host, activeUpgradeJob = null) {
   if (!host) return null;
-  const { password, sshPrivateKey, ...safe } = host;
+  const { password, sshPrivateKey, mockStreamRunner, ...safe } = host;
   if (!safe.updates) {
     const asu = evaluateAttendedSysupgrade({ firmware: safe.firmware || 'OpenWrt' });
     safe.updates = {
@@ -31,6 +31,7 @@ export function sanitizeHost(host) {
   return {
     ...safe,
     hasPassword: Boolean(password),
+    activeUpgradeJob: activeUpgradeJob || safe.activeUpgradeJob || null,
   };
 }
 
@@ -47,6 +48,9 @@ export class HostManager {
     this.arpByHost = new Map(); // hostId -> { [mac]: ip }
     this.rdnsByHost = new Map(); // hostId -> { [ip]: hostname }
     this.hostsCacheById = new Map(); // hostId -> host metadata (name, role, mapPosition)
+    this.upgradeJobs = new Map(); // jobId -> upgradeJob object
+    this.activeJobByHost = new Map(); // hostId -> jobId
+    this.customStreamRunners = new Map(); // hostId -> mockStreamRunner (for unit tests)
   }
 
   async init() {
@@ -547,7 +551,7 @@ export class HostManager {
       });
     }
     if (sanitized) {
-      return hosts.map(sanitizeHost);
+      return hosts.map((h) => sanitizeHost(h, this.getUpgradeJobForHost(h.id)));
     }
     return hosts;
   }
@@ -556,7 +560,7 @@ export class HostManager {
     const hosts = await this.getAllHosts({ sanitized: false });
     const host = hosts.find((h) => h.id === id) || null;
     if (!host) return null;
-    return sanitized ? sanitizeHost(host) : host;
+    return sanitized ? sanitizeHost(host, this.getUpgradeJobForHost(host.id)) : host;
   }
 
   async createHost(data) {
@@ -668,6 +672,12 @@ export class HostManager {
     this.arpByHost.delete(id);
     this.rdnsByHost.delete(id);
     this.hostsCacheById.delete(id);
+    const activeJobId = this.activeJobByHost.get(id);
+    if (activeJobId) {
+      this.upgradeJobs.delete(activeJobId);
+      this.activeJobByHost.delete(id);
+    }
+    this.customStreamRunners.delete(id);
     await db.saveHosts(hosts);
 
     if (deleteBackups) {
@@ -740,48 +750,345 @@ export class HostManager {
     return {
       checkedCount: results.length,
       results,
-      hosts: hosts.map(sanitizeHost),
+      hosts: hosts.map((h) => sanitizeHost(h, this.getUpgradeJobForHost(h.id))),
+    };
+  }
+
+  getUpgradeJob(jobId) {
+    return this.upgradeJobs.get(jobId) || null;
+  }
+
+  getUpgradeJobForHost(hostId) {
+    const jobId = this.activeJobByHost.get(hostId);
+    if (!jobId) return null;
+    const job = this.upgradeJobs.get(jobId);
+    if (!job) return null;
+    if (job.status !== 'running' && job.completedAt) {
+      const ageMs = Date.now() - new Date(job.completedAt).getTime();
+      if (ageMs > 5 * 60 * 1000) {
+        return null;
+      }
+    }
+    return job;
+  }
+
+  getAllUpgradeJobs({ activeOnly = false } = {}) {
+    const nowMs = Date.now();
+    const list = [];
+    for (const job of this.upgradeJobs.values()) {
+      if (activeOnly && job.status !== 'running') continue;
+      if (job.status !== 'running' && job.completedAt) {
+        const ageMs = nowMs - new Date(job.completedAt).getTime();
+        if (ageMs > 5 * 60 * 1000) continue;
+      }
+      list.push(job);
+    }
+    list.sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime());
+    return list;
+  }
+
+  async startPackageUpgradeJob(hostId, packages = 'all') {
+    const hosts = await this.getAllHosts({ sanitized: false });
+    const idx = hosts.findIndex((h) => h.id === hostId);
+    if (idx === -1) return null;
+
+    const host = hosts[idx];
+    const existingJob = this.getUpgradeJobForHost(host.id);
+    if (existingJob && existingJob.status === 'running') {
+      return {
+        success: true,
+        background: true,
+        alreadyRunning: true,
+        jobId: existingJob.id,
+        status: existingJob.status,
+        hostId: host.id,
+        job: existingJob,
+        host: sanitizeHost(host, existingJob),
+      };
+    }
+
+    const targetPackages =
+      Array.isArray(packages) && packages.length > 0
+        ? packages.filter((p) => typeof p === 'string' && /^[a-zA-Z0-9._+-]+$/.test(p))
+        : Array.isArray(host.updates?.packages) && host.updates.packages.length > 0
+          ? host.updates.packages.map((p) => p.name)
+          : [];
+
+    const now = new Date().toISOString();
+    const jobId = `upg-${host.id}-${Date.now().toString(36)}`;
+    const job = {
+      id: jobId,
+      hostId: host.id,
+      hostName: host.name || host.hostname || host.id,
+      type: 'packages',
+      action: 'upgrade',
+      status: 'running',
+      phase: 'Connecting via SSH and refreshing package lists...',
+      progressPct: 5,
+      packagesTotal: targetPackages.length,
+      packagesCompleted: 0,
+      currentPackage: null,
+      targetPackages,
+      completedPackages: [],
+      failedPackages: [],
+      logs: [`[${now}] Starting background package upgrade on ${host.name || host.hostname} (${host.ip})...`],
+      output: `[${now}] Starting background package upgrade on ${host.name || host.hostname} (${host.ip})...`,
+      startedAt: now,
+      updatedAt: now,
+      completedAt: null,
+      error: null,
+    };
+
+    this.upgradeJobs.set(jobId, job);
+    this.activeJobByHost.set(host.id, jobId);
+
+    const hostWithStreamRunner = {
+      ...host,
+      mockStreamRunner: host.mockStreamRunner || this.customStreamRunners.get(host.id) || null,
+    };
+
+    const runPromise = (async () => {
+      try {
+        const res = await upgradeHostPackages(hostWithStreamRunner, packages, {
+          onProgress: (prog) => {
+            if (prog.phase) job.phase = prog.phase;
+            if (typeof prog.progressPct === 'number') job.progressPct = prog.progressPct;
+            if (typeof prog.packagesTotal === 'number') job.packagesTotal = prog.packagesTotal;
+            if (typeof prog.packagesCompleted === 'number') job.packagesCompleted = prog.packagesCompleted;
+            if (prog.currentPackage !== undefined) job.currentPackage = prog.currentPackage;
+            if (Array.isArray(prog.completedPackages)) job.completedPackages = [...prog.completedPackages];
+            if (Array.isArray(prog.failedPackages)) job.failedPackages = [...prog.failedPackages];
+            if (Array.isArray(prog.logs) && prog.logs.length > 0) {
+              job.logs = [...prog.logs];
+              job.output = prog.logs.join('\n');
+            }
+            job.updatedAt = new Date().toISOString();
+          },
+        });
+
+        const freshHosts = (await db.getHosts()) || [];
+        const hIdx = freshHosts.findIndex((h) => h.id === host.id);
+        if (hIdx !== -1) {
+          if (res.updates) {
+            freshHosts[hIdx].updates = res.updates;
+          }
+          freshHosts[hIdx].lastSeen = new Date().toISOString();
+          await db.saveHosts(freshHosts);
+        }
+
+        const doneIso = new Date().toISOString();
+        job.status = 'completed';
+        job.progressPct = 100;
+        job.currentPackage = null;
+        if (typeof res.packagesCompleted === 'number' && res.packagesCompleted > 0) {
+          job.packagesCompleted = res.packagesCompleted;
+        }
+        if (typeof res.packagesTotal === 'number' && res.packagesTotal > 0) {
+          job.packagesTotal = res.packagesTotal;
+        }
+        job.phase =
+          job.packagesCompleted > 0
+            ? `Completed upgrading ${job.packagesCompleted} package(s)`
+            : 'Package upgrade completed';
+        if (res.output) {
+          job.output = res.output;
+        }
+        job.updates = res.updates || host.updates;
+        job.updatedAt = doneIso;
+        job.completedAt = doneIso;
+        return job;
+      } catch (err) {
+        const failIso = new Date().toISOString();
+        job.status = 'failed';
+        job.error = err.message || 'Package upgrade failed';
+        job.currentPackage = null;
+        job.phase = `Upgrade failed: ${job.error}`;
+        job.logs.push(`[ERROR] ${job.error}`);
+        job.output = job.logs.join('\n');
+        job.updatedAt = failIso;
+        job.completedAt = failIso;
+        return job;
+      }
+    })();
+
+    Object.defineProperty(job, '_promise', {
+      value: runPromise,
+      enumerable: false,
+      configurable: true,
+    });
+
+    return {
+      success: true,
+      background: true,
+      jobId: job.id,
+      status: job.status,
+      hostId: host.id,
+      job,
+      updates: host.updates,
+      host: sanitizeHost(host, job),
     };
   }
 
   async upgradePackagesForHost(hostId, packages = 'all') {
+    return this.startPackageUpgradeJob(hostId, packages);
+  }
+
+  async startAttendedSysupgradeJob(hostId, { action = 'upgrade' } = {}) {
     const hosts = await this.getAllHosts({ sanitized: false });
     const idx = hosts.findIndex((h) => h.id === hostId);
     if (idx === -1) return null;
 
     const host = hosts[idx];
-    const res = await upgradeHostPackages(host, packages);
-    if (res.updates) {
-      host.updates = res.updates;
+    const existingJob = this.getUpgradeJobForHost(host.id);
+    if (existingJob && existingJob.status === 'running') {
+      return {
+        success: true,
+        background: true,
+        alreadyRunning: true,
+        action,
+        jobId: existingJob.id,
+        status: existingJob.status,
+        hostId: host.id,
+        job: existingJob,
+        host: sanitizeHost(host, existingJob),
+      };
     }
-    host.lastSeen = new Date().toISOString();
-    hosts[idx] = host;
-    await db.saveHosts(hosts);
+
+    const now = new Date().toISOString();
+    const jobId = `asu-${host.id}-${Date.now().toString(36)}`;
+    const initialPhase =
+      action === 'install'
+        ? 'Installing Attended Sysupgrade packages (auc, luci-app-attendedsysupgrade)...'
+        : 'Creating pre-upgrade TrueNAS snapshot and requesting custom firmware image...';
+
+    const job = {
+      id: jobId,
+      hostId: host.id,
+      hostName: host.name || host.hostname || host.id,
+      type: 'attended-sysupgrade',
+      action,
+      status: 'running',
+      phase: initialPhase,
+      progressPct: 8,
+      packagesTotal: action === 'install' ? 2 : 1,
+      packagesCompleted: 0,
+      currentPackage: action === 'install' ? 'auc + luci-app-attendedsysupgrade' : host.updates?.availableFirmwareVersion || 'firmware',
+      targetPackages: [],
+      completedPackages: [],
+      failedPackages: [],
+      logs: [`[${now}] ${initialPhase}`],
+      output: `[${now}] ${initialPhase}`,
+      startedAt: now,
+      updatedAt: now,
+      completedAt: null,
+      error: null,
+    };
+
+    this.upgradeJobs.set(jobId, job);
+    this.activeJobByHost.set(host.id, jobId);
+
+    const hostWithStreamRunner = {
+      ...host,
+      mockStreamRunner: host.mockStreamRunner || this.customStreamRunners.get(host.id) || null,
+    };
+
+    const runPromise = (async () => {
+      try {
+        if (action === 'upgrade') {
+          try {
+            job.logs.push('Creating pre-upgrade configuration backup archive...');
+            job.output = job.logs.join('\n');
+            await backupEngine.runBackup(host.id, 'pre-upgrade');
+            job.logs.push('Pre-upgrade configuration backup completed.');
+            job.progressPct = 18;
+            job.output = job.logs.join('\n');
+          } catch {
+            // Proceed even if backup snapshot fails
+          }
+        }
+
+        const res = await performAttendedSysupgradeAction(hostWithStreamRunner, {
+          action,
+          onProgress: (prog) => {
+            if (prog.phase) job.phase = prog.phase;
+            if (typeof prog.progressPct === 'number') job.progressPct = prog.progressPct;
+            if (Array.isArray(prog.logs) && prog.logs.length > 0) {
+              job.logs = [...prog.logs];
+              job.output = prog.logs.join('\n');
+            }
+            job.updatedAt = new Date().toISOString();
+          },
+        });
+
+        const freshHosts = (await db.getHosts()) || [];
+        const hIdx = freshHosts.findIndex((h) => h.id === host.id);
+        if (hIdx !== -1) {
+          if (res.updates) {
+            freshHosts[hIdx].updates = res.updates;
+          }
+          freshHosts[hIdx].lastSeen = new Date().toISOString();
+          await db.saveHosts(freshHosts);
+        }
+
+        const doneIso = new Date().toISOString();
+        job.status = 'completed';
+        job.progressPct = 100;
+        job.packagesCompleted = job.packagesTotal;
+        job.currentPackage = null;
+        job.phase =
+          action === 'install'
+            ? 'Attended Sysupgrade packages installed and verified'
+            : 'Attended Sysupgrade completed';
+        if (res.output) {
+          job.output = res.output;
+        }
+        job.updates = res.updates || host.updates;
+        job.updatedAt = doneIso;
+        job.completedAt = doneIso;
+        return job;
+      } catch (err) {
+        const failIso = new Date().toISOString();
+        job.status = 'failed';
+        job.error = err.message || 'Attended Sysupgrade failed';
+        job.currentPackage = null;
+        job.phase = `Attended Sysupgrade failed: ${job.error}`;
+        job.logs.push(`[ERROR] ${job.error}`);
+        job.output = job.logs.join('\n');
+        job.updatedAt = failIso;
+        job.completedAt = failIso;
+        return job;
+      }
+    })();
+
+    Object.defineProperty(job, '_promise', {
+      value: runPromise,
+      enumerable: false,
+      configurable: true,
+    });
 
     return {
       success: true,
+      background: true,
+      action,
+      jobId: job.id,
+      status: job.status,
       hostId: host.id,
-      output: res.output,
+      job,
       updates: host.updates,
-      host: sanitizeHost(host),
+      host: sanitizeHost(host, job),
     };
   }
 
   async attendedSysupgradeForHost(hostId, { action = 'check' } = {}) {
+    if (action === 'upgrade' || action === 'install') {
+      return this.startAttendedSysupgradeJob(hostId, { action });
+    }
+
     const hosts = await this.getAllHosts({ sanitized: false });
     const idx = hosts.findIndex((h) => h.id === hostId);
     if (idx === -1) return null;
 
     const host = hosts[idx];
-    if (action === 'upgrade') {
-      // Automatically create a pre-upgrade TrueNAS snapshot before flashing new firmware
-      try {
-        await backupEngine.runBackup(host.id, 'pre-upgrade');
-      } catch {
-        // Proceed even if backup snapshot fails
-      }
-    }
-
     const res = await performAttendedSysupgradeAction(host, { action });
     if (res.updates) {
       host.updates = res.updates;
@@ -796,7 +1103,7 @@ export class HostManager {
       hostId: host.id,
       output: res.output,
       updates: host.updates,
-      host: sanitizeHost(host),
+      host: sanitizeHost(host, this.getUpgradeJobForHost(host.id)),
     };
   }
 }

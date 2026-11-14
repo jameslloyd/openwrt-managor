@@ -399,6 +399,12 @@ export function renderHosts(container) {
   });
 }
 
+function getJobForHost(host) {
+  if (!host) return null;
+  const fromStore = (store.state.upgradeJobs || []).find((j) => j.hostId === host.id);
+  return fromStore || host.activeUpgradeJob || null;
+}
+
 function renderHostRow(h) {
   const isOnline = h.status === 'online';
   const hostVendor = resolveClientSideVendor(h.mac, h.model || h.name, h.vendor);
@@ -406,9 +412,11 @@ function renderHostRow(h) {
   const asu = h.updates?.attendedSysupgrade || {};
   const fwAvailable = Boolean(h.updates?.firmwareUpdateAvailable || asu.firmwareUpdateAvailable);
   const availFwVer = h.updates?.availableFirmwareVersion || asu.availableVersion;
+  const activeJob = getJobForHost(h);
+  const isUpgrading = activeJob?.status === 'running';
 
   return `
-    <tr>
+    <tr data-row-host-id="${escapeHtml(h.id)}">
       <td>
         <span class="status-pill ${isOnline ? 'online' : 'offline'}">
           <span class="status-dot ${isOnline ? 'online' : 'offline'}"></span>
@@ -432,25 +440,49 @@ function renderHostRow(h) {
         <div style="font-size: 12px; font-weight: 500;">${escapeHtml(h.firmware || 'OpenWrt')}</div>
         <div style="font-size: 10.5px; color: var(--color-text-muted);">Uptime: ${formatUptime(h.uptimeSec)}</div>
       </td>
-      <td>
-        <div style="display: flex; flex-direction: column; gap: 4px; align-items: flex-start;">
-          ${fwAvailable
-            ? `<span class="status-pill warning" style="font-size: 11px; padding: 2px 8px;" title="${escapeHtml(asu.advisory || '')}">
-                ${renderIcon('zap', 'icon icon-sm')} Firmware ${escapeHtml(availFwVer || 'Update')} Available
-              </span>`
-            : `<span class="status-pill success" style="font-size: 11px; padding: 2px 8px;" title="${escapeHtml(asu.advisory || 'Firmware is up to date')}">
-                ✓ Firmware Current
-              </span>`}
-          <div style="display: flex; align-items: center; gap: 6px; font-size: 11px;">
-            ${pkgCount > 0
-              ? `<span style="color: var(--color-warning); font-weight: 600;">${pkgCount} package update${pkgCount === 1 ? '' : 's'}</span>`
-              : `<span style="color: var(--color-text-muted);">0 pkg updates</span>`}
-            <span>•</span>
-            <span style="color: ${asu.installed ? 'var(--color-success)' : 'var(--color-text-muted)'};" title="Attended Sysupgrade package status">
-              ${asu.installed ? `ASU (${escapeHtml(asu.cliTool || 'installed')})` : 'ASU not installed'}
-            </span>
+      <td class="host-row-updates-cell">
+        ${isUpgrading
+          ? `
+          <div style="display: flex; flex-direction: column; gap: 5px; min-width: 190px;">
+            <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+              <span style="display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; font-weight: 600; color: var(--color-primary);">
+                <progress class="loading-spinner" style="width: 14px; height: 14px; --spinner-width: 2px;" aria-label="Upgrading ${escapeHtml(h.name || h.hostname)}"></progress>
+                ${activeJob.type === 'attended-sysupgrade' ? 'Sysupgrade Running' : 'Upgrading Software'}
+              </span>
+              <span class="font-mono" style="font-size: 11px; font-weight: 700; color: var(--color-primary);">
+                ${Math.round(activeJob.progressPct || 5)}%
+              </span>
+            </div>
+            <progress class="custom-progress" max="100" value="${Math.round(activeJob.progressPct || 5)}" style="height: 6px;" aria-label="Software upgrade progress for ${escapeHtml(h.name || h.hostname)}"></progress>
+            <div style="font-size: 10.5px; color: var(--color-text-secondary); max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+              ${escapeHtml(
+                activeJob.currentPackage
+                  ? `${activeJob.currentPackage} (${activeJob.packagesCompleted || 0}/${activeJob.packagesTotal || 1})`
+                  : activeJob.phase || 'Running in background...'
+              )}
+            </div>
           </div>
-        </div>
+          `
+          : `
+          <div style="display: flex; flex-direction: column; gap: 4px; align-items: flex-start;">
+            ${fwAvailable
+              ? `<span class="status-pill warning" style="font-size: 11px; padding: 2px 8px;" title="${escapeHtml(asu.advisory || '')}">
+                  ${renderIcon('zap', 'icon icon-sm')} Firmware ${escapeHtml(availFwVer || 'Update')} Available
+                </span>`
+              : `<span class="status-pill success" style="font-size: 11px; padding: 2px 8px;" title="${escapeHtml(asu.advisory || 'Firmware is up to date')}">
+                  ✓ Firmware Current
+                </span>`}
+            <div style="display: flex; align-items: center; gap: 6px; font-size: 11px;">
+              ${pkgCount > 0
+                ? `<span style="color: var(--color-warning); font-weight: 600;">${pkgCount} package update${pkgCount === 1 ? '' : 's'}</span>`
+                : `<span style="color: var(--color-text-muted);">0 pkg updates</span>`}
+              <span>•</span>
+              <span style="color: ${asu.installed ? 'var(--color-success)' : 'var(--color-text-muted)'};" title="Attended Sysupgrade package status">
+                ${asu.installed ? `ASU (${escapeHtml(asu.cliTool || 'installed')})` : 'ASU not installed'}
+              </span>
+            </div>
+          </div>
+          `}
       </td>
       <td>
         <div class="font-mono" style="font-size: 11.5px;">CPU: ${h.cpuUsagePct ?? 0}% • RAM: ${h.memUsagePct ?? 0}%</div>
@@ -460,8 +492,10 @@ function renderHostRow(h) {
       </td>
       <td style="text-align: right; white-space: nowrap;">
         <div style="display: inline-flex; align-items: center; justify-content: flex-end; gap: 6px;">
-          <button type="button" class="btn ${pkgCount > 0 || fwAvailable ? 'btn-primary' : 'btn-secondary'} btn-updates-host" data-host-id="${escapeHtml(h.id)}" style="height: 28px; padding: 0 10px; font-size: 11.5px;" title="Manage software packages &amp; Attended Sysupgrade">
-            ${renderIcon('download', 'icon icon-sm')} Updates${pkgCount > 0 ? ` (${pkgCount})` : fwAvailable ? ' (!)' : ''}
+          <button type="button" class="btn ${isUpgrading || pkgCount > 0 || fwAvailable ? 'btn-primary' : 'btn-secondary'} btn-updates-host" data-host-id="${escapeHtml(h.id)}" style="height: 28px; padding: 0 10px; font-size: 11.5px;" title="Manage software packages &amp; Attended Sysupgrade">
+            ${isUpgrading
+              ? `<progress class="loading-spinner" style="width: 12px; height: 12px; --spinner-width: 2px; --spinner-color-fg: #fff;" aria-label="Upgrade in progress"></progress> Progress (${Math.round(activeJob.progressPct || 5)}%)`
+              : `${renderIcon('download', 'icon icon-sm')} Updates${pkgCount > 0 ? ` (${pkgCount})` : fwAvailable ? ' (!)' : ''}`}
           </button>
           <button type="button" class="btn btn-secondary btn-inspect-host" data-host-id="${escapeHtml(h.id)}" style="height: 28px; padding: 0 10px; font-size: 11.5px;">
             ${renderIcon('activity', 'icon icon-sm')} Inspect
@@ -478,7 +512,172 @@ function renderHostRow(h) {
   `;
 }
 
+let activeModalHostId = null;
+let activeModalContainer = null;
+let modalProgressListenerRegistered = false;
+
+function renderUpgradeJobCardHtml(job) {
+  if (!job) return '';
+  const isRunning = job.status === 'running';
+  const isCompleted = job.status === 'completed';
+  const isFailed = job.status === 'failed';
+  const pct = Math.max(0, Math.min(100, Math.round(job.progressPct || (isCompleted ? 100 : 5))));
+  const stateClass = isCompleted ? 'completed' : isFailed ? 'failed' : '';
+  const progressClass = isCompleted ? 'success' : isFailed ? 'warning' : '';
+
+  return `
+    <div class="upgrade-job-card ${stateClass}" role="status" aria-live="polite">
+      <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;">
+        <div style="display: flex; align-items: center; gap: 10px;">
+          ${isRunning
+            ? `<progress class="loading-spinner" aria-label="Upgrading packages in background"></progress>`
+            : isCompleted
+              ? `<span class="status-pill success" style="padding: 2px 8px;">✓ Completed</span>`
+              : `<span class="status-pill danger" style="padding: 2px 8px;">✕ Failed</span>`}
+          <div>
+            <div style="font-weight: 700; font-size: 13.5px; color: var(--color-text-primary);">
+              ${isRunning
+                ? job.type === 'attended-sysupgrade'
+                  ? 'Attended Sysupgrade Running in Background'
+                  : 'Software Package Upgrade Running in Background'
+                : isCompleted
+                  ? 'Background Upgrade Completed'
+                  : 'Background Upgrade Failed'}
+            </div>
+            <div style="font-size: 12px; color: var(--color-text-secondary);">
+              ${escapeHtml(job.phase || 'Executing upgrade...')}
+            </div>
+          </div>
+        </div>
+        <div style="display: flex; align-items: center; gap: 8px;">
+          ${job.packagesTotal > 0
+            ? `<span class="status-pill ${isCompleted ? 'success' : 'info'}" style="font-family: var(--font-mono); font-size: 11.5px;">
+                ${job.packagesCompleted || 0} / ${job.packagesTotal} pkg${job.packagesTotal === 1 ? '' : 's'}
+              </span>`
+            : ''}
+          <span class="font-mono" style="font-size: 13px; font-weight: 700; color: ${isCompleted ? 'var(--color-success)' : isFailed ? 'var(--color-danger)' : 'var(--color-primary)'};">
+            ${pct}%
+          </span>
+        </div>
+      </div>
+
+      <progress class="custom-progress ${progressClass}" max="100" value="${pct}" aria-label="Upgrade progress percentage"></progress>
+
+      <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; font-size: 11.5px; color: var(--color-text-secondary);">
+        <div>
+          ${job.currentPackage
+            ? `Currently upgrading: <code class="font-mono" style="color: var(--color-primary); font-weight: 600;">${escapeHtml(job.currentPackage)}</code>`
+            : isRunning
+              ? 'Safe to close this dialog — upgrade continues in the background.'
+              : job.completedAt
+                ? `Finished ${formatRelativeTime(job.completedAt)}`
+                : ''}
+        </div>
+        ${Array.isArray(job.completedPackages) && job.completedPackages.length > 0
+          ? `<div style="display: flex; align-items: center; gap: 4px; flex-wrap: wrap;">
+              <span>Updated:</span>
+              ${job.completedPackages
+                .slice(-5)
+                .map((p) => `<span class="status-pill success" style="font-size: 10px; padding: 1px 6px;">✓ ${escapeHtml(p)}</span>`)
+                .join('')}
+            </div>`
+          : ''}
+      </div>
+    </div>
+  `;
+}
+
+function ensureModalProgressListener() {
+  if (modalProgressListenerRegistered) return;
+  modalProgressListenerRegistered = true;
+
+  store.on('upgrade-progress', () => {
+    // Update inline host table rows if we are on the Hosts view
+    if (store.state.activeView === 'hosts') {
+      for (const h of store.state.hosts || []) {
+        const tr = document.querySelector(`tr[data-row-host-id="${CSS.escape(h.id)}"]`);
+        if (tr) {
+          const temp = document.createElement('tbody');
+          temp.innerHTML = renderHostRow(h).trim();
+          const newTr = temp.firstElementChild;
+          if (newTr) {
+            const oldUpdatesCell = tr.querySelector('.host-row-updates-cell');
+            const newUpdatesCell = newTr.querySelector('.host-row-updates-cell');
+            if (oldUpdatesCell && newUpdatesCell) {
+              oldUpdatesCell.innerHTML = newUpdatesCell.innerHTML;
+            }
+            const oldBtn = tr.querySelector('.btn-updates-host');
+            const newBtn = newTr.querySelector('.btn-updates-host');
+            if (oldBtn && newBtn) {
+              oldBtn.className = newBtn.className;
+              oldBtn.innerHTML = newBtn.innerHTML;
+            }
+          }
+        }
+      }
+    }
+
+    // If the updates modal is currently open, refresh its progress card and live console log
+    const dialog = document.getElementById('host-updates-dialog');
+    if (dialog && dialog.open && activeModalHostId) {
+      const host = (store.state.hosts || []).find((h) => h.id === activeModalHostId);
+      const job = getJobForHost(host);
+      const progressMount = document.getElementById('modal-upgrade-progress-mount');
+      if (progressMount) {
+        const wasRunning = progressMount.getAttribute('data-job-status') === 'running';
+        const nowStatus = job?.status || 'none';
+        progressMount.setAttribute('data-job-status', nowStatus);
+        progressMount.innerHTML = renderUpgradeJobCardHtml(job);
+
+        // If job just completed or failed while modal is open, re-render the modal body so updated package counts & buttons reflect completion
+        if (wasRunning && (nowStatus === 'completed' || nowStatus === 'failed')) {
+          openHostUpdatesModal(activeModalContainer, activeModalHostId, job?.output || '');
+          return;
+        }
+      }
+
+      // Update per-package status cells in-place while running
+      if (job) {
+        document.querySelectorAll('[data-pkg-action-cell]').forEach((cell) => {
+          const pkgName = cell.getAttribute('data-pkg-action-cell');
+          if (!pkgName) return;
+          if (Array.isArray(job.completedPackages) && job.completedPackages.includes(pkgName)) {
+            cell.innerHTML = `<span class="status-pill success" style="font-size: 10.5px; padding: 2px 8px;">✓ Updated</span>`;
+          } else if (job.status === 'running' && job.currentPackage === pkgName) {
+            cell.innerHTML = `
+              <span class="status-pill info" style="font-size: 10.5px; padding: 2px 8px; display: inline-flex; align-items: center; gap: 5px;">
+                <progress class="loading-spinner" style="width: 11px; height: 11px; --spinner-width: 2px;" aria-label="Upgrading ${escapeHtml(pkgName)}"></progress>
+                Upgrading...
+              </span>
+            `;
+          } else if (
+            job.status === 'running' &&
+            Array.isArray(job.targetPackages) &&
+            job.targetPackages.includes(pkgName)
+          ) {
+            cell.innerHTML = `<span class="status-pill" style="font-size: 10.5px; padding: 2px 8px;">Queued</span>`;
+          }
+        });
+
+        if (job.output) {
+          const logWrapper = document.getElementById('updates-log-wrapper');
+          const logPre = document.getElementById('updates-command-log');
+          if (logWrapper && logPre) {
+            logWrapper.style.display = 'block';
+            logPre.textContent = job.output;
+            logPre.scrollTop = logPre.scrollHeight;
+          }
+        }
+      }
+    }
+  });
+}
+
 export function openHostUpdatesModal(container, hostId, lastCommandOutput = '') {
+  ensureModalProgressListener();
+  activeModalHostId = hostId;
+  activeModalContainer = container;
+
   const dialog = document.getElementById('host-updates-dialog');
   const bodyEl = document.getElementById('host-updates-modal-body');
   const titleEl = document.getElementById('updates-modal-title');
@@ -496,8 +695,16 @@ export function openHostUpdatesModal(container, hostId, lastCommandOutput = '') 
   const asu = updates.attendedSysupgrade || {};
   const fwAvailable = Boolean(updates.firmwareUpdateAvailable || asu.firmwareUpdateAvailable);
   const availFwVer = updates.availableFirmwareVersion || asu.availableVersion;
+  const activeJob = getJobForHost(host);
+  const isJobRunning = activeJob?.status === 'running';
+  const effectiveOutput = lastCommandOutput || activeJob?.output || '';
 
   bodyEl.innerHTML = `
+    <!-- Live Background Upgrade Progress Card Mount -->
+    <div id="modal-upgrade-progress-mount" data-job-status="${escapeHtml(activeJob?.status || 'none')}">
+      ${renderUpgradeJobCardHtml(activeJob)}
+    </div>
+
     <!-- Section 1: Attended Sysupgrade Firmware Advisor -->
     <div style="border: 1px solid ${fwAvailable ? 'var(--color-warning)' : 'var(--color-border)'}; background: ${fwAvailable ? 'var(--color-warning-bg)' : 'var(--color-surface-elevated)'}; border-radius: var(--radius-lg); padding: 14px 16px;">
       <div style="display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap;">
@@ -523,14 +730,14 @@ export function openHostUpdatesModal(container, hostId, lastCommandOutput = '') 
         </div>
         <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
           ${!asu.installed
-            ? `<button type="button" class="btn btn-primary" id="asu-install-btn" style="font-size: 12px;">
+            ? `<button type="button" class="btn btn-primary" id="asu-install-btn" style="font-size: 12px;" ${isJobRunning ? 'disabled' : ''}>
                 ${renderIcon('download', 'icon icon-sm')} Install Attended Sysupgrade
               </button>`
-            : `<button type="button" class="btn btn-secondary" id="asu-check-btn" style="font-size: 12px;">
+            : `<button type="button" class="btn btn-secondary" id="asu-check-btn" style="font-size: 12px;" ${isJobRunning ? 'disabled' : ''}>
                 ${renderIcon('refresh', 'icon icon-sm')} Check ASU Server
               </button>`}
           ${fwAvailable && asu.installed
-            ? `<button type="button" class="btn btn-primary" id="asu-upgrade-btn" style="font-size: 12px;">
+            ? `<button type="button" class="btn btn-primary" id="asu-upgrade-btn" style="font-size: 12px;" ${isJobRunning ? 'disabled' : ''}>
                 ${renderIcon('zap', 'icon icon-sm')} Upgrade Firmware (${escapeHtml(availFwVer)})
               </button>`
             : ''}
@@ -549,16 +756,18 @@ export function openHostUpdatesModal(container, hostId, lastCommandOutput = '') 
         </div>
       </div>
       <div style="display: flex; align-items: center; gap: 8px;">
-        <button type="button" class="btn btn-secondary" id="pkg-refresh-btn" style="font-size: 12px;">
+        <button type="button" class="btn btn-secondary" id="pkg-refresh-btn" style="font-size: 12px;" ${isJobRunning ? 'disabled' : ''}>
           ${renderIcon('refresh', 'icon icon-sm')} Refresh Package Lists (opkg update)
         </button>
-        <button type="button" class="btn btn-primary" id="pkg-upgrade-all-btn" style="font-size: 12px;" ${packages.length === 0 ? 'disabled' : ''}>
-          ${renderIcon('download', 'icon icon-sm')} Update All Packages (${packages.length})
+        <button type="button" class="btn btn-primary" id="pkg-upgrade-all-btn" style="font-size: 12px;" ${packages.length === 0 || isJobRunning ? 'disabled' : ''}>
+          ${isJobRunning
+            ? `<progress class="loading-spinner" style="width: 12px; height: 12px; --spinner-width: 2px; --spinner-color-fg: #fff;" aria-label="Upgrading packages"></progress> Upgrading in Background...`
+            : `${renderIcon('download', 'icon icon-sm')} Update All Packages (${packages.length})`}
         </button>
       </div>
     </div>
 
-    <div style="border: 1px solid var(--color-border); border-radius: var(--radius-md); max-height: 280px; overflow-y: auto;">
+    <div style="border: 1px solid var(--color-border); border-radius: var(--radius-md); max-height: 260px; overflow-y: auto;">
       <table class="data-table" style="font-size: 12.5px;">
         <thead>
           <tr>
@@ -566,14 +775,37 @@ export function openHostUpdatesModal(container, hostId, lastCommandOutput = '') 
             <th>Installed Version</th>
             <th>Available Version</th>
             <th>Category</th>
-            <th style="text-align: right;">Action</th>
+            <th style="text-align: right;">Status / Action</th>
           </tr>
         </thead>
         <tbody>
           ${packages.length > 0
             ? packages
-                .map(
-                  (pkg) => `
+                .map((pkg) => {
+                  const isCompletedPkg = Array.isArray(activeJob?.completedPackages) && activeJob.completedPackages.includes(pkg.name);
+                  const isCurrentPkg = isJobRunning && activeJob?.currentPackage === pkg.name;
+                  const isQueuedPkg =
+                    isJobRunning && Array.isArray(activeJob?.targetPackages) && activeJob.targetPackages.includes(pkg.name);
+
+                  let actionCellHtml = `
+                    <button type="button" class="btn btn-secondary btn-upgrade-single-pkg" data-pkg-name="${escapeHtml(pkg.name)}" style="height: 26px; padding: 0 10px; font-size: 11.5px;" ${isJobRunning ? 'disabled' : ''}>
+                      Update
+                    </button>
+                  `;
+                  if (isCompletedPkg) {
+                    actionCellHtml = `<span class="status-pill success" style="font-size: 10.5px; padding: 2px 8px;">✓ Updated</span>`;
+                  } else if (isCurrentPkg) {
+                    actionCellHtml = `
+                      <span class="status-pill info" style="font-size: 10.5px; padding: 2px 8px; display: inline-flex; align-items: center; gap: 5px;">
+                        <progress class="loading-spinner" style="width: 11px; height: 11px; --spinner-width: 2px;" aria-label="Upgrading ${escapeHtml(pkg.name)}"></progress>
+                        Upgrading...
+                      </span>
+                    `;
+                  } else if (isQueuedPkg) {
+                    actionCellHtml = `<span class="status-pill" style="font-size: 10.5px; padding: 2px 8px;">Queued</span>`;
+                  }
+
+                  return `
             <tr>
               <td class="font-mono" style="font-weight: 600;">${escapeHtml(pkg.name)}</td>
               <td class="font-mono" style="color: var(--color-text-secondary);">${escapeHtml(pkg.currentVersion)}</td>
@@ -583,14 +815,12 @@ export function openHostUpdatesModal(container, hostId, lastCommandOutput = '') 
                   ${pkg.isSecurityOrCore ? 'Core / Security' : 'Package'}
                 </span>
               </td>
-              <td style="text-align: right;">
-                <button type="button" class="btn btn-secondary btn-upgrade-single-pkg" data-pkg-name="${escapeHtml(pkg.name)}" style="height: 26px; padding: 0 10px; font-size: 11.5px;">
-                  Update
-                </button>
+              <td style="text-align: right;" data-pkg-action-cell="${escapeHtml(pkg.name)}">
+                ${actionCellHtml}
               </td>
             </tr>
-          `
-                )
+          `;
+                })
                 .join('')
             : `
             <tr>
@@ -603,12 +833,12 @@ export function openHostUpdatesModal(container, hostId, lastCommandOutput = '') 
       </table>
     </div>
 
-    <!-- Section 3: SSH Package / Attended Sysupgrade Output Console -->
-    <div id="updates-log-wrapper" style="display: ${lastCommandOutput ? 'block' : 'none'};">
+    <!-- Section 3: Live Streaming SSH Package / Attended Sysupgrade Output Console -->
+    <div id="updates-log-wrapper" style="display: ${effectiveOutput ? 'block' : 'none'};">
       <div style="font-size: 11.5px; font-weight: 600; color: var(--color-text-muted); margin-bottom: 4px; text-transform: uppercase;">
-        Router Command Output
+        Live Router Upgrade Output
       </div>
-      <pre id="updates-command-log" style="background: var(--color-canvas); border: 1px solid var(--color-border); border-radius: var(--radius-md); padding: 10px 12px; font-family: var(--font-mono); font-size: 11.5px; max-height: 150px; overflow-y: auto; white-space: pre-wrap; color: var(--color-text-primary);">${escapeHtml(lastCommandOutput)}</pre>
+      <pre id="updates-command-log" style="background: var(--color-canvas); border: 1px solid var(--color-border); border-radius: var(--radius-md); padding: 10px 12px; font-family: var(--font-mono); font-size: 11.5px; max-height: 150px; overflow-y: auto; white-space: pre-wrap; color: var(--color-text-primary);">${escapeHtml(effectiveOutput)}</pre>
     </div>
   `;
 
@@ -634,62 +864,60 @@ export function openHostUpdatesModal(container, hostId, lastCommandOutput = '') 
     }
   });
 
-  // Wire Update All Packages
+  // Wire Update All Packages (Background Job)
   const upgradeAllBtn = bodyEl.querySelector('#pkg-upgrade-all-btn');
   upgradeAllBtn?.addEventListener('click', async () => {
     try {
       upgradeAllBtn.disabled = true;
-      upgradeAllBtn.innerHTML = `${renderIcon('refresh', 'icon icon-sm')} Updating All Packages...`;
-      toast.info('Updating Packages', `Upgrading ${packages.length} packages on ${host.name || host.hostname}...`);
       const res = await api.upgradeHostPackages(hostId, 'all');
-      await store.poll(true);
-      if (container) renderHosts(container);
-      openHostUpdatesModal(container, hostId, res.output || 'All packages upgraded.');
-      toast.success('Packages Updated', `Software packages updated on ${host.name || host.hostname}.`);
+      toast.info(
+        'Upgrade Running in Background',
+        `Upgrading ${packages.length || 'all'} package(s) on ${host.name || host.hostname}. Progress is tracked live.`
+      );
+      await store.pollUpgradeProgress();
+      store.syncFastUpgradePolling();
+      openHostUpdatesModal(container, hostId, res?.job?.output || '');
     } catch (err) {
       toast.error('Package Upgrade Failed', err.message);
       upgradeAllBtn.disabled = false;
-      upgradeAllBtn.innerHTML = `${renderIcon('download', 'icon icon-sm')} Update All Packages (${packages.length})`;
     }
   });
 
-  // Wire Individual Package Update Buttons
+  // Wire Individual Package Update Buttons (Background Job)
   bodyEl.querySelectorAll('.btn-upgrade-single-pkg').forEach((btn) => {
     btn.addEventListener('click', async () => {
       const pkgName = btn.getAttribute('data-pkg-name');
       if (!pkgName) return;
       try {
         btn.disabled = true;
-        btn.textContent = 'Updating...';
         const res = await api.upgradeHostPackages(hostId, [pkgName]);
-        await store.poll(true);
-        if (container) renderHosts(container);
-        openHostUpdatesModal(container, hostId, res.output || `Upgraded ${pkgName}.`);
-        toast.success('Package Updated', `Updated ${pkgName} on ${host.name || host.hostname}.`);
+        toast.info('Package Upgrade Started', `Upgrading ${pkgName} in the background on ${host.name || host.hostname}...`);
+        await store.pollUpgradeProgress();
+        store.syncFastUpgradePolling();
+        openHostUpdatesModal(container, hostId, res?.job?.output || '');
       } catch (err) {
         toast.error(`Failed to update ${pkgName}`, err.message);
         btn.disabled = false;
-        btn.textContent = 'Update';
       }
     });
   });
 
-  // Wire Install Attended Sysupgrade (`auc` + `luci-app-attendedsysupgrade`)
+  // Wire Install Attended Sysupgrade (`auc` + `luci-app-attendedsysupgrade`) in Background
   const asuInstallBtn = bodyEl.querySelector('#asu-install-btn');
   asuInstallBtn?.addEventListener('click', async () => {
     try {
       asuInstallBtn.disabled = true;
-      asuInstallBtn.textContent = 'Installing Attended Sysupgrade...';
-      toast.info('Installing ASU', `Installing auc and luci-app-attendedsysupgrade on ${host.name || host.hostname}...`);
       const res = await api.runAttendedSysupgrade(hostId, 'install');
-      await store.poll(true);
-      if (container) renderHosts(container);
-      openHostUpdatesModal(container, hostId, res.output || 'Installed Attended Sysupgrade.');
-      toast.success('Attended Sysupgrade Installed', 'Ready to check and build custom firmware upgrades.');
+      toast.info(
+        'Installing Attended Sysupgrade',
+        `Background installation of auc and luci-app-attendedsysupgrade started on ${host.name || host.hostname}.`
+      );
+      await store.pollUpgradeProgress();
+      store.syncFastUpgradePolling();
+      openHostUpdatesModal(container, hostId, res?.job?.output || '');
     } catch (err) {
       toast.error('Installation Failed', err.message);
       asuInstallBtn.disabled = false;
-      asuInstallBtn.textContent = 'Install Attended Sysupgrade';
     }
   });
 
@@ -711,12 +939,12 @@ export function openHostUpdatesModal(container, hostId, lastCommandOutput = '') 
     }
   });
 
-  // Wire Upgrade Firmware via Attended Sysupgrade (`auc -y` / `owut upgrade`)
+  // Wire Upgrade Firmware via Attended Sysupgrade (`auc -y` / `owut upgrade`) in Background
   const asuUpgradeBtn = bodyEl.querySelector('#asu-upgrade-btn');
   asuUpgradeBtn?.addEventListener('click', async () => {
     const confirmed = await confirmAction({
       title: `Attended Sysupgrade to OpenWrt ${availFwVer}`,
-      message: `This will automatically take a TrueNAS configuration backup of ${host.name || host.hostname}, request a custom sysupgrade image with all your installed packages from ${asu.serverUrl || 'sysupgrade.openwrt.org'}, and flash the router. Proceed?`,
+      message: `This will automatically take a TrueNAS configuration backup of ${host.name || host.hostname}, request a custom sysupgrade image with all your installed packages from ${asu.serverUrl || 'sysupgrade.openwrt.org'}, and flash the router in the background. Proceed?`,
       confirmLabel: `Backup & Upgrade to ${availFwVer}`,
       isDestructive: false
     });
@@ -724,17 +952,17 @@ export function openHostUpdatesModal(container, hostId, lastCommandOutput = '') 
 
     try {
       asuUpgradeBtn.disabled = true;
-      asuUpgradeBtn.textContent = 'Building & Flashing Image...';
-      toast.info('Attended Sysupgrade Started', `Creating pre-upgrade backup and requesting OpenWrt ${availFwVer} image...`);
       const res = await api.runAttendedSysupgrade(hostId, 'upgrade');
-      await store.poll(true);
-      if (container) renderHosts(container);
-      openHostUpdatesModal(container, hostId, res.output || 'Attended Sysupgrade initiated.');
-      toast.success('Firmware Upgrade Initiated', `Attended Sysupgrade command completed on ${host.name || host.hostname}.`);
+      toast.info(
+        'Attended Sysupgrade Running in Background',
+        `Building and flashing OpenWrt ${availFwVer} on ${host.name || host.hostname}.`
+      );
+      await store.pollUpgradeProgress();
+      store.syncFastUpgradePolling();
+      openHostUpdatesModal(container, hostId, res?.job?.output || '');
     } catch (err) {
       toast.error('Attended Sysupgrade Failed', err.message);
       asuUpgradeBtn.disabled = false;
-      asuUpgradeBtn.textContent = `Upgrade Firmware (${availFwVer})`;
     }
   });
 }

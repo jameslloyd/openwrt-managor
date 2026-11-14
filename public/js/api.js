@@ -76,6 +76,9 @@ export const api = {
     return request('/api/hosts/test', { method: 'POST', body: idOrData });
   },
   getHostUpdates: (id) => request(`/api/hosts/${encodeURIComponent(id)}/updates`),
+  getUpgradeJobs: (activeOnly = false) =>
+    request(`/api/hosts/updates/jobs${activeOnly ? '?activeOnly=true' : ''}`),
+  getHostUpgradeJob: (id) => request(`/api/hosts/${encodeURIComponent(id)}/updates/job`),
   checkHostUpdates: (id = 'all') =>
     id === 'all'
       ? request('/api/hosts/updates/check', { method: 'POST', body: { hostId: 'all' } })

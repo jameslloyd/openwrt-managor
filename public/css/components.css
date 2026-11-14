@@ -825,3 +825,219 @@ dialog::backdrop {
   font-size: 13px;
   line-height: 1.5;
 }
+
+/* ==========================================================================
+   12. NATIVE <PROGRESS> BAR & LOADING SPINNER (modern-web-guidance)
+   ========================================================================== */
+progress.custom-progress {
+  appearance: none;
+  border: 0 solid;
+  overflow: clip;
+  container-type: inline-size;
+  width: 100%;
+  height: 8px;
+  --progress-bar-radius: 1e5px;
+  --progress-bar-track: var(--color-surface-hover);
+  --progress-bar-fill: var(--color-primary);
+  --progress-bar-indeterminate-size: 30%;
+  --progress-bar-indeterminate-animation-duration: 1.5s;
+  border-radius: var(--progress-bar-radius);
+  background: var(--progress-bar-track);
+  box-shadow: inset 0 1px 2px rgb(0 0 0 / 0.1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  progress.custom-progress {
+    --progress-bar-indeterminate-animation-duration: 10s;
+  }
+}
+
+progress.custom-progress.success {
+  --progress-bar-fill: var(--color-success);
+}
+
+progress.custom-progress.warning {
+  --progress-bar-fill: var(--color-warning);
+}
+
+progress.custom-progress.danger {
+  --progress-bar-fill: var(--color-danger);
+}
+
+progress.custom-progress:dir(rtl) {
+  --progress-bar-indeterminate-animation: progress-bar-indeterminate var(--progress-bar-indeterminate-animation-duration) infinite linear reverse;
+}
+
+progress.custom-progress:indeterminate {
+  --progress-bar-animation: var(
+    --progress-bar-indeterminate-animation,
+    progress-bar-indeterminate var(--progress-bar-indeterminate-animation-duration) infinite linear
+  );
+}
+
+progress.custom-progress::-webkit-progress-bar {
+  background: transparent;
+}
+
+progress.custom-progress::-webkit-progress-value {
+  background: var(--progress-bar-fill, var(--color-primary));
+  border-radius: var(--progress-bar-radius);
+  transition: inline-size 0.3s;
+  animation: var(--progress-bar-animation, revert-rule);
+}
+
+progress.custom-progress::-moz-progress-bar {
+  background: var(--progress-bar-fill, var(--color-primary));
+  border-radius: var(--progress-bar-radius);
+  transition: inline-size 0.3s;
+  animation: var(--progress-bar-animation, revert-rule);
+}
+
+@keyframes progress-bar-indeterminate {
+  from, to {
+    inline-size: var(--progress-bar-indeterminate-size);
+    margin-right: auto;
+  }
+  from { translate: -100%; }
+  to { translate: 100cqi; }
+}
+
+/* Native <progress> Loading Spinner (modern-web-guidance spinner) */
+@property --arc-start {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+@property --arc-end {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+@property --progress-dash-animation {
+  syntax: "*";
+  inherits: false;
+  initial-value: , progress-dash 3s ease-in-out infinite;
+}
+
+progress.loading-spinner:indeterminate::-webkit-progress-bar {
+  display: none;
+  background: none;
+}
+progress.loading-spinner:indeterminate::-webkit-progress-value {
+  display: none;
+  background: none;
+}
+progress.loading-spinner:indeterminate::-moz-progress-bar {
+  display: none;
+  background: none;
+}
+progress.loading-spinner:indeterminate::slider-fill {
+  display: none;
+  background: none;
+}
+
+progress.loading-spinner:indeterminate {
+  --_from: calc(90deg + var(--arc-start, 0deg));
+  --_to: calc(90deg + var(--arc-end, 158deg));
+  --size: 18px;
+  --thickness: 2.5px;
+  --spinner-color: var(--color-primary);
+  --track-color: var(--color-border);
+  --spinner-duration: 1.4s;
+  --_used-spinner-duration: var(--spinner-duration);
+
+  display: inline-block;
+  vertical-align: middle;
+  flex-shrink: 0;
+  position: relative;
+  width: var(--size);
+  height: var(--size);
+  border-radius: 50%;
+  appearance: none;
+  border: 0;
+  background: conic-gradient(
+      from var(--_from),
+      var(--spinner-color) calc(var(--_to) - var(--_from)),
+      transparent 0
+    )
+    var(--track-color);
+
+  @supports (background-clip: border-area) {
+    background-clip: border-area;
+    border: var(--thickness) solid transparent;
+    background-origin: border-box;
+  }
+
+  @supports not (background-clip: border-area) {
+    --clip-boundary: calc(100% - var(--thickness));
+    mask-image: radial-gradient(
+      farthest-side,
+      transparent var(--clip-boundary),
+      black var(--clip-boundary)
+    );
+    border: 0;
+  }
+
+  @media (forced-colors: active) {
+    forced-color-adjust: none;
+    --spinner-color: CanvasText;
+    --track-color: Canvas;
+  }
+
+  animation:
+    progress-spin var(--_used-spinner-duration) linear infinite
+    var(--progress-dash-animation, );
+}
+
+@media (prefers-reduced-motion: reduce) {
+  progress.loading-spinner:indeterminate {
+    --_used-spinner-duration: 6s;
+    --progress-dash-animation: ;
+    --arc-end: 158deg;
+  }
+}
+
+@keyframes progress-spin {
+  to {
+    rotate: 1turn;
+  }
+}
+
+@keyframes progress-dash {
+  from {
+    --arc-start: 0deg;
+    --arc-end: 3deg;
+  }
+  50% {
+    --arc-start: 100deg;
+    --arc-end: 358deg;
+  }
+  to {
+    --arc-start: 360deg;
+    --arc-end: 363deg;
+  }
+}
+
+/* Global Background Upgrade Progress Tracker Banner */
+.upgrade-tracker-banner {
+  background-color: var(--color-surface);
+  border-bottom: 1px solid var(--color-border);
+  padding: 10px var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: calc(var(--z-topbar) - 1);
+  box-shadow: var(--shadow-sm);
+}
+
+.upgrade-job-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+  background-color: var(--color-surface-elevated);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 10px 14px;
+}

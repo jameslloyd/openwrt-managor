@@ -198,7 +198,26 @@ export async function handleApiRequest(req, res, pathname, searchParams) {
       return true;
     }
 
-    // Dynamic Host routes: /api/hosts/updates/check, /api/hosts/:id/updates/*, /api/hosts/:id, /api/hosts/:id/test
+    // Dynamic Host routes: /api/hosts/updates/jobs, /api/hosts/updates/check, /api/hosts/:id/updates/*, /api/hosts/:id, /api/hosts/:id/test
+    if (pathname === '/api/hosts/updates/jobs' && req.method === 'GET') {
+      const activeOnly = searchParams.get('activeOnly') === 'true';
+      const jobs = hostManager.getAllUpgradeJobs({ activeOnly });
+      sendJson(res, 200, { jobs });
+      return true;
+    }
+
+    const jobByIdMatch = pathname.match(/^\/api\/hosts\/updates\/jobs\/([^/]+)$/);
+    if (jobByIdMatch && req.method === 'GET') {
+      const jobId = jobByIdMatch[1];
+      const job = hostManager.getUpgradeJob(jobId);
+      if (!job) {
+        sendError(res, 404, `Upgrade job ${jobId} not found`, 'JOB_NOT_FOUND');
+        return true;
+      }
+      sendJson(res, 200, { job });
+      return true;
+    }
+
     if (pathname === '/api/hosts/updates/check' && req.method === 'POST') {
       const body = await parseJsonBody(req);
       if (body && body.hostId && body.hostId !== 'all') {
@@ -215,6 +234,21 @@ export async function handleApiRequest(req, res, pathname, searchParams) {
       return true;
     }
 
+    const hostUpdatesJobMatch = pathname.match(/^\/api\/hosts\/([^/]+)\/updates\/job$/);
+    if (hostUpdatesJobMatch && req.method === 'GET') {
+      const hostId = hostUpdatesJobMatch[1];
+      const host = await hostManager.getHost(hostId);
+      if (!host) {
+        sendError(res, 404, `Host ${hostId} not found`, 'HOST_NOT_FOUND');
+        return true;
+      }
+      sendJson(res, 200, {
+        hostId: host.id,
+        job: host.activeUpgradeJob || hostManager.getUpgradeJobForHost(hostId),
+      });
+      return true;
+    }
+
     const hostUpdatesGetMatch = pathname.match(/^\/api\/hosts\/([^/]+)\/updates$/);
     if (hostUpdatesGetMatch && req.method === 'GET') {
       const hostId = hostUpdatesGetMatch[1];
@@ -228,6 +262,7 @@ export async function handleApiRequest(req, res, pathname, searchParams) {
         hostName: host.name || host.hostname,
         firmware: host.firmware,
         updates: host.updates,
+        activeUpgradeJob: host.activeUpgradeJob || hostManager.getUpgradeJobForHost(hostId),
       });
       return true;
     }
