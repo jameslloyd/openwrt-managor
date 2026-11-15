@@ -455,6 +455,8 @@ Provides full lifecycle configuration for registering, testing, editing, and dia
 | Connection Protocol: (o) ubus HTTP (Port 80)   ( ) ubus HTTPS (Port 443)   ( ) SSH Direct           |
 | Username:          [ root                                                                ]         |
 | Password / Token:  [ •••••••••••••••••••••                                                ] [Show]  |
+| Role:              [ (o) Access Point   ( ) Gateway   ( ) Mesh Extender   ( ) Switch         ]         |
+| Geolocation (3D):  Latitude: [ 51.507351 ]  Longitude: [ -0.127758 ]  Alt: [ 12.5 ]m [Use GPS]      |
 | Backup Method:     [ ubus call system sysupgrade_backup / SSH sysupgrade -b              v]         |
 | SSH Port (Opt):    [ 22   ]     SSH Private Key: [ Use Container Key / Upload Key        v]         |
 +-----------------------------------------------------------------------------------------------------+
@@ -479,7 +481,24 @@ Provides full lifecycle configuration for registering, testing, editing, and dia
   - `Connection Refused (Port 80/443):` "Verify uhttpd is running on the router and firewall allows traffic from TrueNAS IP."
   - `Timeout (> 5000 ms):` "Host unreachable. Verify IP and routing between TrueNAS and router subnet."
 
-#### 3. Demo Mode Switcher
+#### 3. Package Updates & Attended Sysupgrade Center
+- **Fleet Software Packages (`opkg` / `apk`):**
+  - Monitors package status across all online routers. Displays total upgradeable packages in a summary KPI card and per-node table pill.
+  - Clicking **`Updates`** opens a modal displaying installed vs available package versions with single-click `Upgrade All Packages` or per-package update actions.
+- **Attended Sysupgrade (AUC / OWUT):**
+  - Queries OpenWrt official firmware image builder / attended sysupgrade service.
+  - When a newer OpenWrt release is available, shows an **`Upgrade Advised`** pill with target version.
+  - Provides a 4-stage automated upgrade workflow: `1. Check compatibility -> 2. Request build -> 3. Download sysupgrade image -> 4. Flash and monitor reboot`.
+- **Global Background Upgrade Banner (`#global-upgrade-tracker`):**
+  - Persistent non-blocking banner at top of viewport tracking ongoing background package installations or attended sysupgrades.
+  - Features real-time phase updates, percentage progress bar, "View Live Progress" modal deep link, and dismiss controls.
+
+#### 4. Physical Geolocation & Altitude (3D Triangulation Anchoring)
+- Form provides decimal degrees **Latitude (°)**, **Longitude (°)**, and elevation **Altitude (m)**.
+- Includes a **`Use Browser GPS`** one-click auto-fill button leveraging the browser Geolocation API (`navigator.geolocation`).
+- Coordinates directly feed the 3D RF Triangulation spatial engine on the WiFi view.
+
+#### 5. Demo Mode Switcher
 - A persistent toggle in Settings and the Header Bar: `Demo Mode (Simulated Network)`.
 - When active:
   - Loads a realistic 3-node OpenWrt deployment (1 Gateway, 2 APs) with 24 simulated active clients.
@@ -573,14 +592,15 @@ All modal dialogs (Add Host, Backup Progress, Config Diff, Destructive Confirmat
 
 | Key / Shortcut | Scope | Interaction Description |
 | :--- | :--- | :--- |
-| `Tab` / `Shift + Tab` | Global | Sequentially navigates through all interactive controls in logical reading order. |
-| `/` | Global | Immediately focuses the global client search input on the Hosts view. |
-| `1` through `5` | Global (when not typing) | Quick jump to views: `1` Overview, `2` Topology, `3` Hosts, `4` WiFi, `5` Backups. |
-| `Esc` | Global | Closes open drawers, modals, dropdown menus, or deselects active canvas nodes. |
+| `Tab` / `Shift + Tab` | Global | Sequentially navigates through all interactive controls in logical reading order with visible focus ring. |
+| `/` | Global | Focuses the client search input (`#client-search-input`) on the Hosts & Clients view. |
+| `1` through `7` | Global (when not typing) | Quick jump to views: `1` Overview, `2` Topology, `3` Clients, `4` WiFi Spectrum, `5` Backups, `6` Fleet, `7` Settings. |
+| `?` | Global (when not typing) | Opens the Keyboard Shortcuts & Navigation Guide dialog modal. |
+| `Esc` | Global | Closes open drawers, native modals, dropdown menus, exits fullscreen map, or deselects active canvas nodes. |
 | `R` | Global (when not typing) | Triggers immediate manual telemetry refresh from all OpenWrt nodes. |
-| `Space` or `Enter` | Canvas / Table | Activates selected node or row, opening the inspector drawer. |
-| `Arrow Keys` | Topology Map | Pans the canvas view smoothly in the arrow direction. |
-| `+` / `-` | Topology Map | Zooms in and out of the topology diagram. |
+| `Space` or `Enter` | Canvas / Table | Activates selected node, table row, or sorting header. |
+| `Arrow Keys` | Topology / Radar Maps | Pans the canvas view smoothly in the arrow direction ($\pm 40\text{px}$). |
+| `+` / `-` | Topology / Radar Maps | Zooms in and out of the topology diagram or triangulation spatial map ($\pm 15\%$). |
 
 ---
 

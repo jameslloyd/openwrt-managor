@@ -154,6 +154,60 @@ export class TopologyGraph {
       },
       { passive: false }
     );
+
+    // Touch Panning & Pinch Zoom
+    let touchStartX = 0;
+    let touchStartY = 0;
+    let initialPinchDist = null;
+
+    this.viewport.addEventListener('touchstart', (e) => {
+      if (e.touches.length === 1) {
+        touchStartX = e.touches[0].clientX - this.panX;
+        touchStartY = e.touches[0].clientY - this.panY;
+      } else if (e.touches.length === 2) {
+        initialPinchDist = Math.hypot(
+          e.touches[0].clientX - e.touches[1].clientX,
+          e.touches[0].clientY - e.touches[1].clientY
+        );
+      }
+    }, { passive: true });
+
+    this.viewport.addEventListener('touchmove', (e) => {
+      if (e.touches.length === 1 && initialPinchDist === null) {
+        this.panX = e.touches[0].clientX - touchStartX;
+        this.panY = e.touches[0].clientY - touchStartY;
+        this.updateTransform();
+      } else if (e.touches.length === 2 && initialPinchDist) {
+        const dist = Math.hypot(
+          e.touches[0].clientX - e.touches[1].clientX,
+          e.touches[0].clientY - e.touches[1].clientY
+        );
+        const factor = dist / initialPinchDist;
+        if (Math.abs(factor - 1) > 0.05) {
+          this.zoomBy(factor > 1 ? 1.05 : 0.95);
+          initialPinchDist = dist;
+        }
+      }
+    }, { passive: true });
+
+    this.viewport.addEventListener('touchend', () => {
+      initialPinchDist = null;
+    }, { passive: true });
+
+    // Keyboard Arrow Navigation & Zoom
+    this.viewport.setAttribute('tabindex', '0');
+    this.viewport.setAttribute('role', 'region');
+    this.viewport.setAttribute('aria-label', 'Network Topology Map Canvas. Use arrow keys to pan, plus/minus to zoom.');
+    this.viewport.addEventListener('keydown', (e) => {
+      const panStep = 40;
+      if (e.key === 'ArrowUp') { e.preventDefault(); this.panY += panStep; this.updateTransform(); }
+      else if (e.key === 'ArrowDown') { e.preventDefault(); this.panY -= panStep; this.updateTransform(); }
+      else if (e.key === 'ArrowLeft') { e.preventDefault(); this.panX += panStep; this.updateTransform(); }
+      else if (e.key === 'ArrowRight') { e.preventDefault(); this.panX -= panStep; this.updateTransform(); }
+      else if (e.key === '+' || e.key === '=') { e.preventDefault(); this.zoomBy(1.15); }
+      else if (e.key === '-' || e.key === '_') { e.preventDefault(); this.zoomBy(0.85); }
+      else if (e.key === '0' || e.key === ' ') { e.preventDefault(); this.fitToScreen(); }
+    });
   }
 
   zoomBy(factor) {

@@ -12,6 +12,7 @@ import { openHostUpdatesModal } from '../views/hosts.js';
 
 let drawerEl = null;
 let backdropEl = null;
+let lastDrawerTrigger = null;
 
 export function initDrawer() {
   drawerEl = document.getElementById('inspector-drawer');
@@ -39,6 +40,22 @@ export function initDrawer() {
     }
   });
 
+  // Focus trap inside drawer
+  drawerEl.addEventListener('keydown', (e) => {
+    if (e.key !== 'Tab') return;
+    const focusables = drawerEl.querySelectorAll('button:not(:disabled), [href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])');
+    if (focusables.length === 0) return;
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+    if (e.shiftKey && document.activeElement === first) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault();
+      first.focus();
+    }
+  });
+
   // Listen to store selection events
   store.on('node-selected', (node) => {
     if (node) renderNodeDetails(node);
@@ -57,14 +74,22 @@ export function isDrawerOpen() {
   return drawerEl && drawerEl.classList.contains('open');
 }
 
-export function openDrawer() {
+export function openDrawer(triggerEl = null) {
   if (!drawerEl) return;
+  lastDrawerTrigger = triggerEl || document.activeElement;
   drawerEl.hidden = false;
   drawerEl.classList.add('open');
   if (backdropEl) {
     backdropEl.style.display = 'block';
     setTimeout(() => { backdropEl.style.opacity = '1'; }, 10);
   }
+  // Move focus to drawer close button or header
+  setTimeout(() => {
+    const focusTarget = drawerEl.querySelector('.drawer-close-btn') || drawerEl;
+    if (focusTarget && typeof focusTarget.focus === 'function') {
+      focusTarget.focus();
+    }
+  }, 50);
 }
 
 export function closeDrawer() {
@@ -72,7 +97,17 @@ export function closeDrawer() {
   drawerEl.classList.remove('open');
   if (backdropEl) {
     backdropEl.style.opacity = '0';
-    setTimeout(() => { backdropEl.style.display = 'none'; }, 200);
+    setTimeout(() => {
+      backdropEl.style.display = 'none';
+      drawerEl.hidden = true;
+    }, 200);
+  } else {
+    drawerEl.hidden = true;
+  }
+  if (lastDrawerTrigger && typeof lastDrawerTrigger.focus === 'function') {
+    try {
+      lastDrawerTrigger.focus();
+    } catch {}
   }
 }
 
@@ -86,7 +121,7 @@ export function renderNodeDetails(node) {
     <div class="drawer-header">
       <div style="display: flex; align-items: center; gap: 8px;">
         <span class="status-dot ${node.status === 'online' ? 'online' : 'offline'}"></span>
-        <h2 class="modal-title" style="font-size: 15px;">${escapeHtml(node.label || node.id)}</h2>
+        <h2 id="drawer-title" class="modal-title" style="font-size: 15px;">${escapeHtml(node.label || node.id)}</h2>
       </div>
       <button type="button" class="btn-icon drawer-close-btn" aria-label="Close drawer">
         ${renderIcon('x', 'icon')}
@@ -244,7 +279,7 @@ export function renderClientDetails(client) {
     <div class="drawer-header">
       <div style="display: flex; align-items: center; gap: 8px;">
         ${renderIcon(isWired ? 'server' : 'wifi', 'icon')}
-        <h2 class="modal-title" style="font-size: 15px;">${escapeHtml(client.hostname || client.ip)}</h2>
+        <h2 id="drawer-title" class="modal-title" style="font-size: 15px;">${escapeHtml(client.hostname || client.ip)}</h2>
       </div>
       <button type="button" class="btn-icon drawer-close-btn" aria-label="Close drawer">
         ${renderIcon('x', 'icon')}

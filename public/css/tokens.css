@@ -24,8 +24,11 @@
   /* Text Colors */
   --color-text-primary: light-dark(#0f172a, #f8fafc);
   --color-text-secondary: light-dark(#475569, #94a3b8);
-  --color-text-muted: light-dark(#64748b, #64748b);
+  --color-text-muted: light-dark(#475569, #94a3b8);
   --color-text-inverse: light-dark(#f8fafc, #0f172a);
+  --color-warning-text: light-dark(#92400e, #fbbf24);
+  --color-diff-add-text: light-dark(#065f46, #34d399);
+  --color-diff-del-text: light-dark(#991b1b, #f87171);
 
   /* Primary Brand & Accents */
   --color-brand: #0078d4;

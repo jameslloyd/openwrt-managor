@@ -45,7 +45,7 @@
 
   <div class="app-shell" id="app-shell">
     <!-- Primary Global Navigation Sidebar -->
-    <aside class="sidebar" role="navigation" aria-label="Main Navigation">
+    <aside class="sidebar" id="sidebar" aria-label="Sidebar">
       <div class="sidebar-header">
         <a href="#/dashboard" class="brand-logo" aria-label="OpenWrt Manager Home">
           <svg class="brand-icon" viewBox="0 0 32 32" fill="none" aria-hidden="true">
@@ -62,7 +62,7 @@
         </a>
       </div>
 
-      <nav class="sidebar-nav">
+      <nav class="sidebar-nav" aria-label="Main Navigation">
         <a href="#/dashboard" class="nav-link active" data-route="dashboard">
           <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
           <span class="nav-label">Dashboard</span>
@@ -117,6 +117,13 @@
     <!-- Top Navigation Header -->
     <header class="topbar" role="banner">
       <div class="topbar-left">
+        <button type="button" class="btn-icon mobile-menu-btn" id="mobile-menu-toggle" aria-label="Open Navigation Menu" aria-expanded="false" aria-controls="sidebar">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <line x1="3" y1="12" x2="21" y2="12"></line>
+            <line x1="3" y1="6" x2="21" y2="6"></line>
+            <line x1="3" y1="18" x2="21" y2="18"></line>
+          </svg>
+        </button>
         <div id="topbar-status-pill" class="status-pill online">
           <span class="status-dot online"></span>
           All Systems Normal
@@ -127,12 +134,12 @@
       </div>
 
       <div class="topbar-center">
-        <div class="storage-meter" title="TrueNAS ZFS Backup Dataset Mount">
+        <div class="storage-meter" id="topbar-storage-meter" role="meter" aria-label="TrueNAS ZFS Backup Dataset Mount" aria-valuenow="25" aria-valuemin="0" aria-valuemax="100" title="TrueNAS ZFS Backup Dataset Mount">
           <span>/backups Mount:</span>
           <div class="storage-bar-track">
-            <div class="storage-bar-fill" style="width: 25%;"></div>
+            <div class="storage-bar-fill" id="topbar-storage-bar-fill" style="width: 25%;"></div>
           </div>
-          <span style="font-family: var(--font-mono); font-size: 11px;">ZFS Healthy</span>
+          <span id="topbar-storage-status-text" style="font-family: var(--font-mono); font-size: 11px;">ZFS Healthy</span>
         </div>
       </div>
 
@@ -145,6 +152,10 @@
         <a href="#/hosts" class="btn btn-secondary" style="text-decoration:none;">
           + Add Host
         </a>
+
+        <button type="button" class="btn btn-ghost" id="open-shortcuts-help-btn" title="Keyboard Shortcuts (?)" aria-label="View Keyboard Shortcuts" style="font-size: 12px; padding: 4px 8px;">
+          Shortcuts (?)
+        </button>
 
         <button type="button" class="btn-icon" id="topbar-refresh-btn" title="Refresh Telemetry (R)" aria-label="Refresh telemetry">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
@@ -177,7 +188,46 @@
   </div>
 
   <!-- Contextual Slide-Out Inspector Drawer -->
-  <aside class="inspector-drawer" id="inspector-drawer" aria-label="Inspector Drawer" hidden></aside>
+  <aside class="inspector-drawer" id="inspector-drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title" tabindex="-1" hidden></aside>
+
+  <!-- Mobile Navigation Backdrop -->
+  <div id="sidebar-backdrop" class="sidebar-backdrop" style="display:none;" aria-hidden="true"></div>
+
+  <!-- Global Keyboard Shortcuts Help Dialog -->
+  <dialog id="shortcuts-help-dialog" class="modal-dialog" aria-labelledby="shortcuts-dialog-title">
+    <div class="modal-content" style="max-width: 620px;">
+      <div class="modal-header">
+        <h2 id="shortcuts-dialog-title" class="modal-title">Keyboard Shortcuts &amp; Navigation Guide</h2>
+        <button type="button" class="btn-icon modal-close-btn" aria-label="Close dialog" id="shortcuts-help-close-btn">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <div class="modal-body">
+        <table class="data-table" style="width: 100%;">
+          <thead>
+            <tr>
+              <th scope="col" style="width: 28%;">Key / Shortcut</th>
+              <th scope="col" style="width: 22%;">Scope</th>
+              <th scope="col">Interaction Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td><kbd>1</kbd> – <kbd>7</kbd></td><td>Global</td><td>Quick jump to views (1: Dash, 2: Topo, 3: Clients, 4: WiFi, 5: Backups, 6: Fleet, 7: Settings)</td></tr>
+            <tr><td><kbd>/</kbd></td><td>Global</td><td>Focus client search input</td></tr>
+            <tr><td><kbd>R</kbd></td><td>Global</td><td>Refresh telemetry from all OpenWrt routers</td></tr>
+            <tr><td><kbd>?</kbd></td><td>Global</td><td>Open this shortcuts guide dialog</td></tr>
+            <tr><td><kbd>Esc</kbd></td><td>Global</td><td>Close drawer, native modal dialog, or dismiss selection</td></tr>
+            <tr><td><kbd>Enter</kbd> / <kbd>Space</kbd></td><td>Table / Canvas</td><td>Activate selected row, sort column, or select node</td></tr>
+            <tr><td><kbd>Arrow Keys</kbd></td><td>Topology / Radar</td><td>Pan canvas view in arrow direction (±40px)</td></tr>
+            <tr><td><kbd>+</kbd> / <kbd>-</kbd></td><td>Topology / Radar</td><td>Zoom in / zoom out canvas (±15%)</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="modal-footer" style="display: flex; justify-content: flex-end; padding: var(--space-3) var(--space-4);">
+        <button type="button" class="btn btn-secondary" id="shortcuts-help-ok-btn">Close</button>
+      </div>
+    </div>
+  </dialog>
 
   <!-- Screen Reader Announcements (ARIA Live Regions) -->
   <div id="sr-announcer-polite" class="sr-only" aria-live="polite"></div>

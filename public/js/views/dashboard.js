@@ -130,7 +130,7 @@ export function renderDashboard(container) {
     </div>
 
     <!-- Main Grid: Fleet Nodes Grid + Live Activity Stream -->
-    <div style="display: grid; grid-template-columns: 2fr 1fr; gap: var(--space-4);">
+    <div class="dash-main-grid">
       <!-- OpenWrt Fleet Node Grid -->
       <div style="display: flex; flex-direction: column; gap: var(--space-3);">
         <div style="display: flex; align-items: center; justify-content: space-between;">
@@ -434,30 +434,87 @@ function renderSparkline(container, history = []) {
   txArea += ` L ${getX(points.length - 1)} ${pad.top + chartH} Z`;
 
   container.innerHTML = `
-    <svg viewBox="0 0 ${width} ${height}" style="width:100%; height:100%;">
-      <defs>
-        <linearGradient id="rx-grad" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stop-color="#3b82f6" stop-opacity="0.3"/>
-          <stop offset="100%" stop-color="#3b82f6" stop-opacity="0.0"/>
-        </linearGradient>
-        <linearGradient id="tx-grad" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stop-color="#10b981" stop-opacity="0.25"/>
-          <stop offset="100%" stop-color="#10b981" stop-opacity="0.0"/>
-        </linearGradient>
-      </defs>
+    <div style="position: relative; width: 100%; height: 100%;">
+      <svg role="img" aria-label="Real-time Gateway WAN throughput history over the last 60 seconds" viewBox="0 0 ${width} ${height}" style="width:100%; height:100%;">
+        <title>Real-time WAN download and upload traffic</title>
+        <defs>
+          <linearGradient id="rx-grad" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stop-color="#3b82f6" stop-opacity="0.3"/>
+            <stop offset="100%" stop-color="#3b82f6" stop-opacity="0.0"/>
+          </linearGradient>
+          <linearGradient id="tx-grad" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stop-color="#10b981" stop-opacity="0.25"/>
+            <stop offset="100%" stop-color="#10b981" stop-opacity="0.0"/>
+          </linearGradient>
+        </defs>
 
-      <!-- Baseline axis -->
-      <line x1="${pad.left}" y1="${pad.top + chartH}" x2="${width - pad.right}" y2="${pad.top + chartH}" stroke="var(--color-border)" stroke-width="1"/>
-      <text x="${pad.left - 6}" y="${pad.top + 10}" font-size="10" fill="var(--color-text-muted)" text-anchor="end">${formatBps(maxVal)}</text>
-      <text x="${pad.left - 6}" y="${pad.top + chartH}" font-size="10" fill="var(--color-text-muted)" text-anchor="end">0 bps</text>
+        <!-- Baseline axis -->
+        <line x1="${pad.left}" y1="${pad.top + chartH}" x2="${width - pad.right}" y2="${pad.top + chartH}" stroke="var(--color-border)" stroke-width="1"/>
+        <text x="${pad.left - 6}" y="${pad.top + 10}" font-size="10" fill="var(--color-text-muted)" text-anchor="end">${formatBps(maxVal)}</text>
+        <text x="${pad.left - 6}" y="${pad.top + chartH}" font-size="10" fill="var(--color-text-muted)" text-anchor="end">0 bps</text>
 
-      <!-- Area fills -->
-      <path d="${rxArea}" fill="url(#rx-grad)" />
-      <path d="${txArea}" fill="url(#tx-grad)" />
+        <!-- Area fills -->
+        <path d="${rxArea}" fill="url(#rx-grad)" />
+        <path d="${txArea}" fill="url(#tx-grad)" />
 
-      <!-- Lines -->
-      <path d="${rxPath}" fill="none" stroke="#3b82f6" stroke-width="2.5" />
-      <path d="${txPath}" fill="none" stroke="#10b981" stroke-width="2" />
-    </svg>
+        <!-- Lines -->
+        <path d="${rxPath}" fill="none" stroke="#3b82f6" stroke-width="2.5" />
+        <path d="${txPath}" fill="none" stroke="#10b981" stroke-width="2" />
+
+        <!-- Crosshair & Indicators -->
+        <line id="sparkline-crosshair" x1="0" y1="${pad.top}" x2="0" y2="${pad.top + chartH}" stroke="var(--color-primary)" stroke-width="1.5" stroke-dasharray="3,3" style="display:none; pointer-events:none;"/>
+        <circle id="sparkline-dot-rx" r="4" fill="#3b82f6" style="display:none; pointer-events:none;"/>
+        <circle id="sparkline-dot-tx" r="4" fill="#10b981" style="display:none; pointer-events:none;"/>
+      </svg>
+      <div id="sparkline-tooltip" class="sparkline-tooltip" style="display:none;"></div>
+    </div>
   `;
+
+  const crosshair = container.querySelector('#sparkline-crosshair');
+  const dotRx = container.querySelector('#sparkline-dot-rx');
+  const dotTx = container.querySelector('#sparkline-dot-tx');
+  const tooltip = container.querySelector('#sparkline-tooltip');
+
+  if (crosshair && dotRx && dotTx && tooltip) {
+    const handleMove = (e) => {
+      const rect = container.getBoundingClientRect();
+      if (!rect.width) return;
+      const mouseX = e.clientX - rect.left;
+      const clampedX = Math.max(pad.left, Math.min(width - pad.right, (mouseX / rect.width) * width));
+      const frac = (clampedX - pad.left) / (chartW || 1);
+      const nearestIdx = Math.max(0, Math.min(points.length - 1, Math.round(frac * (points.length - 1))));
+      const p = points[nearestIdx];
+      const ptX = getX(nearestIdx);
+      const ptYRx = getY(p.rxBps);
+      const ptYTx = getY(p.txBps);
+
+      crosshair.setAttribute('x1', ptX);
+      crosshair.setAttribute('x2', ptX);
+      crosshair.style.display = 'block';
+
+      dotRx.setAttribute('cx', ptX);
+      dotRx.setAttribute('cy', ptYRx);
+      dotRx.style.display = 'block';
+
+      dotTx.setAttribute('cx', ptX);
+      dotTx.setAttribute('cy', ptYTx);
+      dotTx.style.display = 'block';
+
+      tooltip.style.display = 'block';
+      const tooltipX = Math.min(rect.width - 160, Math.max(10, mouseX - 60));
+      tooltip.style.left = `${tooltipX}px`;
+      tooltip.style.top = '10px';
+      tooltip.innerHTML = `<span style="color:#3b82f6; font-weight:600;">↓ ${formatBps(p.rxBps)}</span> • <span style="color:#10b981; font-weight:600;">↑ ${formatBps(p.txBps)}</span>`;
+    };
+
+    const handleLeave = () => {
+      crosshair.style.display = 'none';
+      dotRx.style.display = 'none';
+      dotTx.style.display = 'none';
+      tooltip.style.display = 'none';
+    };
+
+    container.addEventListener('mousemove', handleMove);
+    container.addEventListener('mouseleave', handleLeave);
+  }
 }

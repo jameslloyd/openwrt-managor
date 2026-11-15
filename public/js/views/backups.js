@@ -140,7 +140,7 @@ export function renderBackups(container) {
               <th>Host Name</th>
               <th>Archive Filename</th>
               <th>Size</th>
-              <th>SHA-256 Checksum</th>
+              <th class="col-sha">SHA-256 Checksum</th>
               <th>Status</th>
               <th style="text-align: right;">Actions</th>
             </tr>
@@ -317,7 +317,7 @@ function renderBackupRow(b) {
       <td>
         <span class="font-mono">${formatBytes(b.sizeBytes || 42000)}</span>
       </td>
-      <td>
+      <td class="col-sha">
         <div style="display: inline-flex; align-items: center; gap: 6px;">
           <code class="font-mono" style="font-size: 11px; background: var(--color-surface-elevated); padding: 2px 5px; border-radius: 4px;">${shortSha}</code>
           <button type="button" class="btn-icon btn-copy-sha" data-sha="${escapeHtml(b.sha256 || '')}" style="width: 24px; height: 24px;" title="Copy SHA-256" aria-label="Copy SHA-256 checksum">
@@ -338,6 +338,9 @@ function renderBackupRow(b) {
           </button>
           <button type="button" class="btn btn-secondary btn-diff-backup" data-backup-id="${escapeHtml(b.id)}" style="height: 28px; padding: 0 10px; font-size: 12px;" title="Compare UCI configuration diff">
             ${renderIcon('diff', 'icon icon-sm')} Diff
+          </button>
+          <button type="button" class="btn-icon btn-copy-sha" data-sha="${escapeHtml(b.sha256 || '')}" style="width: 28px; height: 28px;" title="Copy SHA-256" aria-label="Copy SHA-256 checksum">
+            ${renderIcon('copy', 'icon icon-sm')}
           </button>
           <a href="${api.getBackupDownloadUrl(b.id)}" download class="btn-icon" style="width: 28px; height: 28px; text-decoration: none;" title="Download .tar.gz archive" aria-label="Download backup archive">
             ${renderIcon('download', 'icon icon-sm')}

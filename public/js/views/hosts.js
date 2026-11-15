@@ -187,7 +187,12 @@ export function renderHosts(container) {
 
           <div class="form-group">
             <label class="form-label" for="host-password-input">Password / Token</label>
-            <input type="password" id="host-password-input" class="form-input" placeholder="Router password or ubus token" />
+            <div style="display: flex; gap: 6px;">
+              <input type="password" id="host-password-input" class="form-input" placeholder="Router password or ubus token" style="flex: 1;" />
+              <button type="button" class="btn btn-secondary" id="host-toggle-pass-btn" aria-label="Show password" style="padding: 0 10px;">
+                ${renderIcon('activity', 'icon icon-sm')} <span class="pass-toggle-label">Show</span>
+              </button>
+            </div>
           </div>
 
           <!-- Physical Geolocation (Latitude, Longitude & Altitude for RF Triangulation) -->
@@ -354,6 +359,17 @@ export function renderHosts(container) {
   });
 
   // Attach Live Test Connection Probe
+  const passInput = container.querySelector('#host-password-input');
+  const togglePassBtn = container.querySelector('#host-toggle-pass-btn');
+  togglePassBtn?.addEventListener('click', () => {
+    if (!passInput) return;
+    const isPass = passInput.type === 'password';
+    passInput.type = isPass ? 'text' : 'password';
+    togglePassBtn.setAttribute('aria-label', isPass ? 'Hide password' : 'Show password');
+    const label = togglePassBtn.querySelector('.pass-toggle-label');
+    if (label) label.textContent = isPass ? 'Hide' : 'Show';
+  });
+
   container.querySelector('#host-test-btn')?.addEventListener('click', async () => {
     const feedbackBox = container.querySelector('#host-test-feedback');
     const ip = container.querySelector('#host-ip-input').value;
@@ -443,6 +459,7 @@ export function renderHosts(container) {
         const passInput = document.getElementById('host-password-input');
         passInput.value = '';
         passInput.placeholder = host.hasPassword ? 'Leave blank to keep saved password' : 'Router password or ubus token';
+        resetPasswordVisibility();
         const latInput = document.getElementById('host-latitude-input');
         const lngInput = document.getElementById('host-longitude-input');
         const altInput = document.getElementById('host-altitude-input');
@@ -1056,12 +1073,24 @@ export function openHostUpdatesModal(container, hostId, lastCommandOutput = '') 
   });
 }
 
+function resetPasswordVisibility() {
+  const passInput = document.getElementById('host-password-input');
+  if (passInput) passInput.type = 'password';
+  const togglePassBtn = document.getElementById('host-toggle-pass-btn');
+  if (togglePassBtn) {
+    togglePassBtn.setAttribute('aria-label', 'Show password');
+    const label = togglePassBtn.querySelector('.pass-toggle-label');
+    if (label) label.textContent = 'Show';
+  }
+}
+
 function resetHostForm() {
   const form = document.getElementById('host-form');
   if (!form) return;
   form.reset();
   document.getElementById('host-id-input').value = '';
   document.getElementById('host-modal-title').textContent = 'Add OpenWrt Node';
+  resetPasswordVisibility();
   const fb = document.getElementById('host-test-feedback');
   if (fb) fb.style.display = 'none';
 }

@@ -567,6 +567,94 @@ export class TriangulationMap {
     svgEl?.addEventListener('pointerup', endPanBg);
     svgEl?.addEventListener('pointercancel', endPanBg);
 
+    // Touch pinch-to-zoom & single-finger pan
+    let touchStartX = 0;
+    let touchStartY = 0;
+    let initialPinchDist = null;
+
+    svgEl?.addEventListener('touchstart', (e) => {
+      if (e.target.closest('.triangulation-anchor-node') || e.target.closest('.triangulation-foreign-node')) {
+        return;
+      }
+      if (e.touches.length === 1 && (this.zoom || 1) > 1) {
+        touchStartX = e.touches[0].clientX;
+        touchStartY = e.touches[0].clientY;
+        panStartOriginX = this.panX;
+        panStartOriginY = this.panY;
+      } else if (e.touches.length === 2) {
+        initialPinchDist = Math.hypot(
+          e.touches[0].clientX - e.touches[1].clientX,
+          e.touches[0].clientY - e.touches[1].clientY
+        );
+      }
+    }, { passive: true });
+
+    svgEl?.addEventListener('touchmove', (e) => {
+      if (e.touches.length === 1 && (this.zoom || 1) > 1 && initialPinchDist === null) {
+        const rect = svgEl.getBoundingClientRect();
+        const curVbW = width / (this.zoom || 1);
+        const curVbH = height / (this.zoom || 1);
+        const dxSvg = ((e.touches[0].clientX - touchStartX) / (rect.width || 1)) * curVbW;
+        const dySvg = ((e.touches[0].clientY - touchStartY) / (rect.height || 1)) * curVbH;
+        this.panX = Math.max(0, Math.min(width - curVbW, panStartOriginX - dxSvg));
+        this.panY = Math.max(0, Math.min(height - curVbH, panStartOriginY - dySvg));
+        svgEl.setAttribute('viewBox', `${this.panX.toFixed(1)} ${this.panY.toFixed(1)} ${curVbW.toFixed(1)} ${curVbH.toFixed(1)}`);
+      } else if (e.touches.length === 2 && initialPinchDist) {
+        const dist = Math.hypot(
+          e.touches[0].clientX - e.touches[1].clientX,
+          e.touches[0].clientY - e.touches[1].clientY
+        );
+        const factor = dist / initialPinchDist;
+        if (Math.abs(factor - 1) > 0.08) {
+          const delta = factor > 1 ? 0.25 : -0.25;
+          this.setZoom((this.zoom || 1) + delta);
+          initialPinchDist = dist;
+        }
+      }
+    }, { passive: true });
+
+    svgEl?.addEventListener('touchend', () => {
+      initialPinchDist = null;
+    }, { passive: true });
+
+    // Keyboard Arrow Navigation & Zoom on Map
+    if (svgEl) {
+      svgEl.setAttribute('tabindex', '0');
+      svgEl.setAttribute('role', 'region');
+      svgEl.setAttribute('aria-label', '3D RF Triangulation Radar Map. Use arrow keys to pan, plus/minus to zoom.');
+      svgEl.addEventListener('keydown', (e) => {
+        const curVbW = width / (this.zoom || 1);
+        const curVbH = height / (this.zoom || 1);
+        const panStep = 30;
+        if (e.key === 'ArrowUp') {
+          e.preventDefault();
+          this.panY = Math.max(0, this.panY - panStep);
+          svgEl.setAttribute('viewBox', `${this.panX.toFixed(1)} ${this.panY.toFixed(1)} ${curVbW.toFixed(1)} ${curVbH.toFixed(1)}`);
+        } else if (e.key === 'ArrowDown') {
+          e.preventDefault();
+          this.panY = Math.min(height - curVbH, this.panY + panStep);
+          svgEl.setAttribute('viewBox', `${this.panX.toFixed(1)} ${this.panY.toFixed(1)} ${curVbW.toFixed(1)} ${curVbH.toFixed(1)}`);
+        } else if (e.key === 'ArrowLeft') {
+          e.preventDefault();
+          this.panX = Math.max(0, this.panX - panStep);
+          svgEl.setAttribute('viewBox', `${this.panX.toFixed(1)} ${this.panY.toFixed(1)} ${curVbW.toFixed(1)} ${curVbH.toFixed(1)}`);
+        } else if (e.key === 'ArrowRight') {
+          e.preventDefault();
+          this.panX = Math.min(width - curVbW, this.panX + panStep);
+          svgEl.setAttribute('viewBox', `${this.panX.toFixed(1)} ${this.panY.toFixed(1)} ${curVbW.toFixed(1)} ${curVbH.toFixed(1)}`);
+        } else if (e.key === '+' || e.key === '=') {
+          e.preventDefault();
+          this.setZoom((this.zoom || 1) + 0.25);
+        } else if (e.key === '-' || e.key === '_') {
+          e.preventDefault();
+          this.setZoom((this.zoom || 1) - 0.25);
+        } else if (e.key === '0' || e.key === ' ') {
+          e.preventDefault();
+          this.setZoom(1);
+        }
+      });
+    }
+
     // Attach click + keyboard selection for foreign AP markers
     this.container.querySelectorAll('.triangulation-foreign-node').forEach((node) => {
       const bssid = node.getAttribute('data-bssid');

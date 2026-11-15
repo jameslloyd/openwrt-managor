@@ -55,6 +55,16 @@ export function renderClients(container) {
 
   tableInstance = new DataTable({
     container: mount,
+    emptyState: `
+      <div class="empty-state">
+        <div class="empty-state-icon">${renderIcon('search', 'icon')}</div>
+        <div class="empty-state-title">No Matching Clients Found</div>
+        <div class="empty-state-desc">No network clients matched your search term or connection filter.</div>
+        <button type="button" class="btn btn-secondary" id="clients-clear-filters-btn" style="margin-top: 8px;">
+          Clear Search &amp; Filters
+        </button>
+      </div>
+    `,
     columns: [
       {
         key: 'hostname',
@@ -192,6 +202,19 @@ export function renderClients(container) {
   // Export CSV
   container.querySelector('#clients-export-csv')?.addEventListener('click', () => {
     exportClientsCsv(getFilteredClients());
+  });
+
+  // Clear filters button in custom empty state
+  container.addEventListener('click', (e) => {
+    if (e.target.closest('#clients-clear-filters-btn')) {
+      currentSearchQuery = '';
+      currentFilterType = 'all';
+      const input = container.querySelector('#client-search-input');
+      if (input) input.value = '';
+      const chips = container.querySelectorAll('.chip-btn');
+      chips.forEach(c => c.classList.toggle('active', c.getAttribute('data-filter') === 'all'));
+      tableInstance.setRows(getFilteredClients());
+    }
   });
 }
 

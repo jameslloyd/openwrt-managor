@@ -84,13 +84,15 @@ export class DataTable {
     `;
 
     for (const col of this.columns) {
+      let sortAttrs = '';
       let sortIcon = '';
       if (col.sortable) {
-        if (this.sortKey === col.key) {
-          sortIcon = this.sortAsc ? ' ↑' : ' ↓';
-        }
+        const currentSort = this.sortKey === col.key;
+        const sortDirection = currentSort ? (this.sortAsc ? 'ascending' : 'descending') : 'none';
+        sortAttrs = `tabindex="0" role="columnheader" aria-sort="${sortDirection}"`;
+        sortIcon = currentSort ? (this.sortAsc ? ' ↑' : ' ↓') : ' ↕';
       }
-      html += `<th scope="col" data-key="${col.key}" class="${col.sortable ? 'sortable' : ''}">${col.label}${sortIcon}</th>`;
+      html += `<th scope="col" data-key="${col.key}" class="${col.sortable ? 'sortable' : ''}" ${sortAttrs}>${col.label}${sortIcon}</th>`;
     }
 
     html += `
@@ -99,9 +101,11 @@ export class DataTable {
           <tbody>
     `;
 
+    const hasRowClick = Boolean(this.onRowClick);
     for (let idx = 0; idx < pageRows.length; idx++) {
       const row = pageRows[idx];
-      html += `<tr data-index="${start + idx}">`;
+      const rowAttrs = hasRowClick ? `tabindex="0" role="button" aria-label="Select row ${start + idx + 1}"` : '';
+      html += `<tr data-index="${start + idx}" ${rowAttrs}>`;
       for (const col of this.columns) {
         const val = col.render ? col.render(row) : (row[col.key] ?? '');
         html += `<td>${val}</td>`;
@@ -128,19 +132,33 @@ export class DataTable {
     // Attach Event Listeners
     const ths = this.container.querySelectorAll('th.sortable');
     ths.forEach(th => {
-      th.addEventListener('click', () => {
+      const handleSort = () => {
         const key = th.getAttribute('data-key');
         if (key) this.sort(key);
+      };
+      th.addEventListener('click', handleSort);
+      th.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          handleSort();
+        }
       });
     });
 
     if (this.onRowClick) {
       const trs = this.container.querySelectorAll('tbody tr');
       trs.forEach(tr => {
-        tr.addEventListener('click', () => {
+        const activateRow = () => {
           const index = parseInt(tr.getAttribute('data-index'), 10);
           if (!isNaN(index) && sorted[index]) {
             this.onRowClick(sorted[index]);
+          }
+        };
+        tr.addEventListener('click', activateRow);
+        tr.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            activateRow();
           }
         });
       });

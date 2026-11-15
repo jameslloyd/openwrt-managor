@@ -14,6 +14,7 @@ import { renderBackups } from './views/backups.js';
 import { renderHosts, openHostUpdatesModal } from './views/hosts.js';
 import { renderSettings } from './views/settings.js';
 import { toast } from './components/toast.js';
+import { confirmAction, openModal, closeModal } from './components/modal.js';
 import { renderIcon } from './utils/icons.js';
 import { escapeHtml } from './utils/formatters.js';
 
@@ -88,11 +89,32 @@ function updateTopBarAndFooter(state) {
     `;
   }
 
-  // Top Bar Mode Pill
+  // Top Bar Mode Pill (P1-2)
   const modePill = document.getElementById('topbar-mode-pill');
   if (modePill) {
-    modePill.className = 'mode-pill';
-    modePill.textContent = 'TrueNAS Live Mode';
+    const isDemo = Boolean(health?.demoMode);
+    modePill.className = `mode-pill ${isDemo ? 'demo' : ''}`;
+    modePill.setAttribute('role', 'button');
+    modePill.setAttribute('tabindex', '0');
+    modePill.setAttribute('aria-label', `Mode: ${isDemo ? 'Demo Mode' : 'TrueNAS Live Mode'}. Click to toggle.`);
+    modePill.innerHTML = `
+      <span class="status-dot ${isDemo ? 'warning' : 'online'}"></span>
+      ${isDemo ? 'Demo Mode (Simulated)' : 'TrueNAS Live Mode'}
+    `;
+  }
+
+  // Top Bar Storage Mount Meter (P1-3)
+  const storageFill = document.getElementById('topbar-storage-bar-fill');
+  const storageText = document.getElementById('topbar-storage-status-text');
+  const storageMeter = document.getElementById('topbar-storage-meter');
+  const storage = health?.storage;
+  if (storageMeter && storageFill && storage) {
+    const usedPct = storage.usedPct ?? 25;
+    storageFill.style.width = `${Math.min(100, Math.max(2, usedPct))}%`;
+    storageMeter.setAttribute('aria-valuenow', usedPct);
+    if (storageText) {
+      storageText.textContent = storage.freeGb ? `${storage.freeGb} GB Free` : 'ZFS Healthy';
+    }
   }
 
   // Footer Status
@@ -133,6 +155,11 @@ function updateTopBarAndFooter(state) {
 
 function setupKeyboardShortcuts() {
   window.addEventListener('keydown', (e) => {
+    // If modal dialog, drawer, or mobile menu is open, suppress global shortcuts
+    if (document.querySelector('dialog[open]') || document.querySelector('.inspector-drawer.open') || document.querySelector('.sidebar.mobile-open')) {
+      return;
+    }
+
     // If typing in an input, textarea, or select, ignore global shortcuts
     const tag = document.activeElement?.tagName;
     if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') {
@@ -156,11 +183,26 @@ function setupKeyboardShortcuts() {
       navigateTo('wifi');
     } else if (e.key === '5') {
       navigateTo('backups');
+    } else if (e.key === '6') {
+      navigateTo('hosts');
+    } else if (e.key === '7') {
+      navigateTo('settings');
+    } else if (e.key === '?') {
+      e.preventDefault();
+      openShortcutsHelp();
     } else if (e.key.toLowerCase() === 'r') {
       store.poll();
       toast.info('Refreshing', 'Polling OpenWrt routers...');
     }
   });
+}
+
+function openShortcutsHelp() {
+  const dialog = document.getElementById('shortcuts-help-dialog');
+  const triggerBtn = document.getElementById('open-shortcuts-help-btn');
+  if (dialog) {
+    openModal(dialog, triggerBtn);
+  }
 }
 
 const notifiedCompletedJobIds = new Set();
@@ -334,6 +376,72 @@ function initApp() {
       toast.error('Backup Error', err.message);
     }
   });
+
+  // Mobile Drawer Navigation (P0-1)
+  const mobileMenuToggle = document.getElementById('mobile-menu-toggle');
+  const sidebar = document.getElementById('sidebar') || document.querySelector('.sidebar');
+  const sidebarBackdrop = document.getElementById('sidebar-backdrop');
+
+  const closeMobileMenu = () => {
+    if (sidebar) sidebar.classList.remove('mobile-open');
+    if (sidebarBackdrop) sidebarBackdrop.style.display = 'none';
+    if (mobileMenuToggle) mobileMenuToggle.setAttribute('aria-expanded', 'false');
+  };
+
+  const toggleMobileMenu = () => {
+    if (!sidebar) return;
+    const isOpen = sidebar.classList.toggle('mobile-open');
+    if (sidebarBackdrop) sidebarBackdrop.style.display = isOpen ? 'block' : 'none';
+    if (mobileMenuToggle) mobileMenuToggle.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+  };
+
+  mobileMenuToggle?.addEventListener('click', toggleMobileMenu);
+  sidebarBackdrop?.addEventListener('click', closeMobileMenu);
+
+  sidebar?.querySelectorAll('.nav-link').forEach(link => {
+    link.addEventListener('click', closeMobileMenu);
+  });
+
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && sidebar?.classList.contains('mobile-open')) {
+      closeMobileMenu();
+    }
+  });
+
+  // Topbar Demo Mode Switcher (P1-2)
+  const modePill = document.getElementById('topbar-mode-pill');
+  const toggleDemoMode = async () => {
+    const isDemo = Boolean(store.state.health?.demoMode);
+    const confirmed = await confirmAction({
+      title: isDemo ? 'Switch to TrueNAS Live Mode?' : 'Switch to Demo Mode?',
+      message: isDemo
+        ? 'Switching to Live Mode will query your real configured OpenWrt routers. Simulated nodes and traffic will be replaced.'
+        : 'Switching to Demo Mode will load a realistic 3-node simulated topology with 24 clients for demonstration and offline testing.',
+      confirmLabel: isDemo ? 'Switch to Live Mode' : 'Load Demo Environment',
+      isDestructive: false
+    });
+    if (confirmed) {
+      try {
+        await api.configureSimulator({ enabled: !isDemo });
+        toast.success('Mode Switched', `Active environment: ${!isDemo ? 'Demo Mode' : 'TrueNAS Live Mode'}`);
+        await store.poll(true);
+      } catch (err) {
+        toast.error('Mode Switch Failed', err.message);
+      }
+    }
+  };
+  modePill?.addEventListener('click', toggleDemoMode);
+  modePill?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      toggleDemoMode();
+    }
+  });
+
+  // Shortcuts Help Dialog (P2-2)
+  document.getElementById('open-shortcuts-help-btn')?.addEventListener('click', openShortcutsHelp);
+  document.getElementById('shortcuts-help-close-btn')?.addEventListener('click', () => closeModal('shortcuts-help-dialog'));
+  document.getElementById('shortcuts-help-ok-btn')?.addEventListener('click', () => closeModal('shortcuts-help-dialog'));
 
   // Initial Route Dispatch and start background polling
   dispatchView();
