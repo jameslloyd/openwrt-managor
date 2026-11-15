@@ -154,7 +154,7 @@ export function renderHosts(container) {
             <input type="text" id="host-name-input" class="form-input" placeholder="e.g. Living Room AP" required />
           </div>
 
-          <div style="display: grid; grid-template-columns: 2fr 1fr; gap: 12px;">
+          <div class="form-row-ip-role">
             <div class="form-group">
               <label class="form-label" for="host-ip-input">Router IP Address or FQDN</label>
               <input type="text" id="host-ip-input" class="form-input font-mono" placeholder="192.168.1.1" required />
@@ -170,7 +170,7 @@ export function renderHosts(container) {
             </div>
           </div>
 
-          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+          <div class="form-row-2col">
             <div class="form-group">
               <label class="form-label" for="host-protocol-select">Connection Protocol</label>
               <select id="host-protocol-select" class="form-select">
@@ -208,7 +208,7 @@ export function renderHosts(container) {
                 ${renderIcon('globe', 'icon')} Use Browser GPS
               </button>
             </div>
-            <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px;">
+            <div class="form-row-3col">
               <div class="form-group" style="margin-bottom: 0;">
                 <label class="form-label" for="host-latitude-input" style="font-size: 11.5px;">Latitude (°)</label>
                 <input type="number" step="any" min="-90" max="90" id="host-latitude-input" class="form-input font-mono" placeholder="e.g. 51.507351" />

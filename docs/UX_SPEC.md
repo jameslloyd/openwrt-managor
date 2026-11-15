@@ -665,11 +665,16 @@ Color is **never** used as the sole conveyor of information:
 |    * Spectrum charts switch to single-band tabs with horizontal swipe                                |
 |    * Backups table hides SHA-256 column (accessible via row expansion)                               |
 |                                                                                                      |
-| 4. Mobile Devices (375px - 767px):                                                                   |
-|    * Bottom navigation bar for primary tabs: [Overview] [Topology] [Clients] [WiFi] [Backups]        |
+| 4. Mobile Devices (320px - 767px):                                                                   |
+|    * Sticky bottom navigation bar with thumb-zone tabs: [Overview] [Topology] [Wi-Fi] [Clients] [Fleet]|
+|    * Off-canvas hamburger menu drawer for secondary views and full fleet list                        |
+|    * Centered modals convert to slide-up bottom sheets with stacked full-width 44px action buttons   |
+|    * Form inputs enforce >= 16px font-size to prevent iOS Safari automatic viewport zoom             |
+|    * Multi-column form grids (Lat/Long/Alt, IP/Role) collapse to single column                       |
+|    * Filter chips convert to single-row touch-scrollable horizontal swipe strips                     |
+|    * SVG Topology and 3D Radar canvases enforce touch-action: none for interference-free touch pan   |
 |    * Single-column stacked KPI cards                                                                 |
-|    * Clients table converts to touch-friendly card list with expandable details                      |
-|    * Topology canvas displays simplified hierarchy with pinch-zoom support                           |
+|    * Backups table hides SHA-256 column; UCI config diff viewer compacts line numbers                |
 +------------------------------------------------------------------------------------------------------+
 ```
 

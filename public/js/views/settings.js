@@ -43,7 +43,7 @@ export function renderSettings(container) {
           </span>
         </div>
 
-        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px;">
+        <div class="form-row-2col" style="margin-top: 12px;">
           <div class="form-group">
             <label class="form-label" for="agent-api-auth-select">Authentication Mode</label>
             <select class="form-select" id="agent-api-auth-select">
@@ -170,7 +170,7 @@ export function renderSettings(container) {
       <!-- TrueNAS Volume & Retention Settings -->
       <div class="chart-card">
         <h2 style="font-size: 15px; font-weight: 600; margin-bottom: 12px;">TrueNAS Backup &amp; Storage Retention</h2>
-        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+        <div class="form-row-2col">
           <div class="form-group">
             <label class="form-label">Persistent Data Directory</label>
             <input type="text" class="form-input font-mono" value="${escapeHtml(health?.storage?.dataDir || '/data')}" readonly />
@@ -181,7 +181,7 @@ export function renderSettings(container) {
           </div>
         </div>
 
-        <div style="margin-top: 14px; display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+        <div class="form-row-2col" style="margin-top: 14px;">
           <div class="form-group">
             <label class="form-label" for="settings-max-archives">Max Archives Per Host</label>
             <input type="number" id="settings-max-archives" class="form-input" min="2" max="100" value="${settings?.retention?.maxBackupsPerHost || 10}" />

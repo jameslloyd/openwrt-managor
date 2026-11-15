@@ -47,6 +47,7 @@
   overflow: hidden;
   cursor: grab;
   user-select: none;
+  touch-action: none !important;
   background-image: radial-gradient(var(--color-border-subtle) 1px, transparent 1px);
   background-size: 24px 24px;
 }
@@ -61,6 +62,7 @@
   position: absolute;
   top: 0;
   left: 0;
+  touch-action: none !important;
 }
 
 /* Link Visual Styles */
@@ -227,3 +229,40 @@
 .legend-line.speed-1g   { background-color: var(--color-link-1g); }
 .legend-line.speed-100m { background-color: var(--color-link-100m); border-top: 1px dashed; }
 .legend-line.mesh       { background-color: var(--color-link-mesh); border-top: 1px dashed; }
+
+@media (max-width: 767px) {
+  .topology-wrapper {
+    height: 390px !important;
+    min-height: 350px !important;
+  }
+
+  .topology-toolbar {
+    padding: 8px 10px;
+    gap: 8px;
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .topology-controls {
+    justify-content: space-between;
+    width: 100%;
+  }
+
+  .topology-filters {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .topology-legend {
+    position: static !important;
+    width: 100% !important;
+    border-radius: 0 !important;
+    border-left: none !important;
+    border-right: none !important;
+    border-bottom: none !important;
+    padding: 6px 10px !important;
+    font-size: 10px !important;
+    gap: 8px !important;
+    justify-content: flex-start !important;
+  }
+}

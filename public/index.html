@@ -144,13 +144,14 @@
       </div>
 
       <div class="topbar-right">
-        <button type="button" class="btn btn-primary" id="topbar-backup-all-btn">
-          <svg style="width:14px;height:14px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-          Backup All
+        <button type="button" class="btn btn-primary" id="topbar-backup-all-btn" aria-label="Backup All Routers">
+          <svg style="width:14px;height:14px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          <span class="btn-label">Backup All</span>
         </button>
 
-        <a href="#/hosts" class="btn btn-secondary" style="text-decoration:none;">
-          + Add Host
+        <a href="#/hosts" class="btn btn-secondary" style="text-decoration:none;" aria-label="Add OpenWrt Host">
+          <span class="btn-label">+ Add Host</span>
+          <span class="icon-only" aria-hidden="true" style="display:none; font-weight:700;">+</span>
         </a>
 
         <button type="button" class="btn btn-ghost" id="open-shortcuts-help-btn" title="Keyboard Shortcuts (?)" aria-label="View Keyboard Shortcuts" style="font-size: 12px; padding: 4px 8px;">
@@ -185,6 +186,46 @@
         <span>v1.0.0</span>
       </div>
     </footer>
+
+    <!-- Sticky Mobile Bottom Navigation Bar (WCAG 2.5.5 / Thumb Zone Ergonomics) -->
+    <nav class="mobile-bottom-nav" id="mobile-bottom-nav" aria-label="Mobile Bottom Navigation">
+      <a href="#/dashboard" class="mobile-nav-item active" data-route="dashboard" aria-label="Overview Dashboard">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/>
+        </svg>
+        <span>Overview</span>
+      </a>
+
+      <a href="#/topology" class="mobile-nav-item" data-route="topology" aria-label="Network Topology">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/>
+          <line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/>
+        </svg>
+        <span>Topology</span>
+      </a>
+
+      <a href="#/wifi" class="mobile-nav-item" data-route="wifi" aria-label="WiFi Spectrum &amp; Radar">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><line x1="12" y1="20" x2="12.01" y2="20"/>
+        </svg>
+        <span>Wi-Fi</span>
+      </a>
+
+      <a href="#/clients" class="mobile-nav-item" data-route="clients" aria-label="Network Clients">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/>
+          <line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/>
+        </svg>
+        <span>Clients</span>
+      </a>
+
+      <a href="#/hosts" class="mobile-nav-item" data-route="hosts" aria-label="OpenWrt Fleet">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect x="2" y="14" width="20" height="8" rx="2"/><path d="M6 18h.01"/><path d="M10 18h.01"/><path d="M15 10v4"/><path d="M9 10v4"/><path d="M12 2v8"/>
+        </svg>
+        <span>Fleet</span>
+      </a>
+    </nav>
   </div>
 
   <!-- Contextual Slide-Out Inspector Drawer -->

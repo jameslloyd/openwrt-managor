@@ -634,6 +634,11 @@ a:focus-visible {
   backdrop-filter: blur(2px);
 }
 
+/* Mobile Bottom Navigation Bar (M-NAV-1) */
+.mobile-bottom-nav {
+  display: none;
+}
+
 @media (max-width: 767px) {
   .app-shell {
     grid-template-areas:
@@ -644,6 +649,10 @@ a:focus-visible {
   }
   .mobile-menu-btn {
     display: inline-flex;
+    min-width: 44px;
+    min-height: 44px;
+    align-items: center;
+    justify-content: center;
   }
   .sidebar {
     display: flex !important;
@@ -671,10 +680,133 @@ a:focus-visible {
     justify-content: flex-start;
     padding: 10px 14px;
   }
+
+  /* Topbar Mobile Density & Touch Targets (M-BAR-1) */
   .topbar {
-    padding: 0 var(--space-3);
+    height: 54px;
+    padding: 0 12px;
+    gap: 8px;
   }
+
+  .topbar .btn-icon {
+    min-width: 44px;
+    min-height: 44px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .topbar-center,
+  #topbar-storage-meter,
+  #open-shortcuts-help-btn {
+    display: none !important;
+  }
+
+  #topbar-status-pill,
+  #topbar-mode-pill {
+    font-size: 11px;
+    padding: 3px 8px;
+  }
+
+  #topbar-backup-all-btn {
+    padding: 6px 10px;
+    font-size: 12px;
+  }
+
   .main-content {
     padding: var(--space-4);
+    padding-bottom: calc(72px + env(safe-area-inset-bottom, 0px)) !important;
+  }
+
+  /* Sticky Mobile Bottom Navigation Bar (M-NAV-1) */
+  .mobile-bottom-nav {
+    display: flex;
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 56px;
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+    background-color: var(--color-surface);
+    border-top: 1px solid var(--color-border);
+    z-index: var(--z-topbar);
+    justify-content: space-around;
+    align-items: center;
+    box-shadow: 0 -2px 10px rgba(0, 0, 0, 0.15);
+  }
+
+  .mobile-nav-item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+    flex: 1;
+    height: 100%;
+    color: var(--color-text-muted);
+    text-decoration: none;
+    font-size: 10.5px;
+    font-weight: 500;
+    transition: color var(--transition-fast);
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  .mobile-nav-item svg {
+    width: 20px;
+    height: 20px;
+  }
+
+  .mobile-nav-item:hover {
+    color: var(--color-text-primary);
+  }
+
+  .mobile-nav-item.active {
+    color: var(--color-primary);
+    font-weight: 700;
+  }
+
+  /* System Footer Mobile Stacking (M-FTR-1) */
+  .footer {
+    height: auto;
+    padding: 8px 12px;
+    justify-content: center;
+    text-align: center;
+  }
+
+  .footer-right {
+    display: none !important;
+  }
+
+  .footer-left {
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 6px;
+    font-size: 11px;
+  }
+}
+
+@media (max-width: 480px) {
+  #topbar-backup-all-btn span.btn-label,
+  .topbar a[href="#/hosts"] span.btn-label {
+    display: none;
+  }
+
+  #topbar-backup-all-btn,
+  .topbar a[href="#/hosts"] {
+    min-width: 40px;
+    min-height: 40px;
+    padding: 0 8px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: var(--radius-md);
+  }
+
+  .topbar a[href="#/hosts"] span.icon-only {
+    display: inline !important;
+  }
+
+  #topbar-status-pill span.status-text {
+    display: none;
   }
 }

@@ -436,6 +436,7 @@
 .triangulation-viewport {
   position: relative;
   width: 100%;
+  touch-action: none !important;
 }
 
 .triangulation-map-toolbar {
@@ -525,7 +526,7 @@
 
 .triangulation-anchor-node {
   cursor: grab;
-  touch-action: pan-y;
+  touch-action: none !important;
 }
 
 .triangulation-anchor-node:active {
@@ -547,6 +548,39 @@
 
 .selected-neighbor-row {
   background-color: var(--color-surface-hover);
+}
+
+@media (max-width: 767px) {
+  .triangulation-card-wrapper {
+    height: 380px !important;
+  }
+
+  .triangulation-viewport {
+    height: 340px !important;
+  }
+
+  .triangulation-map-toolbar {
+    padding: 4px 6px;
+    gap: 4px;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    max-width: 100%;
+    left: 10px;
+    top: 8px;
+  }
+
+  .triangulation-toolbar-btn {
+    padding: 4px 8px;
+    font-size: 11px;
+    min-height: 32px;
+  }
+
+  .triangulation-Inspector-bar {
+    padding: 8px 10px !important;
+    gap: 6px !important;
+    flex-direction: column !important;
+    align-items: flex-start !important;
+  }
 }
 
 

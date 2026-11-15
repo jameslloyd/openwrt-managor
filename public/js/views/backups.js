@@ -375,7 +375,7 @@ function renderBackupModals(activeSched = {}, retentionCount = 14) {
       </div>
       <div class="modal-body" style="gap: 16px;">
         <div style="font-size: 12.5px; color: var(--color-text-secondary);" id="inspector-backup-meta"></div>
-        <div style="display: grid; grid-template-columns: 200px 1fr; gap: 12px; height: 400px; border: 1px solid var(--color-border); border-radius: var(--radius-md); overflow: hidden;">
+        <div class="split-pane-files">
           <div id="inspector-files-list" style="overflow-y: auto; background: var(--color-surface-elevated); padding: 8px; border-right: 1px solid var(--color-border); display: flex; flex-direction: column; gap: 4px;"></div>
           <div id="inspector-file-preview" style="overflow-y: auto; padding: 12px; font-family: var(--font-mono); font-size: 12px; white-space: pre-wrap; background: var(--color-canvas);">
             Select a configuration file on the left to inspect its contents.

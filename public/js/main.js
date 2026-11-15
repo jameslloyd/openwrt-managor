@@ -60,6 +60,18 @@ function dispatchView() {
     }
   });
 
+  // Synchronize mobile bottom nav active state (M-NAV-1)
+  document.querySelectorAll('.mobile-nav-item').forEach(link => {
+    const linkRoute = link.getAttribute('data-route');
+    if (linkRoute === route || (linkRoute === 'dashboard' && route === 'overview')) {
+      link.classList.add('active');
+      link.setAttribute('aria-current', 'page');
+    } else {
+      link.classList.remove('active');
+      link.removeAttribute('aria-current');
+    }
+  });
+
   // Render view
   try {
     handler(mainContent);
