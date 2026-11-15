@@ -16,6 +16,14 @@ let triangulationMapInstance = null;
 let activeBand = '5GHz';
 let selectedNeighborBssid = null;
 let isScanning = false;
+let triangulationSizeMode = (() => {
+  try {
+    return localStorage.getItem('triangulation-map-size') || 'standard';
+  } catch {
+    return 'standard';
+  }
+})();
+let escKeyHandler = null;
 
 function getWirelessAnchors(bandData = {}, allBands = {}, hosts = []) {
   const rawAnchors = Array.isArray(bandData?.anchors) ? bandData.anchors : [];
@@ -129,7 +137,7 @@ export function renderWifi(container) {
       </div>
 
       <!-- Foreign AP RF Triangulation & Spatial Radar Map -->
-      <div class="spectrum-chart-wrapper">
+      <div class="spectrum-chart-wrapper triangulation-card-wrapper ${triangulationSizeMode === 'large' ? 'size-large' : triangulationSizeMode === 'fullscreen' ? 'is-fullscreen' : ''}" id="wifi-triangulation-card">
         <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; flex-wrap: wrap; gap: 8px;">
           <div>
             <h2 style="font-size: 15px; font-weight: 600;" id="wifi-triangulation-heading">Foreign AP RF Triangulation &amp; Spatial Map (${activeBand})</h2>
@@ -137,7 +145,17 @@ export function renderWifi(container) {
               Triangulates approximate foreign AP locations from multi-AP RSSI path-loss rings • Drag your blue OpenWrt AP nodes to match your physical layout
             </span>
           </div>
-          <span class="status-pill info">Log-Distance Path Loss + Weighted Least Squares</span>
+          <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
+            <span class="status-pill info">Log-Distance Path Loss + Weighted Least Squares</span>
+            <button type="button" class="btn btn-secondary btn-sm" id="wifi-tri-expand-btn" style="padding: 4px 10px; font-size: 12px;">
+              ${renderIcon(triangulationSizeMode === 'large' ? 'minimize' : 'maximize', 'icon')}
+              <span>${triangulationSizeMode === 'large' ? 'Standard Size' : 'Large Map'}</span>
+            </button>
+            <button type="button" class="btn btn-secondary btn-sm" id="wifi-tri-fullscreen-btn" style="padding: 4px 10px; font-size: 12px;">
+              ${renderIcon(triangulationSizeMode === 'fullscreen' ? 'minimize' : 'fitScreen', 'icon')}
+              <span>${triangulationSizeMode === 'fullscreen' ? 'Exit Full Screen' : 'Full Screen'}</span>
+            </button>
+          </div>
         </div>
         <div id="wifi-triangulation-map-mount"></div>
       </div>
@@ -197,10 +215,43 @@ export function renderWifi(container) {
   });
 
   // Instantiate Foreign AP RF Triangulation Map
+  const triCard = container.querySelector('#wifi-triangulation-card');
+  const triExpandBtn = container.querySelector('#wifi-tri-expand-btn');
+  const triFullscreenBtn = container.querySelector('#wifi-tri-fullscreen-btn');
+
+  const syncTriCardSizeUi = (mode) => {
+    triangulationSizeMode = mode || 'standard';
+    if (triangulationSizeMode !== 'fullscreen') {
+      try {
+        localStorage.setItem('triangulation-map-size', triangulationSizeMode);
+      } catch {}
+    }
+    if (triCard) {
+      triCard.classList.toggle('size-large', triangulationSizeMode === 'large');
+      triCard.classList.toggle('is-fullscreen', triangulationSizeMode === 'fullscreen');
+    }
+    if (triExpandBtn) {
+      triExpandBtn.innerHTML = `
+        ${renderIcon(triangulationSizeMode === 'large' ? 'minimize' : 'maximize', 'icon')}
+        <span>${triangulationSizeMode === 'large' ? 'Standard Size' : 'Large Map'}</span>
+      `;
+    }
+    if (triFullscreenBtn) {
+      triFullscreenBtn.innerHTML = `
+        ${renderIcon(triangulationSizeMode === 'fullscreen' ? 'minimize' : 'fitScreen', 'icon')}
+        <span>${triangulationSizeMode === 'fullscreen' ? 'Exit Full Screen' : 'Full Screen'}</span>
+      `;
+    }
+  };
+
   const triMount = container.querySelector('#wifi-triangulation-map-mount');
   triangulationMapInstance = new TriangulationMap({
     container: triMount,
     band: activeBand,
+    sizeMode: triangulationSizeMode,
+    onSizeModeChange: (newMode) => {
+      syncTriCardSizeUi(newMode);
+    },
     onSelectNeighbor: (bssid) => {
       selectedNeighborBssid = bssid;
       const allBands = store.state.wifiChannels?.bands || {};
@@ -236,6 +287,26 @@ export function renderWifi(container) {
       }
     },
   });
+
+  triExpandBtn?.addEventListener('click', () => {
+    const nextMode = triangulationSizeMode === 'large' ? 'standard' : 'large';
+    triangulationMapInstance.setSizeMode(nextMode);
+  });
+
+  triFullscreenBtn?.addEventListener('click', () => {
+    const nextMode = triangulationSizeMode === 'fullscreen' ? 'standard' : 'fullscreen';
+    triangulationMapInstance.setSizeMode(nextMode);
+  });
+
+  if (escKeyHandler) {
+    window.removeEventListener('keydown', escKeyHandler);
+  }
+  escKeyHandler = (e) => {
+    if (e.key === 'Escape' && triangulationSizeMode === 'fullscreen' && triangulationMapInstance) {
+      triangulationMapInstance.setSizeMode('standard');
+    }
+  };
+  window.addEventListener('keydown', escKeyHandler);
 
   triangulationMapInstance.setData({
     anchors: getWirelessAnchors(currentBandData, bands, store.state.hosts),

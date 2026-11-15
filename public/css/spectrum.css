@@ -391,11 +391,115 @@
 }
 
 /* Foreign AP RF Triangulation Spatial Map */
+.triangulation-card-wrapper {
+  transition: all var(--transition-fast);
+}
+
+.triangulation-card-wrapper.size-large .triangulation-map-svg {
+  min-height: 620px;
+  max-height: 780px;
+}
+
+.triangulation-card-wrapper.is-fullscreen {
+  position: fixed;
+  inset: 16px;
+  z-index: 1100;
+  display: flex;
+  flex-direction: column;
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-primary);
+  box-shadow: var(--shadow-lg), 0 0 0 9999px rgba(0, 0, 0, 0.65);
+  overflow: hidden;
+}
+
+.triangulation-card-wrapper.is-fullscreen #wifi-triangulation-map-mount {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.triangulation-card-wrapper.is-fullscreen .triangulation-viewport {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.triangulation-card-wrapper.is-fullscreen .triangulation-map-svg {
+  flex: 1;
+  height: 100%;
+  min-height: 480px;
+  max-height: calc(100vh - 210px);
+}
+
+.triangulation-viewport {
+  position: relative;
+  width: 100%;
+}
+
+.triangulation-map-toolbar {
+  position: absolute;
+  top: 14px;
+  left: 58px;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background-color: var(--color-surface-elevated);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 3px;
+  box-shadow: var(--shadow-sm);
+  opacity: 0.94;
+}
+
+.triangulation-toolbar-btn {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  padding: 4px 8px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  transition: all var(--transition-fast);
+}
+
+.triangulation-toolbar-btn:hover {
+  background-color: var(--color-surface-hover);
+  border-color: var(--color-border);
+}
+
+.triangulation-toolbar-btn.active {
+  background-color: var(--color-primary);
+  color: #ffffff;
+}
+
 .triangulation-map-svg {
   width: 100%;
   height: auto;
-  max-height: 430px;
+  min-height: 460px;
+  max-height: 540px;
   display: block;
+  user-select: none;
+}
+
+.triangulation-map-svg.is-panning {
+  cursor: grabbing;
+}
+
+.triangulation-map-svg.is-zoomed {
+  cursor: grab;
+}
+
+.triangulation-map-svg.is-zoomed.is-panning {
+  cursor: grabbing;
 }
 
 .triangulation-grid-line {

@@ -6,17 +6,69 @@
  */
 
 import { escapeHtml, resolveClientSideVendor } from '../utils/formatters.js';
+import { renderIcon } from '../utils/icons.js';
 
 export class TriangulationMap {
-  constructor({ container, band = '5GHz', onAnchorMove = null, onSelectNeighbor = null }) {
+  constructor({
+    container,
+    band = '5GHz',
+    sizeMode = 'standard',
+    onAnchorMove = null,
+    onSelectNeighbor = null,
+    onSizeModeChange = null,
+  }) {
     this.container = typeof container === 'string' ? document.querySelector(container) : container;
     this.band = band;
+    this.sizeMode = sizeMode;
     this.onAnchorMove = onAnchorMove;
     this.onSelectNeighbor = onSelectNeighbor;
+    this.onSizeModeChange = onSizeModeChange;
     this.anchors = [];
     this.neighbors = [];
     this.selectedBssid = null;
     this.draggingHostId = null;
+    this.zoom = 1;
+    this.panX = 0;
+    this.panY = 0;
+  }
+
+  setSizeMode(mode) {
+    this.sizeMode = mode || 'standard';
+    this.render();
+    if (this.onSizeModeChange) {
+      this.onSizeModeChange(this.sizeMode);
+    }
+  }
+
+  setZoom(nextZoom, centerSvgX = null, centerSvgY = null) {
+    const prevZoom = this.zoom || 1;
+    const clamped = Math.round(Math.max(1, Math.min(3.5, nextZoom)) * 100) / 100;
+    if (clamped === 1) {
+      this.zoom = 1;
+      this.panX = 0;
+      this.panY = 0;
+      this.render();
+      return;
+    }
+
+    const { width, height } = this.getDimensions();
+    const cx = centerSvgX !== null ? centerSvgX : this.panX + width / prevZoom / 2;
+    const cy = centerSvgY !== null ? centerSvgY : this.panY + height / prevZoom / 2;
+    const newVbW = width / clamped;
+    const newVbH = height / clamped;
+
+    this.zoom = clamped;
+    this.panX = Math.max(0, Math.min(width - newVbW, cx - newVbW / 2));
+    this.panY = Math.max(0, Math.min(height - newVbH, cy - newVbH / 2));
+    this.render();
+  }
+
+  getDimensions() {
+    const isExpanded = this.sizeMode === 'large' || this.sizeMode === 'fullscreen';
+    return {
+      width: isExpanded ? 960 : 880,
+      height: isExpanded ? 640 : 490,
+    };
   }
 
   setData({ anchors = [], neighbors = [], selectedBssid = null }) {
@@ -69,14 +121,21 @@ export class TriangulationMap {
   render() {
     if (!this.container) return;
 
-    const width = 860;
-    const height = 430;
+    const { width, height } = this.getDimensions();
     const padLeft = 48;
     const padRight = 32;
     const padTop = 28;
     const padBottom = 38;
     const plotW = width - padLeft - padRight;
     const plotH = height - padTop - padBottom;
+
+    const vbW = width / (this.zoom || 1);
+    const vbH = height / (this.zoom || 1);
+    this.panX = Math.max(0, Math.min(width - vbW, this.panX || 0));
+    this.panY = Math.max(0, Math.min(height - vbH, this.panY || 0));
+    const vbX = this.panX;
+    const vbY = this.panY;
+    const zoomPct = Math.round((this.zoom || 1) * 100);
 
     const scaleX = plotW / 100;
     const scaleY = plotH / 100;
@@ -362,21 +421,122 @@ export class TriangulationMap {
         : '';
 
     this.container.innerHTML = `
-      <svg class="triangulation-map-svg" viewBox="0 0 ${width} ${height}" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Foreign AP RF Triangulation Spatial Map (${escapeHtml(this.band)})">
-        <rect x="${padLeft}" y="${padTop}" width="${plotW}" height="${plotH}" rx="8"
-              fill="var(--color-bg)" stroke="var(--color-border)" stroke-width="1" />
-        ${gridHtml}
-        ${compassHtml}
-        ${ringsHtml}
-        ${vectorsHtml}
-        ${foreignNodesHtml}
-        ${anchorNodesHtml}
-        ${emptyOverlayHtml}
-      </svg>
+      <div class="triangulation-viewport">
+        <div class="triangulation-map-toolbar" role="toolbar" aria-label="Triangulation Map Zoom and Size Controls">
+          <button type="button" class="triangulation-toolbar-btn" data-tri-action="zoom-in" title="Zoom In (+)" aria-label="Zoom In">
+            ${renderIcon('zoomIn', 'icon')}
+          </button>
+          <button type="button" class="triangulation-toolbar-btn" data-tri-action="zoom-out" title="Zoom Out (-)" aria-label="Zoom Out">
+            ${renderIcon('zoomOut', 'icon')}
+          </button>
+          <button type="button" class="triangulation-toolbar-btn" data-tri-action="zoom-reset" title="Reset Zoom &amp; Pan (100%)" aria-label="Reset Zoom (${zoomPct}%)">
+            ${zoomPct}%
+          </button>
+          <span style="width: 1px; height: 16px; background: var(--color-border); margin: 0 2px;"></span>
+          <button type="button" class="triangulation-toolbar-btn ${this.sizeMode === 'large' ? 'active' : ''}" data-tri-action="toggle-large" title="Toggle Larger Map Height" aria-pressed="${this.sizeMode === 'large' ? 'true' : 'false'}">
+            ${this.sizeMode === 'large' ? 'Standard Height' : 'Expand Height'}
+          </button>
+          <button type="button" class="triangulation-toolbar-btn ${this.sizeMode === 'fullscreen' ? 'active' : ''}" data-tri-action="toggle-fullscreen" title="${this.sizeMode === 'fullscreen' ? 'Exit Full Screen (Esc)' : 'Full Screen Map'}" aria-pressed="${this.sizeMode === 'fullscreen' ? 'true' : 'false'}">
+            ${renderIcon(this.sizeMode === 'fullscreen' ? 'minimize' : 'maximize', 'icon')}
+            <span>${this.sizeMode === 'fullscreen' ? 'Exit Full Screen' : 'Full Screen'}</span>
+          </button>
+        </div>
+        <svg class="triangulation-map-svg ${this.zoom > 1 ? 'is-zoomed' : ''}" viewBox="${vbX.toFixed(1)} ${vbY.toFixed(1)} ${vbW.toFixed(1)} ${vbH.toFixed(1)}" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Foreign AP RF Triangulation Spatial Map (${escapeHtml(this.band)})">
+          <rect x="${padLeft}" y="${padTop}" width="${plotW}" height="${plotH}" rx="8"
+                fill="var(--color-bg)" stroke="var(--color-border)" stroke-width="1" />
+          ${gridHtml}
+          ${compassHtml}
+          ${ringsHtml}
+          ${vectorsHtml}
+          ${foreignNodesHtml}
+          ${anchorNodesHtml}
+          ${emptyOverlayHtml}
+        </svg>
+      </div>
       ${selectedSummaryHtml}
     `;
 
     const svgEl = this.container.querySelector('svg');
+
+    // Toolbar actions (Zoom In, Zoom Out, Reset, Large, Fullscreen)
+    this.container.querySelectorAll('[data-tri-action]').forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const action = btn.getAttribute('data-tri-action');
+        if (action === 'zoom-in') {
+          this.setZoom((this.zoom || 1) + 0.35);
+        } else if (action === 'zoom-out') {
+          this.setZoom((this.zoom || 1) - 0.35);
+        } else if (action === 'zoom-reset') {
+          this.setZoom(1);
+        } else if (action === 'toggle-large') {
+          this.setSizeMode(this.sizeMode === 'large' ? 'standard' : 'large');
+        } else if (action === 'toggle-fullscreen') {
+          this.setSizeMode(this.sizeMode === 'fullscreen' ? 'standard' : 'fullscreen');
+        }
+      });
+    });
+
+    // Attach wheel zoom when Ctrl/Cmd is pressed or in fullscreen/zoomed mode
+    svgEl?.addEventListener(
+      'wheel',
+      (e) => {
+        if (!e.ctrlKey && !e.metaKey && this.sizeMode !== 'fullscreen' && this.zoom <= 1) {
+          return;
+        }
+        e.preventDefault();
+        const rect = svgEl.getBoundingClientRect();
+        const curVbW = width / (this.zoom || 1);
+        const curVbH = height / (this.zoom || 1);
+        const focusX = this.panX + ((e.clientX - rect.left) / (rect.width || 1)) * curVbW;
+        const focusY = this.panY + ((e.clientY - rect.top) / (rect.height || 1)) * curVbH;
+        const delta = e.deltaY < 0 ? 0.25 : -0.25;
+        this.setZoom((this.zoom || 1) + delta, focusX, focusY);
+      },
+      { passive: false }
+    );
+
+    // Background drag-to-pan when zoomed in
+    let isPanningBg = false;
+    let panStartClientX = 0;
+    let panStartClientY = 0;
+    let panStartOriginX = 0;
+    let panStartOriginY = 0;
+
+    svgEl?.addEventListener('pointerdown', (e) => {
+      if (this.zoom <= 1) return;
+      if (e.target.closest('.triangulation-anchor-node') || e.target.closest('.triangulation-foreign-node')) {
+        return;
+      }
+      isPanningBg = true;
+      panStartClientX = e.clientX;
+      panStartClientY = e.clientY;
+      panStartOriginX = this.panX;
+      panStartOriginY = this.panY;
+      svgEl.classList.add('is-panning');
+      svgEl.setPointerCapture?.(e.pointerId);
+    });
+
+    svgEl?.addEventListener('pointermove', (e) => {
+      if (!isPanningBg) return;
+      const rect = svgEl.getBoundingClientRect();
+      const curVbW = width / (this.zoom || 1);
+      const curVbH = height / (this.zoom || 1);
+      const dxSvg = ((e.clientX - panStartClientX) / (rect.width || 1)) * curVbW;
+      const dySvg = ((e.clientY - panStartClientY) / (rect.height || 1)) * curVbH;
+      this.panX = Math.max(0, Math.min(width - curVbW, panStartOriginX - dxSvg));
+      this.panY = Math.max(0, Math.min(height - curVbH, panStartOriginY - dySvg));
+      svgEl.setAttribute('viewBox', `${this.panX.toFixed(1)} ${this.panY.toFixed(1)} ${curVbW.toFixed(1)} ${curVbH.toFixed(1)}`);
+    });
+
+    const endPanBg = (e) => {
+      if (!isPanningBg) return;
+      isPanningBg = false;
+      svgEl.classList.remove('is-panning');
+      svgEl.releasePointerCapture?.(e.pointerId);
+    };
+    svgEl?.addEventListener('pointerup', endPanBg);
+    svgEl?.addEventListener('pointercancel', endPanBg);
 
     // Attach click + keyboard selection for foreign AP markers
     this.container.querySelectorAll('.triangulation-foreign-node').forEach((node) => {
@@ -411,8 +571,10 @@ export class TriangulationMap {
       const toSvgCoords = (clientX, clientY) => {
         if (!svgEl) return { x: 50, y: 50 };
         const rect = svgEl.getBoundingClientRect();
-        const svgX = ((clientX - rect.left) / (rect.width || 1)) * width;
-        const svgY = ((clientY - rect.top) / (rect.height || 1)) * height;
+        const curVbW = width / (this.zoom || 1);
+        const curVbH = height / (this.zoom || 1);
+        const svgX = this.panX + ((clientX - rect.left) / (rect.width || 1)) * curVbW;
+        const svgY = this.panY + ((clientY - rect.top) / (rect.height || 1)) * curVbH;
         return {
           x: fromSvgX(svgX),
           y: fromSvgY(svgY),
