@@ -71,6 +71,7 @@ export class HostManager {
     this.upgradeJobs = new Map(); // jobId -> upgradeJob object
     this.activeJobByHost = new Map(); // hostId -> jobId
     this.customStreamRunners = new Map(); // hostId -> mockStreamRunner (for unit tests)
+    this.pollFailuresByHost = new Map(); // hostId -> consecutive failed poll count
   }
 
   async init() {
@@ -282,13 +283,19 @@ export class HostManager {
       let updated = false;
       for (const { host, telemetry } of results) {
         if (telemetry.online) {
+          this.pollFailuresByHost.set(host.id, 0);
           this.applyTelemetryToHost(host, telemetry);
           updated = true;
         } else {
-          host.status = 'offline';
-          host.rxRateBps = 0;
-          host.txRateBps = 0;
-          updated = true;
+          const failures = (this.pollFailuresByHost.get(host.id) || 0) + 1;
+          this.pollFailuresByHost.set(host.id, failures);
+          // Require at least 2 consecutive failed polls before flipping an already-online host to offline
+          if (host.status !== 'online' || failures >= 2) {
+            host.status = 'offline';
+            host.rxRateBps = 0;
+            host.txRateBps = 0;
+            updated = true;
+          }
         }
       }
 
@@ -918,11 +925,14 @@ export class HostManager {
                 type: 'client',
               }));
             const fmt = formatSwitchPortLabel(p.iface, p.speedMbps, p.maxSpeedMbps);
+            const hasActiveDevices =
+              attachedClients.length > 0 || (Array.isArray(p.connectedMacs) && p.connectedMacs.length > 0);
+            const isLinkUp = Boolean((p.linkUp ?? p.status === 'up') || hasActiveDevices);
             return {
               ...p,
               maxSpeedMbps: Math.max(p.maxSpeedMbps || 0, fmt?.maxSpeedMbps || 1000, p.speedMbps || 0),
-              linkUp: Boolean(p.linkUp ?? p.status === 'up'),
-              status: (p.linkUp ?? p.status === 'up') ? 'up' : 'down',
+              linkUp: isLinkUp,
+              status: isLinkUp ? 'up' : 'down',
               connectedDevices: [...attachedClients],
             };
           })
@@ -1127,6 +1137,10 @@ export class HostManager {
         const upPort = upPorts.find((p) => p.iface === bestUpstream.upstreamIface);
         if (upPort) {
           upPort.portRole = 'trunk';
+          if (h.status !== 'offline') {
+            upPort.linkUp = true;
+            upPort.status = 'up';
+          }
           if (!upPort.connectedDevices.some((d) => d.id === h.id)) {
             upPort.connectedDevices.unshift({
               id: h.id,
@@ -1147,6 +1161,10 @@ export class HostManager {
         const parentHost = hosts.find((ph) => ph.id === h.nicInfo.upstreamHostId);
         if (myPortInList && parentHost) {
           myPortInList.portRole = 'uplink';
+          if (h.status !== 'offline' || parentHost.status !== 'offline') {
+            myPortInList.linkUp = true;
+            myPortInList.status = 'up';
+          }
           if (!myPortInList.connectedDevices.some((d) => d.id === parentHost.id)) {
             myPortInList.connectedDevices.unshift({
               id: parentHost.id,
@@ -1167,6 +1185,10 @@ export class HostManager {
     for (const h of hosts) {
       const myPorts = portsByHostId.get(h.id) || [];
       for (const p of myPorts) {
+        if (p.connectedDevices.length > 0 && !p.linkUp) {
+          p.linkUp = true;
+          p.status = 'up';
+        }
         if (!p.linkUp) {
           p.portRole = p.portRole === 'wan' ? 'wan' : 'down';
         } else if (p.portRole === 'wan') {

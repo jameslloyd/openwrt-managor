@@ -1478,4 +1478,23 @@ test('LAN Port Hardware Capability (maxSpeedMbps): parses PORTCAP and infers def
   assert.equal(parsed.fdbByMac.get('aa:11:22:33:44:01')?.maxSpeedMbps, 1000);
   assert.equal(parsed.fdbByMac.get('aa:11:22:33:44:02')?.speedMbps, 1000);
   assert.equal(parsed.fdbByMac.get('aa:11:22:33:44:02')?.maxSpeedMbps, 2500);
+
+  // Verify UCINET-discovered ports with active FDB MACs or PORTCAP carrier=1 are marked UP instead of DOWN
+  const uciActiveLines = [
+    "UCINET|network.@device[0].ports='lan1' 'lan2' 'lan3'",
+    'PORTCAP|lan1|1000|1000|1|1',
+    'PORTCAP|lan2|1000|1000|0|1',
+    'PORTCAP|lan3|1000||0|0',
+    'FDB|aa:bb:cc:dd:ee:02|lan2|switch|1',
+  ];
+  const uciParsed = parseSwitchFdbSection(uciActiveLines.join('\n'));
+  const uLan1 = uciParsed.switchPorts.find((p) => p.iface === 'lan1');
+  const uLan2 = uciParsed.switchPorts.find((p) => p.iface === 'lan2');
+  const uLan3 = uciParsed.switchPorts.find((p) => p.iface === 'lan3');
+  assert.equal(uLan1.status, 'up');
+  assert.equal(uLan1.linkUp, true);
+  assert.equal(uLan2.status, 'up');
+  assert.equal(uLan2.linkUp, true);
+  assert.equal(uLan3.status, 'down');
+  assert.equal(uLan3.linkUp, false);
 });

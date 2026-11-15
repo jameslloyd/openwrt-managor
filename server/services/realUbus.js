@@ -960,9 +960,9 @@ export async function pollRealHost(hostConfig, prevSample = null) {
     'ubus call dhcp ipv4leases 2>/dev/null',
     'echo "===ETHERS==="',
     'cat /etc/ethers 2>/dev/null',
-    // If any associated WiFi station is missing from local dhcp.leases and /proc/net/arp, sweep the br-lan subnet so ARP resolves its IP
-    'missing_arp=0; for smac in $(iw dev 2>/dev/null | awk \'$1=="Interface"{print $2}\' | while read iface; do iw dev "$iface" station dump 2>/dev/null | awk \'/^Station/{print tolower($2)}\'; done); do if ! grep -qi "$smac" /tmp/dhcp.leases 2>/dev/null && ! awk \'tolower($4)=="\'$smac\'" && $3!="0x0"{found=1} END{exit !found}\' /proc/net/arp 2>/dev/null; then missing_arp=1; break; fi; done',
-    'if [ "$missing_arp" = "1" ]; then subnet=$(ip -4 addr show br-lan 2>/dev/null | awk \'/inet /{print $2; exit}\' | cut -d. -f1-3); [ -z "$subnet" ] && subnet=$(ip -4 addr show 2>/dev/null | awk \'/inet / && !/127\\.0\\.0\\.1/{print $2; exit}\' | cut -d. -f1-3); if [ -n "$subnet" ]; then for b in 0 64 128 192; do i=$((b + 1)); while [ $i -le $((b + 64)) ] && [ $i -le 254 ]; do ping -c 1 -W 1 "$subnet.$i" >/dev/null 2>&1 & i=$((i + 1)); done; wait; done; fi; fi',
+    // If any associated WiFi station is missing from local dhcp.leases and /proc/net/arp, sweep the br-lan subnet once so ARP resolves its IP
+    'missing_arp=0; if [ ! -f /tmp/.openwrt_mgr_arp_sweep ]; then for smac in $(iw dev 2>/dev/null | awk \'$1=="Interface"{print $2}\' | while read iface; do iw dev "$iface" station dump 2>/dev/null | awk \'/^Station/{print tolower($2)}\'; done); do if ! grep -qi "$smac" /tmp/dhcp.leases 2>/dev/null && ! awk \'tolower($4)=="\'$smac\'" && $3!="0x0"{found=1} END{exit !found}\' /proc/net/arp 2>/dev/null; then missing_arp=1; break; fi; done; fi',
+    'if [ "$missing_arp" = "1" ]; then touch /tmp/.openwrt_mgr_arp_sweep 2>/dev/null; subnet=$(ip -4 addr show br-lan 2>/dev/null | awk \'/inet /{print $2; exit}\' | cut -d. -f1-3); [ -z "$subnet" ] && subnet=$(ip -4 addr show 2>/dev/null | awk \'/inet / && !/127\\.0\\.0\\.1/{print $2; exit}\' | cut -d. -f1-3); if [ -n "$subnet" ]; then for b in 0 64 128 192; do i=$((b + 1)); while [ $i -le $((b + 64)) ] && [ $i -le 254 ]; do ping -c 1 -W 1 "$subnet.$i" >/dev/null 2>&1 & i=$((i + 1)); done; wait; done; fi; fi',
     'echo "===ARP==="',
     'cat /proc/net/arp 2>/dev/null; echo "---IPNEIGH---"; ip -4 neigh show 2>/dev/null',
     'echo "===SWITCH_FDB==="',
@@ -970,8 +970,8 @@ export async function pollRealHost(hostConfig, prevSample = null) {
     'for d in /sys/class/net/*; do [ -e "$d" ] || continue; ifn=$(basename "$d"); [ -d "$d/bridge" ] || [ -d "$d/brif" ] || [ -d "$d/wireless" ] || [ -d "$d/phy80211" ] && continue; case "$ifn" in lo|br-*|br[0-9]*|switch|switch.*|*.*|wlan*|phy*|ra*|rax*|ath*|wds*|mesh*|mon*|wg*|tun*|tap*|docker*|veth*|sit*|gre*|ip6*|ifb*|teql*|erspan*|ip_vti*|ip6_vti*|ip6tnl*|pppoe*|ppp*|bat*|tailscale*|zt*|miireg*|dummy*|bond*) continue ;; esac; ifmac=$(cat "$d/address" 2>/dev/null); spd=$(cat "$d/speed" 2>/dev/null); dup=$(cat "$d/duplex" 2>/dev/null); oper=$(cat "$d/operstate" 2>/dev/null); carr=$(cat "$d/carrier" 2>/dev/null); br=""; [ -e "$d/brport/bridge" ] && br=$(basename $(readlink "$d/brport/bridge" 2>/dev/null) 2>/dev/null); echo "NICPORT|$ifn|$ifmac|$spd|$dup|$oper|$carr|$br"; done',
     'uci show network 2>/dev/null | grep -E "\\.(ports|device|ifname)=" | sed "s/^/UCINET|/"',
     'if command -v jsonfilter >/dev/null 2>&1 && [ -f /etc/board.json ]; then jsonfilter -i /etc/board.json -e "@.network.*.ports[*]" -e "@.network.*.device" 2>/dev/null | sed "s/^/BOARDPORT|/"; fi',
-    'ubus call network.device status 2>/dev/null | awk \'/^\\t"[^"]+": \\{/{gsub(/[\\t": {]/,"",$0); cur=$0; m=0; spd=""} cur!="" && /"speed":/{gsub(/[^0-9]/,"",$2); spd=$2} cur!="" && /"[0-9]+base/{s=$0; gsub(/[^0-9]/,"",s); n=s+0; if(n>m)m=n} /^\\t\\}/{if(cur!="" && (m>0 || spd!="")) print "PORTCAP|" cur "|" m "|" spd; cur=""}\'',
-    'if command -v ethtool >/dev/null 2>&1; then for d in /sys/class/net/*; do [ -e "$d" ] || continue; ifn=$(basename "$d"); [ -d "$d/bridge" ] || [ -d "$d/brif" ] || [ -d "$d/wireless" ] || [ -d "$d/phy80211" ] && continue; case "$ifn" in lo|br-*|br[0-9]*|switch|switch.*|*.*|wlan*|phy*|ra*|rax*|ath*|wds*|mesh*|mon*|wg*|tun*|tap*|docker*|veth*|sit*|gre*|ip6*|ifb*|teql*|erspan*|ip_vti*|ip6_vti*|ip6tnl*|pppoe*|ppp*|bat*|tailscale*|zt*|miireg*|dummy*|bond*) continue ;; esac; m=$(ethtool "$ifn" 2>/dev/null | awk \'/Supported link modes:/,/Supported pause frame|Supports auto-negotiation/{while(match($0,/[0-9]+base/)){n=substr($0,RSTART,RLENGTH-4)+0; if(n>mx)mx=n; $0=substr($0,RSTART+RLENGTH)}} END{if(mx>0)print mx}\'); [ -n "$m" ] && echo "PORTCAP|$ifn|$m|"; done; fi',
+    'ubus call network.device status > /tmp/.openwrt_mgr_netdev_st 2>/dev/null; awk \'index($0,"\\t\\"")==1 && index($0,"\\": {")>0 {cur=$1; gsub(/["\\t:]/,"",cur); m=0; spd=""; up=0; carr=0} cur!="" && $1=="\\"up\\":" {if($2~/true/)up=1} cur!="" && $1=="\\"carrier\\":" {if($2~/true/)carr=1} cur!="" && $1=="\\"speed\\":" {spd=$2; gsub(/[^0-9]/,"",spd)} cur!="" && /"[0-9]+base/ {s=$0; gsub(/[^0-9]/,"",s); n=s+0; if(n>m)m=n} index($0,"\\t}")==1 {if(cur!="") print "PORTCAP|" cur "|" m "|" spd "|" carr "|" up; cur=""}\' /tmp/.openwrt_mgr_netdev_st 2>/dev/null',
+    'if command -v ethtool >/dev/null 2>&1 && ! grep -q "link-supported" /tmp/.openwrt_mgr_netdev_st 2>/dev/null; then for d in /sys/class/net/*; do [ -e "$d" ] || continue; ifn=$(basename "$d"); [ -d "$d/bridge" ] || [ -d "$d/brif" ] || [ -d "$d/wireless" ] || [ -d "$d/phy80211" ] && continue; case "$ifn" in lo|br-*|br[0-9]*|switch|switch.*|*.*|wlan*|phy*|ra*|rax*|ath*|wds*|mesh*|mon*|wg*|tun*|tap*|docker*|veth*|sit*|gre*|ip6*|ifb*|teql*|erspan*|ip_vti*|ip6_vti*|ip6tnl*|pppoe*|ppp*|bat*|tailscale*|zt*|miireg*|dummy*|bond*) continue ;; esac; m=$(ethtool "$ifn" 2>/dev/null | awk \'/Supported link modes:/,/Supported pause frame|Supports auto-negotiation/{print}\' | tr " \\t" "\\n\\n" | awk \'/^[0-9]+base/{gsub(/base.*/,"",$0); n=$0+0; if(n>mx)mx=n} END{if(mx>0)print mx}\'); [ -n "$m" ] && echo "PORTCAP|$ifn|$m|"; done; fi',
     'for d in /sys/class/net/*; do [ -e "$d/address" ] || continue; ifn=$(basename "$d"); [ "$ifn" = "lo" ] && continue; m=$(cat "$d/address" 2>/dev/null); ip4=$(ip -4 -o addr show dev "$ifn" 2>/dev/null | awk \'{print $4}\' | cut -d/ -f1 | head -n1); echo "HOSTIF|$ifn|$m|$ip4"; done',
     'ip -4 route show default 2>/dev/null | awk \'/default/{gw=""; dev=""; src=""; for(i=1;i<=NF;i++){if($i=="via") gw=$(i+1); if($i=="dev") dev=$(i+1); if($i=="src") src=$(i+1);} print "DEFROUTE|" gw "|" dev "|" src; exit}\'',
     'if command -v bridge >/dev/null 2>&1; then bridge fdb show 2>/dev/null | awk \'!/permanent|self/{mac=tolower($1); dev=""; br=""; vlan=""; for(i=2;i<=NF;i++){if($i=="dev") dev=$(i+1); if($i=="master") br=$(i+1); if($i=="vlan") vlan=$(i+1);} if(mac ~ /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/ && dev!="") print "FDB|" mac "|" dev "|" br "|" vlan}\'; fi',
@@ -982,13 +982,18 @@ export async function pollRealHost(hostConfig, prevSample = null) {
     'echo "===OPKG_UPGRADABLE==="',
     'if command -v opkg >/dev/null 2>&1; then if [ -z "$(ls -A /var/opkg-lists 2>/dev/null)" ] && [ ! -f /tmp/.openwrt_mgr_opkg_init ]; then (touch /tmp/.openwrt_mgr_opkg_init; opkg update >/dev/null 2>&1) </dev/null >/dev/null 2>&1 & else opkg list-upgradable 2>/dev/null; fi; elif command -v apk >/dev/null 2>&1; then apk version -l "<" 2>/dev/null; fi',
     'echo "===ASU_CHECK==="',
-    'if [ ! -f /tmp/.openwrt_mgr_asu_cache ]; then ( ( if command -v auc >/dev/null 2>&1; then auc -n 2>&1; elif command -v owut >/dev/null 2>&1; then owut check 2>&1; fi; echo "---VERSIONS_JSON---"; uclient-fetch -T 4 -qO- https://downloads.openwrt.org/.versions.json 2>/dev/null || wget -T 4 -qO- https://downloads.openwrt.org/.versions.json 2>/dev/null ) > /tmp/.openwrt_mgr_asu_cache.tmp 2>/dev/null && mv /tmp/.openwrt_mgr_asu_cache.tmp /tmp/.openwrt_mgr_asu_cache ) </dev/null >/dev/null 2>&1 & fi; cat /tmp/.openwrt_mgr_asu_cache 2>/dev/null',
+    'if [ ! -f /tmp/.openwrt_mgr_asu_cache ]; then ( ( if command -v auc >/dev/null 2>&1; then auc -n 2>&1; elif command -v owut >/dev/null 2>&1; then owut check 2>&1; fi; echo "---VERSIONS_JSON---"; uclient-fetch -T 4 -qO- https://downloads.openwrt.org/.versions.json 2>/dev/null || wget -T 4 -qO- https://downloads.openwrt.org/.versions.json 2>/dev/null || true ) > /tmp/.openwrt_mgr_asu_cache.tmp 2>/dev/null; mv /tmp/.openwrt_mgr_asu_cache.tmp /tmp/.openwrt_mgr_asu_cache 2>/dev/null ) </dev/null >/dev/null 2>&1 & fi; cat /tmp/.openwrt_mgr_asu_cache 2>/dev/null || true',
+    'true',
   ].join('; ');
 
   try {
     const { stdout } = await execSshCommand(hostConfig, remoteScript, { timeoutMs: 18000 });
     return parseSshTelemetryOutput(hostConfig, stdout, prevSample);
   } catch (sshErr) {
+    // If the SSH command exited non-zero because a sub-command failed, but stdout still contains telemetry sections, parse it as online
+    if (sshErr && typeof sshErr.stdout === 'string' && /===(?:BOARD|UPTIME|SYSINFO|RELEASE)===/i.test(sshErr.stdout)) {
+      return parseSshTelemetryOutput(hostConfig, sshErr.stdout, prevSample);
+    }
     // If protocol is ubus_http or ubus_https, try HTTP ubus RPC
     if (hostConfig.protocol === 'ubus_http' || hostConfig.protocol === 'ubus_https') {
       try {
@@ -1050,7 +1055,30 @@ export async function pollRealHost(hostConfig, prevSample = null) {
           };
         }
       } catch {
-        // Fall through to offline return
+        // Fall through to lightweight SSH probe
+      }
+    }
+    // Lightweight SSH fallback probe in case the full telemetry script timed out on a slow switch/AP
+    try {
+      const quickScript = [
+        'export PATH="/usr/sbin:/usr/bin:/sbin:/bin:$PATH"',
+        'echo "===BOARD==="',
+        'ubus call system board 2>/dev/null',
+        'echo "===SYSINFO==="',
+        'ubus call system info 2>/dev/null',
+        'echo "===UPTIME==="',
+        'cat /proc/uptime 2>/dev/null',
+        'echo "===MEMINFO==="',
+        'cat /proc/meminfo 2>/dev/null',
+        'true',
+      ].join('; ');
+      const { stdout: quickOut } = await execSshCommand(hostConfig, quickScript, { timeoutMs: 6000 });
+      if (quickOut && /===(?:BOARD|UPTIME|SYSINFO)===/i.test(quickOut)) {
+        return parseSshTelemetryOutput(hostConfig, quickOut, prevSample);
+      }
+    } catch (quickErr) {
+      if (quickErr && typeof quickErr.stdout === 'string' && /===(?:BOARD|UPTIME|SYSINFO)===/i.test(quickErr.stdout)) {
+        return parseSshTelemetryOutput(hostConfig, quickErr.stdout, prevSample);
       }
     }
     return {
@@ -1326,16 +1354,27 @@ export function parseSwitchFdbSection(switchFdbTxt, iwInterfaces = new Map(), op
     }
 
     if (line.startsWith('PORTCAP|')) {
-      const [, ifname, rawMaxSpd, rawCurSpd] = line.split('|');
+      const [, ifname, rawMaxSpd, rawCurSpd, rawCarrier, rawUp] = line.split('|');
       if (ifname) {
         const maxNum = parseInt(rawMaxSpd, 10);
         const curNum = parseInt(rawCurSpd, 10);
-        const existing = portCapByIface.get(ifname) || { maxSpeedMbps: null, curSpeedMbps: null };
+        const existing = portCapByIface.get(ifname) || {
+          maxSpeedMbps: null,
+          curSpeedMbps: null,
+          carrier: null,
+          up: null,
+        };
         if (Number.isFinite(maxNum) && maxNum > 0 && (!existing.maxSpeedMbps || maxNum > existing.maxSpeedMbps)) {
           existing.maxSpeedMbps = maxNum;
         }
         if (Number.isFinite(curNum) && curNum > 0) {
           existing.curSpeedMbps = curNum;
+        }
+        if (rawCarrier === '1' || rawCarrier === '0') {
+          existing.carrier = rawCarrier === '1';
+        }
+        if (rawUp === '1' || rawUp === '0') {
+          existing.up = rawUp === '1';
         }
         portCapByIface.set(ifname, existing);
       }
@@ -1527,12 +1566,24 @@ export function parseSwitchFdbSection(switchFdbTxt, iwInterfaces = new Map(), op
     }
   }
 
-  // Enrich switchPorts with hardware capability (`maxSpeedMbps`) and per-NIC byte & rate counters from /proc/net/dev
+  // Ensure any port added via NICPORT or UCINET has its connectedMacs populated from fdbByMac
+  for (const [mac, entry] of fdbByMac.entries()) {
+    const portObj = switchPortsByIface.get(entry.iface);
+    if (portObj && !portObj.connectedMacs.includes(mac)) {
+      portObj.connectedMacs.push(mac);
+    }
+  }
+
+  // Enrich switchPorts with hardware capability (`maxSpeedMbps`), link state from ubus/FDB, and per-NIC byte & rate counters from /proc/net/dev
   for (const portObj of switchPortsByIface.values()) {
     const cap = portCapByIface.get(portObj.iface);
     const fmt = formatSwitchPortLabel(portObj.iface, portObj.speedMbps, cap?.maxSpeedMbps);
     if (cap?.curSpeedMbps && (!portObj.speedMbps || portObj.speedMbps === 1000)) {
       portObj.speedMbps = cap.curSpeedMbps;
+    }
+    if (!portObj.linkUp && (cap?.carrier === true || portObj.connectedMacs.length > 0)) {
+      portObj.linkUp = true;
+      portObj.status = 'up';
     }
     portObj.maxSpeedMbps = Math.max(
       cap?.maxSpeedMbps || 0,
@@ -1553,14 +1604,6 @@ export function parseSwitchFdbSection(switchFdbTxt, iwInterfaces = new Map(), op
         portObj.rxRateBps = 0;
         portObj.txRateBps = 0;
       }
-    }
-  }
-
-  // Ensure any port added via NICPORT or UCINET has its connectedMacs populated from fdbByMac
-  for (const [mac, entry] of fdbByMac.entries()) {
-    const portObj = switchPortsByIface.get(entry.iface);
-    if (portObj && !portObj.connectedMacs.includes(mac)) {
-      portObj.connectedMacs.push(mac);
     }
   }
 
