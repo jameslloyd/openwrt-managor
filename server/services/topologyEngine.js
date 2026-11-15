@@ -31,6 +31,7 @@ export class TopologyEngine {
         mac: h.mac || null,
         model: h.model,
         status: h.status || 'online',
+        switchPorts: Array.isArray(h.switchPorts) ? h.switchPorts : [],
         metrics: {
           cpuUsagePct: h.cpuUsagePct ?? 0,
           memUsagePct: h.memUsagePct ?? 0,
@@ -56,6 +57,8 @@ export class TopologyEngine {
         status: 'online',
         vendor: c.vendor,
         hostId: c.connectedTo ? c.connectedTo.hostId : gwHost.id,
+        connectedTo: c.connectedTo || null,
+        switchPort: c.connectedTo?.switchPort || null,
         metrics: {
           rxRateBps: c.rxRateBps || 0,
           txRateBps: c.txRateBps || 0,
@@ -78,18 +81,22 @@ export class TopologyEngine {
       },
     ];
 
+    const gwFdb = hostManager.fdbByHost.get(gwHost.id) || {};
     for (const h of dbHosts) {
       if (h.id !== gwHost.id) {
+        const uplinkFdb = h.mac ? gwFdb[String(h.mac).toLowerCase()] : null;
         links.push({
           id: `link-${gwHost.id}-${h.id}`,
           source: gwHost.id,
           target: h.id,
           medium: h.role === 'mesh' ? 'wifi_mesh' : 'ethernet',
-          speedMbps: 1000,
+          speedMbps: uplinkFdb?.speedMbps || 1000,
+          sourcePort: uplinkFdb?.switchPort || null,
+          sourceIface: uplinkFdb?.iface || null,
           currentRxBps: h.rxRateBps || 0,
           currentTxBps: h.txRateBps || 0,
           status: h.status || 'online',
-          vlans: [1],
+          vlans: [uplinkFdb?.vlan || 1],
         });
       }
     }
@@ -102,6 +109,8 @@ export class TopologyEngine {
         target: `client-${c.mac.replace(/:/g, '')}`,
         medium: c.connectionType === 'wired' ? 'ethernet' : 'wifi_station',
         speedMbps: c.speedMbps || c.rxRateMbps || 100,
+        switchPort: c.connectedTo?.switchPort || null,
+        iface: c.connectedTo?.iface || null,
         currentRxBps: c.rxRateBps || 0,
         currentTxBps: c.txRateBps || 0,
         signalDbm: c.signalDbm,

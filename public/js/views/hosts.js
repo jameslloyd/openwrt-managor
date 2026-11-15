@@ -431,6 +431,7 @@ export function renderHosts(container) {
           model: host.model,
           firmware: host.firmware,
           updates: host.updates,
+          switchPorts: host.switchPorts || [],
           status: host.status,
           metrics: {
             cpuUsagePct: host.cpuUsagePct ?? 0,
@@ -595,6 +596,17 @@ function renderHostRow(h) {
       </td>
       <td>
         <strong>${h.clientCount ?? 0}</strong> active
+        ${Array.isArray(h.switchPorts) && h.switchPorts.length > 0 ? `
+          <div style="display: flex; flex-wrap: wrap; gap: 3px; margin-top: 4px;">
+            ${h.switchPorts.map((p) => {
+              const isPortUp = p.linkUp ?? p.status === 'up';
+              const devNames = Array.isArray(p.connectedDevices) && p.connectedDevices.length > 0
+                ? p.connectedDevices.map((d) => d.hostname || d.ip || d.mac).join(', ')
+                : (isPortUp ? 'Link Up' : 'Down');
+              return `<span class="font-mono" title="${escapeHtml(`${p.switchPort || p.portLabel || p.iface} (${p.iface}): ${devNames}`)}" style="font-size: 9.5px; padding: 1px 5px; border-radius: 4px; background: ${isPortUp ? 'var(--color-primary-light)' : 'var(--color-surface-elevated)'}; color: ${isPortUp ? 'var(--color-primary)' : 'var(--color-text-muted)'}; border: 1px solid ${isPortUp ? 'var(--color-primary)' : 'var(--color-border)'};">${escapeHtml(p.switchPort || p.portLabel || p.iface)}</span>`;
+            }).join('')}
+          </div>
+        ` : ''}
       </td>
       <td style="text-align: right; white-space: nowrap;">
         <div style="display: inline-flex; align-items: center; justify-content: flex-end; gap: 6px;">

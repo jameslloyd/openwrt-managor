@@ -6,7 +6,7 @@
 import { store } from '../store.js';
 import { api } from '../api.js';
 import { toast } from './toast.js';
-import { formatBytes, formatBps, formatUptime, formatRssi, formatMac, escapeHtml, resolveClientSideVendor } from '../utils/formatters.js';
+import { formatBytes, formatBps, formatUptime, formatRssi, formatSwitchPort, formatMac, escapeHtml, resolveClientSideVendor } from '../utils/formatters.js';
 import { renderIcon } from '../utils/icons.js';
 import { openHostUpdatesModal } from '../views/hosts.js';
 
@@ -116,6 +116,56 @@ export function renderNodeDetails(node) {
 
   const metrics = node.metrics || {};
   const isGw = node.type === 'gateway';
+  const matchedHost = (store.state.hosts || []).find((h) => h.id === node.id);
+  const switchPorts = Array.isArray(node.switchPorts) && node.switchPorts.length > 0
+    ? node.switchPorts
+    : (matchedHost?.switchPorts || []);
+
+  const switchPortsSectionHtml = switchPorts.length > 0
+    ? `
+      <!-- Physical Switch Ports & Attached Devices -->
+      <div class="drawer-section">
+        <div class="drawer-section-title">Physical Switch Ports (${switchPorts.filter((p) => p.linkUp ?? p.status === 'up').length}/${switchPorts.length} Active)</div>
+        <div style="display: flex; flex-direction: column; gap: 6px;">
+          ${switchPorts.map((p) => {
+            const isPortUp = p.linkUp ?? p.status === 'up';
+            const speedStr = isPortUp
+              ? (p.speedMbps >= 1000 ? `${p.speedMbps / 1000} Gbps` : p.speedMbps > 0 ? `${p.speedMbps} Mbps` : 'Link Up')
+              : 'No Carrier';
+            const devices = Array.isArray(p.connectedDevices) ? p.connectedDevices : [];
+            return `
+              <div style="background: var(--color-surface-elevated); padding: 9px 11px; border-radius: var(--radius-md); border: 1px solid var(--color-border-subtle); display: flex; flex-direction: column; gap: 4px;">
+                <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+                  <div style="display: inline-flex; align-items: center; gap: 6px;">
+                    <span class="status-dot ${isPortUp ? 'online' : 'offline'}"></span>
+                    <span style="font-weight: 700; font-size: 12.5px;">${escapeHtml(p.switchPort || p.portLabel || p.iface)}</span>
+                    <span class="font-mono" style="font-size: 11px; color: var(--color-text-muted);">(${escapeHtml(p.iface)})</span>
+                  </div>
+                  <span class="font-mono" style="font-size: 11px; font-weight: 600; color: ${isPortUp ? 'var(--color-primary)' : 'var(--color-text-muted)'};">
+                    ${escapeHtml(speedStr)}${isPortUp && p.duplex ? ` • ${escapeHtml(String(p.duplex).toUpperCase())}` : ''}
+                  </span>
+                </div>
+                ${devices.length > 0 ? `
+                  <div style="display: flex; flex-wrap: wrap; gap: 4px; margin-top: 2px;">
+                    ${devices.map((d) => `
+                      <span style="display: inline-flex; align-items: center; gap: 4px; font-size: 11px; padding: 2px 7px; border-radius: 999px; background: ${d.type === 'ap' || d.type === 'gateway' ? 'var(--color-primary-light)' : 'var(--color-surface)'}; color: ${d.type === 'ap' || d.type === 'gateway' ? 'var(--color-primary)' : 'var(--color-text-primary)'}; border: 1px solid var(--color-border);">
+                        ${d.type === 'ap' || d.type === 'gateway' ? '📡 ' : '🔌 '}<strong>${escapeHtml(d.hostname || d.ip || d.mac)}</strong>
+                        ${d.ip && d.ip !== '0.0.0.0' ? `<span class="font-mono" style="font-size: 10px; color: var(--color-text-muted);">${escapeHtml(d.ip)}</span>` : ''}
+                      </span>
+                    `).join('')}
+                  </div>
+                ` : `
+                  <div style="font-size: 11px; color: var(--color-text-muted);">
+                    ${isPortUp ? 'Uplink / Unmanaged segment (no leaf devices pinned)' : 'Port disconnected'}
+                  </div>
+                `}
+              </div>
+            `;
+          }).join('')}
+        </div>
+      </div>
+    `
+    : '';
 
   drawerEl.innerHTML = `
     <div class="drawer-header">
@@ -142,6 +192,8 @@ export function renderNodeDetails(node) {
           </div>
         </div>
       </div>
+
+      ${switchPortsSectionHtml}
 
       <!-- Live Resource Utilization -->
       <div class="drawer-section">
@@ -274,6 +326,7 @@ export function renderClientDetails(client) {
 
   const rssi = formatRssi(client.signalDbm);
   const isWired = client.connectionType === 'wired';
+  const portInfo = formatSwitchPort(client.connectedTo, client.rxRateMbps);
 
   drawerEl.innerHTML = `
     <div class="drawer-header">
@@ -297,7 +350,20 @@ export function renderClientDetails(client) {
             <div style="font-size: 11px; color: var(--color-text-muted);">${escapeHtml(resolveClientSideVendor(client.mac, client.hostname, client.vendor))}</div>
           </div>
           <div><span style="color:var(--color-text-muted);">Manufacturer:</span> <div>${escapeHtml(resolveClientSideVendor(client.mac, client.hostname, client.vendor))}</div></div>
-          <div><span style="color:var(--color-text-muted);">Connected AP:</span> <div style="font-weight:600;">${escapeHtml(client.connectedTo?.hostName || client.connectedTo?.hostId || 'Gateway')}</div></div>
+          <div><span style="color:var(--color-text-muted);">Connected Node:</span> <div style="font-weight:600;">${escapeHtml(client.connectedTo?.hostName || client.connectedTo?.hostId || 'Gateway')}</div></div>
+          <div>
+            <span style="color:var(--color-text-muted);">${isWired ? 'Switch Port:' : 'Wireless Radio:'}</span>
+            <div style="font-weight:600; color: var(--color-primary);">
+              ${escapeHtml(portInfo.portBadge)}
+              ${portInfo.iface && portInfo.iface !== portInfo.portBadge ? `<span class="font-mono" style="font-size: 11px; color: var(--color-text-muted); font-weight: 400;">(${escapeHtml(portInfo.iface)})</span>` : ''}
+            </div>
+          </div>
+          <div>
+            <span style="color:var(--color-text-muted);">${isWired ? 'Negotiated Speed:' : 'Channel / Band:'}</span>
+            <div class="font-mono" style="font-weight:600;">
+              ${isWired ? escapeHtml(portInfo.speedLabel || '1 Gbps') : `Ch ${escapeHtml(String(client.channel || 'Auto'))} (${escapeHtml(client.ssid || 'Wi-Fi')})`}
+            </div>
+          </div>
         </div>
 
         <!-- Friendly Alias / Nickname Editor (UX Spec) -->
@@ -312,13 +378,13 @@ export function renderClientDetails(client) {
         <div class="drawer-section-title">Connection Metrics</div>
         <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; background: var(--color-surface-elevated); padding: 12px; border-radius: var(--radius-md); text-align: center;">
           <div>
-            <div style="font-size: 11px; color: var(--color-text-muted);">Signal (RSSI)</div>
-            <div style="font-weight: 700; color: ${isWired ? 'var(--color-text-muted)' : 'var(--color-primary)'};">${rssi.dbm}</div>
-            <div style="font-size: 10px; color: var(--color-text-muted);">${rssi.label}</div>
+            <div style="font-size: 11px; color: var(--color-text-muted);">${isWired ? 'Switch Port' : 'Signal (RSSI)'}</div>
+            <div style="font-weight: 700; color: var(--color-primary);">${isWired ? escapeHtml(portInfo.portBadge) : rssi.dbm}</div>
+            <div style="font-size: 10px; color: var(--color-text-muted);">${isWired ? escapeHtml(portInfo.iface || 'Ethernet') : rssi.label}</div>
           </div>
           <div>
-            <div style="font-size: 11px; color: var(--color-text-muted);">PHY Rx Rate</div>
-            <div style="font-weight: 700;">${client.rxRateMbps ? `${client.rxRateMbps} Mbps` : 'N/A'}</div>
+            <div style="font-size: 11px; color: var(--color-text-muted);">${isWired ? 'Link Speed' : 'PHY Rx Rate'}</div>
+            <div style="font-weight: 700;">${isWired ? escapeHtml(portInfo.speedLabel || '1 Gbps') : (client.rxRateMbps ? `${client.rxRateMbps} Mbps` : 'N/A')}</div>
           </div>
           <div>
             <div style="font-size: 11px; color: var(--color-text-muted);">PHY Tx Rate</div>
@@ -352,9 +418,11 @@ export function renderClientDetails(client) {
 
       <!-- Roaming Timeline History -->
       <div class="drawer-section">
-        <div class="drawer-section-title">AP Roaming Timeline</div>
+        <div class="drawer-section-title">Attachment &amp; Roaming Status</div>
         <div style="font-size: 12px; color: var(--color-text-secondary); background: var(--color-surface-elevated); padding: 10px; border-radius: var(--radius-md);">
-          ${isWired ? 'Static wired client connected via Ethernet port.' : 'Currently active on ' + escapeHtml(client.ssid || 'Wi-Fi') + ' via ' + escapeHtml(client.connectedTo?.hostName || 'Living Room AP') + ' (Channel ' + (client.channel || '36') + ').'}
+          ${isWired
+            ? `Wired client attached to <strong>${escapeHtml(portInfo.portBadge)}</strong>${portInfo.iface && portInfo.iface !== portInfo.portBadge ? ` (<span class="font-mono">${escapeHtml(portInfo.iface)}</span>)` : ''} on <strong>${escapeHtml(client.connectedTo?.hostName || 'Main Gateway')}</strong>${portInfo.speedLabel ? ` at ${escapeHtml(portInfo.speedLabel)}` : ''}.`
+            : 'Currently active on ' + escapeHtml(client.ssid || 'Wi-Fi') + ' via ' + escapeHtml(client.connectedTo?.hostName || 'Living Room AP') + ' (Channel ' + (client.channel || '36') + ').'}
         </div>
       </div>
     </div>

@@ -9,6 +9,7 @@ import {
   upgradeHostPackages,
   performAttendedSysupgradeAction,
   evaluateAttendedSysupgrade,
+  formatSwitchPortLabel,
 } from './realUbus.js';
 import { backupEngine } from './backupEngine.js';
 import { triangulateBandNeighbors, extractHostGeolocation } from './wifiEngine.js';
@@ -64,6 +65,8 @@ export class HostManager {
     this.dhcpByHost = new Map(); // hostId -> { [mac]: { ip, hostname, expiresEpoch } }
     this.arpByHost = new Map(); // hostId -> { [mac]: ip }
     this.rdnsByHost = new Map(); // hostId -> { [ip]: hostname }
+    this.fdbByHost = new Map(); // hostId -> { [mac]: { iface, switchPort, portLabel, portNumber, speedMbps, portMacCount } }
+    this.switchPortsByHost = new Map(); // hostId -> array of switchPort objects
     this.hostsCacheById = new Map(); // hostId -> host metadata (name, role, mapPosition)
     this.upgradeJobs = new Map(); // jobId -> upgradeJob object
     this.activeJobByHost = new Map(); // hostId -> jobId
@@ -191,6 +194,13 @@ export class HostManager {
     if (telemetry.rdnsMap) {
       this.rdnsByHost.set(host.id, telemetry.rdnsMap);
     }
+    if (telemetry.fdbMap) {
+      this.fdbByHost.set(host.id, telemetry.fdbMap);
+    }
+    if (Array.isArray(telemetry.switchPorts)) {
+      host.switchPorts = telemetry.switchPorts;
+      this.switchPortsByHost.set(host.id, telemetry.switchPorts);
+    }
     if (telemetry.updates) {
       host.updates = telemetry.updates;
     }
@@ -211,12 +221,14 @@ export class HostManager {
       id: host.id,
       name: host.name || host.hostname || host.id,
       hostname: host.hostname || host.name || host.id,
+      mac: host.mac ? String(host.mac).toLowerCase() : prevCache?.mac || null,
       role: host.role || 'ap',
       mapPosition: host.mapPosition || prevCache?.mapPosition || null,
       latitude: geo.latitude,
       longitude: geo.longitude,
       altitude: geo.altitude,
       radios,
+      switchPorts: Array.isArray(host.switchPorts) ? host.switchPorts : prevCache?.switchPorts || [],
       hasWirelessRadios: radios.length > 0,
       persisted: Boolean(prevCache?.persisted),
     });
@@ -293,6 +305,56 @@ export class HostManager {
     }
   }
 
+  resolveBestSwitchPortForMac(macLower) {
+    if (!macLower) return null;
+    const managedHostMacs = new Set();
+    for (const h of this.hostsCacheById.values()) {
+      if (h.mac) managedHostMacs.add(String(h.mac).toLowerCase());
+    }
+
+    const candidates = [];
+    for (const [hostId, fdbMap] of this.fdbByHost.entries()) {
+      if (!fdbMap || typeof fdbMap !== 'object') continue;
+      const entry = fdbMap[macLower];
+      if (!entry || !entry.iface) continue;
+
+      // Check if this same switch port on this host also carries another managed OpenWrt host's MAC (trunk/uplink port)
+      let isTrunkToManagedHost = false;
+      for (const [otherMac, otherEntry] of Object.entries(fdbMap)) {
+        if (otherMac !== macLower && otherEntry?.iface === entry.iface && managedHostMacs.has(otherMac)) {
+          isTrunkToManagedHost = true;
+          break;
+        }
+      }
+
+      const hostMeta = this.hostsCacheById.get(hostId);
+      candidates.push({
+        hostId,
+        hostName: hostMeta?.name || hostMeta?.hostname || hostId,
+        iface: entry.iface,
+        switchPort: entry.switchPort || formatSwitchPortLabel(entry.iface, entry.speedMbps)?.switchPort || entry.iface,
+        portLabel: entry.portLabel || formatSwitchPortLabel(entry.iface, entry.speedMbps)?.portLabel || entry.iface,
+        portNumber: entry.portNumber ?? null,
+        speedMbps: entry.speedMbps || 1000,
+        vlan: entry.vlan || 1,
+        portMacCount: entry.portMacCount || 1,
+        isTrunkToManagedHost,
+      });
+    }
+
+    if (candidates.length === 0) return null;
+
+    // Prefer non-trunk access ports first, then lowest portMacCount (most specific leaf switch port)
+    candidates.sort((a, b) => {
+      if (a.isTrunkToManagedHost !== b.isTrunkToManagedHost) {
+        return a.isTrunkToManagedHost ? 1 : -1;
+      }
+      return (a.portMacCount || 1) - (b.portMacCount || 1);
+    });
+
+    return candidates[0];
+  }
+
   getLiveClients() {
     // Build a fleet-wide merged DHCP / ARP / reverse-DNS lookup across all gateways and APs
     const globalDhcp = {};
@@ -367,11 +429,41 @@ export class HostManager {
             : lookupVendor(macLower, resolvedHostname);
 
         if (!existing || (existing.connectionType === 'wired' && c.connectionType !== 'wired')) {
+          let connectedTo = c.connectedTo ? { ...c.connectedTo } : null;
+          let speedMbps = c.speedMbps || c.rxRateMbps || 1000;
+
+          if (c.connectionType === 'wired') {
+            const bestPort = this.resolveBestSwitchPortForMac(macLower);
+            if (bestPort) {
+              connectedTo = {
+                hostId: bestPort.hostId,
+                hostName: bestPort.hostName,
+                iface: bestPort.iface,
+                switchPort: bestPort.switchPort,
+                portLabel: bestPort.portLabel,
+                portNumber: bestPort.portNumber,
+                speedMbps: bestPort.speedMbps,
+              };
+              speedMbps = bestPort.speedMbps || speedMbps;
+            } else if (connectedTo && connectedTo.iface && !connectedTo.switchPort) {
+              const formatted = formatSwitchPortLabel(connectedTo.iface, speedMbps);
+              if (formatted) {
+                connectedTo.switchPort = formatted.switchPort;
+                connectedTo.portLabel = formatted.portLabel;
+                connectedTo.portNumber = formatted.portNumber;
+              }
+            }
+          }
+
           byMac.set(macLower, {
             ...c,
             ip: resolvedIp,
             hostname: resolvedHostname,
             vendor: resolvedVendor,
+            connectedTo,
+            speedMbps: c.connectionType === 'wired' ? speedMbps : c.speedMbps,
+            rxRateMbps: c.connectionType === 'wired' ? speedMbps : c.rxRateMbps,
+            txRateMbps: c.connectionType === 'wired' ? speedMbps : c.txRateMbps,
             dhcpLeaseRemainingSec: resolvedLeaseRemaining,
             signalHistory: this.signalHistoryByMac.get(c.mac) || this.signalHistoryByMac.get(macLower) || [],
             roamingLog: [],
@@ -400,6 +492,67 @@ export class HostManager {
         }
       }
     }
+
+    // Also include wired devices learned on physical switch ports (`fdbByHost`) that have a known IP in globalDhcp or globalArp (e.g. wired device plugged into a secondary AP)
+    const managedHostMacs = new Set();
+    for (const h of this.hostsCacheById.values()) {
+      if (h.mac) managedHostMacs.add(String(h.mac).toLowerCase());
+    }
+    for (const fdbMap of this.fdbByHost.values()) {
+      if (!fdbMap || typeof fdbMap !== 'object') continue;
+      for (const rawMac of Object.keys(fdbMap)) {
+        const macLower = rawMac.toLowerCase();
+        if (byMac.has(macLower) || managedHostMacs.has(macLower)) continue;
+        const dhcp = globalDhcp[macLower] || {};
+        const arpIp = globalArp[macLower];
+        const rdns = globalRdns[macLower] || {};
+        const resolvedIp = dhcp.ip || arpIp || rdns.ip || null;
+        if (!resolvedIp || resolvedIp === '0.0.0.0') continue;
+
+        const bestPort = this.resolveBestSwitchPortForMac(macLower);
+        if (!bestPort) continue;
+
+        const resolvedHostname =
+          (dhcp.hostname && dhcp.hostname !== '*' && dhcp.hostname !== dhcp.ip ? dhcp.hostname : null) ||
+          rdns.hostname ||
+          (dhcp.hostname && dhcp.hostname !== '*' ? dhcp.hostname : null) ||
+          resolvedIp;
+
+        byMac.set(macLower, {
+          mac: macLower,
+          ip: resolvedIp,
+          hostname: resolvedHostname,
+          vendor: lookupVendor(macLower, resolvedHostname),
+          connectionType: 'wired',
+          connectedTo: {
+            hostId: bestPort.hostId,
+            hostName: bestPort.hostName,
+            iface: bestPort.iface,
+            switchPort: bestPort.switchPort,
+            portLabel: bestPort.portLabel,
+            portNumber: bestPort.portNumber,
+            speedMbps: bestPort.speedMbps,
+          },
+          vlan: bestPort.vlan || 1,
+          isGuest: false,
+          signalDbm: null,
+          noiseDbm: null,
+          snrDb: null,
+          speedMbps: bestPort.speedMbps || 1000,
+          rxRateMbps: bestPort.speedMbps || 1000,
+          txRateMbps: bestPort.speedMbps || 1000,
+          rxRateBps: 0,
+          txRateBps: 0,
+          rxBytesTotal: 0,
+          txBytesTotal: 0,
+          dhcpLeaseRemainingSec: dhcp.dhcpLeaseRemainingSec || 36000,
+          signalHistory: [],
+          roamingLog: [],
+          lastSeen: new Date().toISOString(),
+        });
+      }
+    }
+
     return Array.from(byMac.values());
   }
 
@@ -611,21 +764,75 @@ export class HostManager {
       if (!this.liveRadiosByHost.has(h.id) && radios.length > 0) {
         this.liveRadiosByHost.set(h.id, radios);
       }
+      const liveSwitchPorts = this.switchPortsByHost.get(h.id);
+      const switchPorts = Array.isArray(liveSwitchPorts)
+        ? liveSwitchPorts
+        : Array.isArray(h.switchPorts)
+          ? h.switchPorts
+          : [];
+      if (!this.switchPortsByHost.has(h.id) && switchPorts.length > 0) {
+        this.switchPortsByHost.set(h.id, switchPorts);
+      }
       const geo = extractHostGeolocation(h);
       this.hostsCacheById.set(h.id, {
         id: h.id,
         name: h.name || h.hostname || h.id,
         hostname: h.hostname || h.name || h.id,
+        mac: h.mac ? String(h.mac).toLowerCase() : null,
         role: h.role || 'ap',
         mapPosition: h.mapPosition || null,
         latitude: geo.latitude,
         longitude: geo.longitude,
         altitude: geo.altitude,
         radios,
+        switchPorts,
         hasWirelessRadios: radios.length > 0,
         persisted: true,
       });
     }
+
+    // Enrich switchPorts with attached client / OpenWrt host summaries
+    const liveClients = this.getLiveClients();
+    for (const h of hosts) {
+      const rawPorts = this.switchPortsByHost.get(h.id) || h.switchPorts || [];
+      if (Array.isArray(rawPorts) && rawPorts.length > 0) {
+        h.switchPorts = rawPorts.map((p) => {
+          const attachedClients = liveClients
+            .filter(
+              (c) =>
+                c.connectionType === 'wired' &&
+                c.connectedTo?.hostId === h.id &&
+                (c.connectedTo?.iface === p.iface || c.connectedTo?.switchPort === p.switchPort)
+            )
+            .map((c) => ({
+              mac: c.mac,
+              ip: c.ip,
+              hostname: c.hostname,
+              type: 'client',
+            }));
+          const fdbMap = this.fdbByHost.get(h.id) || {};
+          const attachedHosts = hosts
+            .filter(
+              (other) =>
+                other.id !== h.id &&
+                other.mac &&
+                fdbMap[String(other.mac).toLowerCase()]?.iface === p.iface
+            )
+            .map((other) => ({
+              id: other.id,
+              mac: other.mac,
+              ip: other.ip,
+              hostname: other.name || other.hostname,
+              type: other.role || 'ap',
+            }));
+          return {
+            ...p,
+            connectedDevices: [...attachedHosts, ...attachedClients],
+          };
+        });
+      }
+    }
+
     if (sanitized) {
       return hosts.map((h) => sanitizeHost(h, this.getUpgradeJobForHost(h.id)));
     }
@@ -794,6 +1001,8 @@ export class HostManager {
     this.dhcpByHost.delete(id);
     this.arpByHost.delete(id);
     this.rdnsByHost.delete(id);
+    this.fdbByHost.delete(id);
+    this.switchPortsByHost.delete(id);
     this.hostsCacheById.delete(id);
     const activeJobId = this.activeJobByHost.get(id);
     if (activeJobId) {

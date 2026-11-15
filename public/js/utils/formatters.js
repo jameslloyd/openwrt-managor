@@ -271,3 +271,40 @@ export function formatRssi(signalDbm) {
     return { dbm: `${dbm} dBm`, label: 'Very Weak', level: 1, colorClass: 'level-1' };
   }
 }
+
+export function formatSwitchPort(connectedTo, fallbackSpeedMbps = null) {
+  const conn = connectedTo && typeof connectedTo === 'object' ? connectedTo : {};
+  const rawIface = String(conn.iface || '').trim();
+  const speed = Number(conn.speedMbps || fallbackSpeedMbps) || 1000;
+  const speedText = speed >= 1000 ? `${speed / 1000} Gbps` : `${speed} Mbps`;
+  const shortSpeed = speed >= 1000 ? `${speed / 1000}G` : `${speed}M`;
+
+  let portBadge = conn.switchPort || '';
+  if (!portBadge && rawIface) {
+    const base = rawIface.split('.')[0];
+    const lanM = base.match(/^lan(\d+)$/i);
+    const sfpM = base.match(/^sfp\+?(\d*)$/i);
+    const ethM = base.match(/^eth(\d+)$/i);
+    const portM = base.match(/^(?:sw\d*p|port)(\d+)$/i);
+    if (lanM) portBadge = `LAN ${lanM[1]}`;
+    else if (sfpM) portBadge = `SFP+ ${sfpM[1] || '1'}`;
+    else if (ethM) portBadge = speed >= 10000 ? `10G Port ${ethM[1]}` : `LAN ${ethM[1]}`;
+    else if (portM) portBadge = `Port ${portM[1]}`;
+    else if (base === 'br-lan') portBadge = 'LAN Bridge';
+    else portBadge = rawIface.toUpperCase();
+  }
+  if (!portBadge) portBadge = 'LAN Port';
+
+  const fullLabel =
+    conn.portLabel ||
+    (rawIface && !portBadge.toLowerCase().includes(rawIface.toLowerCase()) ? `${portBadge} (${rawIface})` : portBadge);
+
+  return {
+    portBadge,
+    iface: rawIface || 'eth',
+    fullLabel,
+    speedMbps: speed,
+    speedText,
+    shortSpeed,
+  };
+}

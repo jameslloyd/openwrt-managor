@@ -7,6 +7,8 @@ import { backupEngine } from '../server/services/backupEngine.js';
 import { hostManager } from '../server/services/hostManager.js';
 import {
   parseSshTelemetryOutput,
+  parseSwitchFdbSection,
+  formatSwitchPortLabel,
   parseOpkgUpgradable,
   evaluateAttendedSysupgrade,
   compareOpenWrtVersions,
@@ -1228,4 +1230,134 @@ test('Hermes & Agent REST API: exposes OpenAPI spec, manifest, fleet status, fle
   });
   await hostManager.deleteHost('gw-hermes', true);
   await hostManager.deleteHost('ap-office', true);
+});
+
+test('Switch Port & FDB Resolution: parses DSA bridge ports and attributes wired devices to leaf switch ports across Gateway and APs', async () => {
+  // 1. Verify human-readable switch port formatting
+  assert.deepEqual(formatSwitchPortLabel('lan1', 2500), {
+    iface: 'lan1',
+    switchPort: 'LAN 1',
+    portNumber: 1,
+    portLabel: 'LAN 1 (lan1)',
+    speedMbps: 2500,
+  });
+  assert.deepEqual(formatSwitchPortLabel('sfp1', 10000), {
+    iface: 'sfp1',
+    switchPort: 'SFP+ 1',
+    portNumber: 1,
+    portLabel: 'SFP+ 1 (sfp1)',
+    speedMbps: 10000,
+  });
+  assert.deepEqual(formatSwitchPortLabel('eth2', 1000), {
+    iface: 'eth2',
+    switchPort: 'LAN 2',
+    portNumber: 2,
+    portLabel: 'LAN 2 (eth2)',
+    speedMbps: 1000,
+  });
+
+  // 2. Gateway SSH telemetry with 3 DSA bridge ports (lan1=trunk to Office AP, lan2=Proxmox-Server, lan3=down)
+  const gwSshOut = [
+    '===BOARD===',
+    JSON.stringify({ hostname: 'Main-Gateway', model: 'GL.iNet GL-MT6000' }),
+    '===UPTIME===',
+    '12000.00 10000.00',
+    '===MAC===',
+    '94:83:c4:00:00:01',
+    '===DHCP===',
+    '1700000000 00:11:32:aa:bb:01 192.168.1.50 Synology-NAS *',
+    '1700000000 24:5e:be:cc:dd:02 192.168.1.60 Proxmox-VE *',
+    '===ARP===',
+    'IP address       HW type     Flags       HW address            Mask     Device',
+    '192.168.1.2      0x1         0x2         94:83:c4:00:00:02     *        br-lan',
+    '192.168.1.50     0x1         0x2         00:11:32:aa:bb:01     *        br-lan',
+    '192.168.1.60     0x1         0x2         24:5e:be:cc:dd:02     *        br-lan',
+    '===SWITCH_FDB===',
+    'BRPORT|br-lan|lan1|0x1|2500|full|up|1',
+    'BRPORT|br-lan|lan2|0x2|2500|full|up|1',
+    'BRPORT|br-lan|lan3|0x3|-1|unknown|down|0',
+    // lan1 is the uplink trunk to Office AP (94:83:c4:00:00:02), so it also sees Synology-NAS (00:11:32:aa:bb:01)
+    'FDB|94:83:c4:00:00:02|lan1|br-lan|1',
+    'FDB|00:11:32:aa:bb:01|lan1|br-lan|1',
+    // lan2 has Proxmox-VE directly attached
+    'FDB|24:5e:be:cc:dd:02|lan2|br-lan|1',
+  ].join('\n');
+
+  // 3. Secondary Office AP SSH telemetry where Synology-NAS is plugged directly into leaf port lan4
+  const apSshOut = [
+    '===BOARD===',
+    JSON.stringify({ hostname: 'Office-AP', model: 'ASUS RT-AX53U' }),
+    '===UPTIME===',
+    '11000.00 9000.00',
+    '===MAC===',
+    '94:83:c4:00:00:02',
+    '===SWITCH_FDB===',
+    'BRPORT|br-lan|lan1|0x1|1000|full|up|1',
+    'BRPORT|br-lan|lan4|0x4|1000|full|up|1',
+    // lan1 on Office AP is the uplink back to Main-Gateway (94:83:c4:00:00:01)
+    'FDB|94:83:c4:00:00:01|lan1|br-lan|1',
+    'FDB|24:5e:be:cc:dd:02|lan1|br-lan|1',
+    // lan4 on Office AP is the leaf port where Synology-NAS is plugged in
+    'FDB|00:11:32:aa:bb:01|lan4|br-lan|1',
+  ].join('\n');
+
+  await hostManager.createHost({
+    id: 'gw-sw-test',
+    name: 'Main Gateway',
+    ip: '192.168.1.1',
+    role: 'gateway',
+  });
+  await hostManager.createHost({
+    id: 'ap-sw-test',
+    name: 'Office AP',
+    ip: '192.168.1.2',
+    role: 'ap',
+  });
+
+  const hostsList = await db.getHosts();
+  const gwHost = hostsList.find((h) => h.id === 'gw-sw-test');
+  const apHost = hostsList.find((h) => h.id === 'ap-sw-test');
+
+  hostManager.applyTelemetryToHost(gwHost, parseSshTelemetryOutput(gwHost, gwSshOut));
+  hostManager.applyTelemetryToHost(apHost, parseSshTelemetryOutput(apHost, apSshOut));
+  await db.saveHosts(hostsList);
+
+  const liveClients = hostManager.getLiveClients();
+  const nasClient = liveClients.find((c) => c.mac.toLowerCase() === '00:11:32:aa:bb:01');
+  const proxmoxClient = liveClients.find((c) => c.mac.toLowerCase() === '24:5e:be:cc:dd:02');
+
+  assert.ok(nasClient, 'Expected Synology-NAS in liveClients');
+  assert.ok(proxmoxClient, 'Expected Proxmox-VE in liveClients');
+
+  // Synology-NAS should be resolved to Office AP's leaf port LAN 4 (lan4 @ 1000 Mbps) rather than Gateway's trunk port lan1
+  assert.equal(nasClient.connectedTo.hostId, 'ap-sw-test');
+  assert.equal(nasClient.connectedTo.hostName, 'Office AP');
+  assert.equal(nasClient.connectedTo.iface, 'lan4');
+  assert.equal(nasClient.connectedTo.switchPort, 'LAN 4');
+  assert.equal(nasClient.connectedTo.portLabel, 'LAN 4 (lan4)');
+  assert.equal(nasClient.connectedTo.speedMbps, 1000);
+
+  // Proxmox-VE should be resolved to Main Gateway's leaf port LAN 2 (lan2 @ 2500 Mbps)
+  assert.equal(proxmoxClient.connectedTo.hostId, 'gw-sw-test');
+  assert.equal(proxmoxClient.connectedTo.hostName, 'Main Gateway');
+  assert.equal(proxmoxClient.connectedTo.iface, 'lan2');
+  assert.equal(proxmoxClient.connectedTo.switchPort, 'LAN 2');
+  assert.equal(proxmoxClient.connectedTo.portLabel, 'LAN 2 (lan2)');
+  assert.equal(proxmoxClient.connectedTo.speedMbps, 2500);
+
+  // Verify host.switchPorts includes connectedDevices (both wired clients and downstream APs on trunk ports)
+  const enrichedHosts = await hostManager.getAllHosts();
+  const enrichedGw = enrichedHosts.find((h) => h.id === 'gw-sw-test');
+  const enrichedAp = enrichedHosts.find((h) => h.id === 'ap-sw-test');
+
+  const gwLan1 = enrichedGw.switchPorts.find((p) => p.iface === 'lan1');
+  const gwLan2 = enrichedGw.switchPorts.find((p) => p.iface === 'lan2');
+  const apLan4 = enrichedAp.switchPorts.find((p) => p.iface === 'lan4');
+
+  assert.ok(gwLan1.connectedDevices.some((d) => d.hostname === 'Office AP' && d.type === 'ap'));
+  assert.ok(gwLan2.connectedDevices.some((d) => d.hostname === 'Proxmox-VE'));
+  assert.ok(apLan4.connectedDevices.some((d) => d.hostname === 'Synology-NAS'));
+
+  await hostManager.deleteHost('gw-sw-test', true);
+  await hostManager.deleteHost('ap-sw-test', true);
 });

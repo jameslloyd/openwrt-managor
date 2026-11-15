@@ -6,7 +6,7 @@
 import { store } from '../store.js';
 import { DataTable } from '../components/table.js';
 import { toast } from '../components/toast.js';
-import { formatBps, formatRssi, formatMac, escapeHtml, resolveClientSideVendor } from '../utils/formatters.js';
+import { formatBps, formatRssi, formatMac, escapeHtml, resolveClientSideVendor, formatSwitchPort } from '../utils/formatters.js';
 import { renderIcon } from '../utils/icons.js';
 
 let tableInstance = null;
@@ -107,22 +107,60 @@ export function renderClients(container) {
       },
       {
         key: 'connectedTo',
-        label: 'Connected AP',
+        label: 'Connected Node / Port',
         sortable: false,
-        render: (c) => `
-          <div style="display: flex; align-items: center; gap: 6px;">
-            ${renderIcon(c.connectionType === 'wired' ? 'server' : 'wifi', 'icon')}
-            <span>${escapeHtml(c.connectedTo?.hostName || c.connectedTo?.hostId || 'Gateway')}</span>
-          </div>
-        `
+        render: (c) => {
+          const hostLabel = escapeHtml(c.connectedTo?.hostName || c.connectedTo?.hostId || 'Gateway');
+          if (c.connectionType === 'wired') {
+            const port = formatSwitchPort(c.connectedTo, c.speedMbps || c.rxRateMbps);
+            return `
+              <div>
+                <div style="display: flex; align-items: center; gap: 6px; font-weight: 600;">
+                  ${renderIcon('server', 'icon')}
+                  <span>${hostLabel}</span>
+                </div>
+                <div style="margin-top: 3px; display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--color-text-secondary);">
+                  <span class="font-mono" style="background: var(--color-surface-elevated); border: 1px solid var(--color-border); padding: 1px 6px; border-radius: 4px; color: var(--color-primary); font-weight: 600;" title="Switch port interface: ${escapeHtml(port.iface)} (${escapeHtml(port.speedText)})">
+                    ${escapeHtml(port.portBadge)}
+                  </span>
+                  <span class="font-mono" style="color: var(--color-text-muted);">${escapeHtml(port.iface)}</span>
+                </div>
+              </div>
+            `;
+          }
+          const radioIface = c.connectedTo?.iface || 'wlan';
+          const bandChan = [c.band, c.channel ? `Ch ${c.channel}` : ''].filter(Boolean).join(' • ');
+          return `
+            <div>
+              <div style="display: flex; align-items: center; gap: 6px; font-weight: 600;">
+                ${renderIcon('wifi', 'icon')}
+                <span>${hostLabel}</span>
+              </div>
+              <div style="margin-top: 2px; font-size: 11px; color: var(--color-text-muted);">
+                <span class="font-mono">${escapeHtml(radioIface)}</span>${bandChan ? ` • ${escapeHtml(bandChan)}` : ''}
+              </div>
+            </div>
+          `;
+        }
       },
       {
         key: 'signalDbm',
-        label: 'Signal (RSSI)',
+        label: 'Signal / Switch Port',
         sortable: true,
         render: (c) => {
           if (c.connectionType === 'wired') {
-            return `<span style="color: var(--color-text-muted); font-size: 12px;">Wired Port</span>`;
+            const port = formatSwitchPort(c.connectedTo, c.speedMbps || c.rxRateMbps);
+            return `
+              <div>
+                <div style="display: inline-flex; align-items: center; gap: 5px; font-weight: 600; font-size: 12px; color: var(--color-text-primary);">
+                  <span style="width: 7px; height: 7px; border-radius: 50%; background: var(--color-band-wired, var(--color-success)); display: inline-block;"></span>
+                  <span>${escapeHtml(port.portBadge)}</span>
+                </div>
+                <div class="font-mono" style="font-size: 10.5px; color: var(--color-text-muted);">
+                  ${escapeHtml(port.iface)} • ${escapeHtml(port.speedText)}
+                </div>
+              </div>
+            `;
           }
           const rssi = formatRssi(c.signalDbm);
           return `
@@ -147,7 +185,10 @@ export function renderClients(container) {
         label: 'PHY Rates',
         sortable: true,
         render: (c) => {
-          if (c.connectionType === 'wired') return `<span class="font-mono">1.0 Gbps</span>`;
+          if (c.connectionType === 'wired') {
+            const port = formatSwitchPort(c.connectedTo, c.speedMbps || c.rxRateMbps);
+            return `<span class="font-mono" style="font-weight: 600;">${escapeHtml(port.speedText)}</span>`;
+          }
           return `<div class="font-mono" style="font-size: 11px;">${c.rxRateMbps || 0}M / ${c.txRateMbps || 0}M</div>`;
         }
       },
@@ -243,7 +284,11 @@ function getFilteredClients() {
         (c.hostname && c.hostname.toLowerCase().includes(currentSearchQuery)) ||
         (c.ip && c.ip.includes(currentSearchQuery)) ||
         (c.mac && c.mac.toLowerCase().includes(currentSearchQuery)) ||
-        (c.vendor && c.vendor.toLowerCase().includes(currentSearchQuery));
+        (c.vendor && c.vendor.toLowerCase().includes(currentSearchQuery)) ||
+        (c.connectedTo?.switchPort && c.connectedTo.switchPort.toLowerCase().includes(currentSearchQuery)) ||
+        (c.connectedTo?.portLabel && c.connectedTo.portLabel.toLowerCase().includes(currentSearchQuery)) ||
+        (c.connectedTo?.iface && c.connectedTo.iface.toLowerCase().includes(currentSearchQuery)) ||
+        (c.connectedTo?.hostName && c.connectedTo.hostName.toLowerCase().includes(currentSearchQuery));
       if (!match) return false;
     }
 
@@ -252,7 +297,7 @@ function getFilteredClients() {
 }
 
 function exportClientsCsv(clientList) {
-  const headers = ['Hostname', 'IP Address', 'MAC Address', 'Vendor', 'Connection Type', 'Signal (dBm)', 'Connected AP'];
+  const headers = ['Hostname', 'IP Address', 'MAC Address', 'Vendor', 'Connection Type', 'Signal (dBm)', 'Connected AP', 'Switch Port / Interface'];
   const rows = clientList.map(c => [
     `"${c.hostname || ''}"`,
     `"${c.ip || ''}"`,
@@ -260,7 +305,8 @@ function exportClientsCsv(clientList) {
     `"${c.vendor || ''}"`,
     `"${c.connectionType || ''}"`,
     `"${c.signalDbm ?? 'N/A'}"`,
-    `"${c.connectedTo?.hostName || c.connectedTo?.hostId || ''}"`
+    `"${c.connectedTo?.hostName || c.connectedTo?.hostId || ''}"`,
+    `"${c.connectedTo?.portLabel || c.connectedTo?.switchPort || c.connectedTo?.iface || ''}"`
   ]);
 
   const csvContent = [headers.join(','), ...rows.map(r => r.join(','))].join('\n');

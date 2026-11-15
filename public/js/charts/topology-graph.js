@@ -5,7 +5,7 @@
  */
 
 import { renderIcon } from '../utils/icons.js';
-import { escapeHtml } from '../utils/formatters.js';
+import { escapeHtml, formatSwitchPort } from '../utils/formatters.js';
 
 function truncateLabel(str, maxLen = 18) {
   const s = String(str || '').trim();
@@ -431,6 +431,8 @@ export class TopologyGraph {
       const midX = (srcPos.x + tgtPos.x) / 2;
       const pathD = `M ${srcPos.x} ${srcPos.y} C ${srcPos.x} ${midY}, ${tgtPos.x} ${midY}, ${tgtPos.x} ${tgtPos.y}`;
       const speedText = link.speedMbps >= 1000 ? `${link.speedMbps / 1000}G` : `${link.speedMbps}M`;
+      const pillLabel = link.sourcePort ? `${link.sourcePort} • ${speedText}` : speedText;
+      const pillWidth = link.sourcePort ? Math.max(66, pillLabel.length * 6.2) : 36;
 
       linksSvg += `
         <g class="topo-link-group">
@@ -438,9 +440,9 @@ export class TopologyGraph {
           ${
             link.speedMbps
               ? `
-            <rect x="${midX - 18}" y="${midY - 10}" width="36" height="16" class="topo-link-pill" />
+            <rect x="${midX - pillWidth / 2}" y="${midY - 10}" width="${pillWidth}" height="16" class="topo-link-pill" />
             <text x="${midX}" y="${midY + 1}" class="topo-link-label">
-              ${escapeHtml(speedText)}
+              ${escapeHtml(pillLabel)}
             </text>
           `
               : ''
@@ -515,7 +517,13 @@ export class TopologyGraph {
         const rawName = c.displayName || c.nickname || c.hostname || c.ip || c.mac;
         const shortName = truncateLabel(rawName, 16);
         const ipText = c.ip && c.ip !== '0.0.0.0' ? c.ip : c.mac;
-        const fullClientDesc = `${rawName} (${ipText})`;
+        const port = isWired ? formatSwitchPort(c.connectedTo, c.rxRateMbps) : null;
+        const clientSubLabel = isWired && port?.portBadge
+          ? `${port.portBadge} • ${ipText}`
+          : ipText;
+        const fullClientDesc = isWired && port?.portBadge
+          ? `${rawName} (${port.portBadge} • ${ipText})`
+          : `${rawName} (${ipText})`;
 
         nodesSvg += `
           <g class="topo-node topo-client-node"
@@ -528,7 +536,7 @@ export class TopologyGraph {
             <circle r="${r}" fill="var(--color-surface-elevated)" stroke="var(--color-border)" stroke-width="1.5" />
             <circle cx="${r - 5}" cy="${-r + 5}" r="3.5" fill="${isWired ? 'var(--color-band-wired)' : 'var(--color-band-5g)'}" />
             <text x="0" y="${r + 15}" class="topo-node-label" font-size="11" text-anchor="middle">${escapeHtml(shortName)}</text>
-            <text x="0" y="${r + 29}" class="topo-node-subtext" font-size="9.5" text-anchor="middle">${escapeHtml(truncateLabel(ipText, 17))}</text>
+            <text x="0" y="${r + 29}" class="topo-node-subtext" font-size="9.5" text-anchor="middle">${escapeHtml(truncateLabel(clientSubLabel, 20))}</text>
           </g>
         `;
       }

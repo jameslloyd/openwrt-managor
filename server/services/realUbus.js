@@ -965,6 +965,8 @@ export async function pollRealHost(hostConfig, prevSample = null) {
     'if [ "$missing_arp" = "1" ]; then subnet=$(ip -4 addr show br-lan 2>/dev/null | awk \'/inet /{print $2; exit}\' | cut -d. -f1-3); [ -z "$subnet" ] && subnet=$(ip -4 addr show 2>/dev/null | awk \'/inet / && !/127\\.0\\.0\\.1/{print $2; exit}\' | cut -d. -f1-3); if [ -n "$subnet" ]; then for b in 0 64 128 192; do i=$((b + 1)); while [ $i -le $((b + 64)) ] && [ $i -le 254 ]; do ping -c 1 -W 1 "$subnet.$i" >/dev/null 2>&1 & i=$((i + 1)); done; wait; done; fi; fi',
     'echo "===ARP==="',
     'cat /proc/net/arp 2>/dev/null; echo "---IPNEIGH---"; ip -4 neigh show 2>/dev/null',
+    'echo "===SWITCH_FDB==="',
+    'for p in /sys/class/net/br-*/brif/*; do [ -e "$p" ] || continue; br=$(basename $(dirname $(dirname "$p"))); ifn=$(basename "$p"); pno=$(cat "$p/port_no" 2>/dev/null); spd=$(cat "/sys/class/net/$ifn/speed" 2>/dev/null); dup=$(cat "/sys/class/net/$ifn/duplex" 2>/dev/null); oper=$(cat "/sys/class/net/$ifn/operstate" 2>/dev/null); carr=$(cat "/sys/class/net/$ifn/carrier" 2>/dev/null); echo "BRPORT|$br|$ifn|$pno|$spd|$dup|$oper|$carr"; done; if command -v bridge >/dev/null 2>&1; then bridge fdb show 2>/dev/null | awk \'!/permanent|self/{mac=tolower($1); dev=""; br=""; vlan=""; for(i=2;i<=NF;i++){if($i=="dev") dev=$(i+1); if($i=="master") br=$(i+1); if($i=="vlan") vlan=$(i+1);} if(mac ~ /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/ && dev!="") print "FDB|" mac "|" dev "|" br "|" vlan}\'; fi; for b in /sys/class/net/br-*; do [ -d "$b" ] || continue; br=$(basename "$b"); brctl showmacs "$br" 2>/dev/null | awk -v br="$br" \'NR>1 && $3=="no"{print "BRMAC|" br "|" $1 "|" tolower($2)}\'; done',
     'echo "===RDNS==="',
     'gw=$(ip route show default 2>/dev/null | awk \'/default/{print $3; exit}\'); [ -z "$gw" ] && gw=$(uci -q get network.lan.gateway 2>/dev/null); for smac in $(iw dev 2>/dev/null | awk \'$1=="Interface"{print $2}\' | while read iface; do iw dev "$iface" station dump 2>/dev/null | awk \'/^Station/{print tolower($2)}\'; done); do sip=$(awk \'tolower($4)=="\'$smac\'" && $3!="0x0"{print $1; exit}\' /proc/net/arp 2>/dev/null); if [ -n "$sip" ]; then rname=$(nslookup "$sip" ${gw:+"$gw"} 2>/dev/null | awk \'/name =/{print $NF; exit} /^Address 1:/ && NF>=4{print $4; exit}\'); echo "$smac $sip $rname"; fi; done',
     'echo "===OPKG_UPGRADABLE==="',
@@ -1020,6 +1022,226 @@ export async function pollRealHost(hostConfig, prevSample = null) {
   }
 }
 
+export function formatSwitchPortLabel(iface, speedMbps = null) {
+  if (!iface || typeof iface !== 'string') return null;
+  const raw = iface.trim();
+  if (!raw || raw === 'lo') return null;
+  // Ignore wireless interfaces
+  if (/^(wlan|phy|ra|rax|ath|wds|mesh)/i.test(raw)) return null;
+
+  const base = raw.split('.')[0];
+  const vlanPart = raw.includes('.') ? raw.split('.')[1] : null;
+  const vlanSuffix = vlanPart && vlanPart !== '1' ? ` (VLAN ${vlanPart})` : '';
+
+  const lanMatch = base.match(/^lan(\d+)$/i);
+  if (lanMatch) {
+    return {
+      iface: raw,
+      switchPort: `LAN ${lanMatch[1]}`,
+      portNumber: Number(lanMatch[1]),
+      portLabel: `LAN ${lanMatch[1]} (${raw})${vlanSuffix}`,
+      speedMbps: speedMbps && speedMbps > 0 ? speedMbps : null,
+    };
+  }
+
+  const sfpMatch = base.match(/^sfp\+?(\d*)$/i);
+  if (sfpMatch) {
+    const num = sfpMatch[1] || '1';
+    return {
+      iface: raw,
+      switchPort: `SFP+ ${num}`,
+      portNumber: Number(num) || 1,
+      portLabel: `SFP+ ${num} (${raw})${vlanSuffix}`,
+      speedMbps: speedMbps && speedMbps > 0 ? speedMbps : 10000,
+    };
+  }
+
+  const wanMatch = base.match(/^wan(\d*)$/i);
+  if (wanMatch) {
+    const num = wanMatch[1] ? ` ${wanMatch[1]}` : '';
+    return {
+      iface: raw,
+      switchPort: `WAN${num}`,
+      portNumber: Number(wanMatch[1]) || 0,
+      portLabel: `WAN${num} (${raw})${vlanSuffix}`,
+      speedMbps: speedMbps && speedMbps > 0 ? speedMbps : null,
+    };
+  }
+
+  const ethMatch = base.match(/^eth(\d+)$/i);
+  if (ethMatch) {
+    const num = Number(ethMatch[1]);
+    const label = speedMbps >= 10000 ? `10G Port ${num}` : `LAN ${num}`;
+    return {
+      iface: raw,
+      switchPort: label,
+      portNumber: num,
+      portLabel: `${label} (${raw})${vlanSuffix}`,
+      speedMbps: speedMbps && speedMbps > 0 ? speedMbps : null,
+    };
+  }
+
+  const portMatch = base.match(/^(?:sw\d*p|port)(\d+)$/i);
+  if (portMatch) {
+    return {
+      iface: raw,
+      switchPort: `Port ${portMatch[1]}`,
+      portNumber: Number(portMatch[1]),
+      portLabel: `Port ${portMatch[1]} (${raw})${vlanSuffix}`,
+      speedMbps: speedMbps && speedMbps > 0 ? speedMbps : null,
+    };
+  }
+
+  if (/^br-/i.test(base)) {
+    return {
+      iface: raw,
+      switchPort: base === 'br-lan' ? 'LAN Bridge' : base,
+      portNumber: null,
+      portLabel: `${base === 'br-lan' ? 'LAN Bridge' : base} (${raw})`,
+      speedMbps: speedMbps && speedMbps > 0 ? speedMbps : null,
+    };
+  }
+
+  return {
+    iface: raw,
+    switchPort: raw.toUpperCase(),
+    portNumber: null,
+    portLabel: `${raw}${vlanSuffix}`,
+    speedMbps: speedMbps && speedMbps > 0 ? speedMbps : null,
+  };
+}
+
+export function parseSwitchFdbSection(switchFdbTxt, iwInterfaces = new Map()) {
+  const switchPortsByIface = new Map();
+  const portNoToIfaceByBridge = new Map();
+  const fdbByMac = new Map();
+
+  if (!switchFdbTxt) {
+    return { switchPorts: [], fdbByMac };
+  }
+
+  const normalizePortNo = (val) => {
+    if (!val) return null;
+    const s = String(val).trim();
+    const n = s.startsWith('0x') || s.startsWith('0X') ? parseInt(s, 16) : parseInt(s, 10);
+    return Number.isFinite(n) ? n : null;
+  };
+
+  for (const rawLine of String(switchFdbTxt).split('\n')) {
+    const line = rawLine.trim();
+    if (!line) continue;
+
+    if (line.startsWith('BRPORT|')) {
+      const [, bridge, ifname, rawPortNo, rawSpeed, rawDuplex, rawOper, rawCarrier] = line.split('|');
+      if (!ifname || iwInterfaces.has(ifname) || /^(wlan|phy|ra|rax|ath|wds|mesh)/i.test(ifname)) {
+        continue;
+      }
+      const portNo = normalizePortNo(rawPortNo);
+      const speedNum = parseInt(rawSpeed, 10);
+      const speedMbps = Number.isFinite(speedNum) && speedNum > 0 ? speedNum : null;
+      const formatted = formatSwitchPortLabel(ifname, speedMbps);
+      if (!formatted) continue;
+
+      const isUp =
+        rawCarrier === '1' ||
+        rawOper === 'up' ||
+        (rawOper === 'unknown' && speedMbps !== null && speedMbps > 0);
+
+      const portObj = {
+        iface: ifname,
+        switchPort: formatted.switchPort,
+        portNumber: formatted.portNumber ?? portNo,
+        portLabel: formatted.portLabel,
+        bridge: bridge || 'br-lan',
+        portNo,
+        speedMbps: speedMbps || 1000,
+        duplex: rawDuplex && rawDuplex !== 'unknown' ? rawDuplex : 'full',
+        status: isUp ? 'up' : 'down',
+        linkUp: Boolean(isUp),
+        connectedMacs: [],
+      };
+      switchPortsByIface.set(ifname, portObj);
+      if (bridge && portNo !== null) {
+        portNoToIfaceByBridge.set(`${bridge}:${portNo}`, ifname);
+      }
+      continue;
+    }
+
+    // Also support raw `bridge fdb show` lines: `aa:bb:cc:dd:ee:ff dev lan1 master br-lan`
+    const rawFdbMatch = !line.startsWith('FDB|') && !line.startsWith('BRMAC|')
+      ? line.match(/^(([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2})\s+dev\s+(\S+)(?:\s+vlan\s+(\d+))?(?:\s+master\s+(\S+))?/i)
+      : null;
+    if (line.startsWith('FDB|') || (rawFdbMatch && !/\b(permanent|self)\b/i.test(line))) {
+      const [, rawMac, dev, bridge, rawVlan] = rawFdbMatch
+        ? [null, rawFdbMatch[1], rawFdbMatch[3], rawFdbMatch[5] || 'br-lan', rawFdbMatch[4] || '1']
+        : line.split('|');
+      const mac = (rawMac || '').toLowerCase();
+      if (!/^([0-9a-f]{2}:){5}[0-9a-f]{2}$/.test(mac)) continue;
+      if (!dev || iwInterfaces.has(dev) || /^(wlan|phy|ra|rax|ath|wds|mesh)/i.test(dev)) continue;
+
+      const knownPort = switchPortsByIface.get(dev);
+      const formatted = knownPort || formatSwitchPortLabel(dev);
+      if (!formatted) continue;
+
+      fdbByMac.set(mac, {
+        iface: dev,
+        switchPort: formatted.switchPort,
+        portNumber: formatted.portNumber ?? null,
+        portLabel: formatted.portLabel,
+        bridge: bridge || knownPort?.bridge || 'br-lan',
+        speedMbps: knownPort?.speedMbps || formatted.speedMbps || 1000,
+        vlan: rawVlan ? parseInt(rawVlan, 10) || 1 : 1,
+      });
+      if (knownPort && !knownPort.connectedMacs.includes(mac)) {
+        knownPort.connectedMacs.push(mac);
+      }
+      continue;
+    }
+
+    if (line.startsWith('BRMAC|')) {
+      const [, bridge, rawPortNo, rawMac] = line.split('|');
+      const mac = (rawMac || '').toLowerCase();
+      if (!/^([0-9a-f]{2}:){5}[0-9a-f]{2}$/.test(mac)) continue;
+      if (fdbByMac.has(mac)) continue;
+      const portNo = normalizePortNo(rawPortNo);
+      const ifname = portNo !== null ? portNoToIfaceByBridge.get(`${bridge}:${portNo}`) : null;
+      if (!ifname || iwInterfaces.has(ifname)) continue;
+
+      const knownPort = switchPortsByIface.get(ifname);
+      const formatted = knownPort || formatSwitchPortLabel(ifname);
+      if (!formatted) continue;
+
+      fdbByMac.set(mac, {
+        iface: ifname,
+        switchPort: formatted.switchPort,
+        portNumber: formatted.portNumber ?? portNo,
+        portLabel: formatted.portLabel,
+        bridge: bridge || 'br-lan',
+        speedMbps: knownPort?.speedMbps || 1000,
+        vlan: 1,
+      });
+      if (knownPort && !knownPort.connectedMacs.includes(mac)) {
+        knownPort.connectedMacs.push(mac);
+      }
+    }
+  }
+
+  // Annotate each fdb entry with how many total MACs were learned on that same switch port (helps distinguish leaf access ports vs uplink trunk ports)
+  for (const entry of fdbByMac.values()) {
+    const portObj = switchPortsByIface.get(entry.iface);
+    entry.portMacCount = portObj ? portObj.connectedMacs.length : 1;
+  }
+
+  const switchPorts = Array.from(switchPortsByIface.values()).sort((a, b) => {
+    if (a.portNumber !== null && b.portNumber !== null && a.portNumber !== b.portNumber) {
+      return a.portNumber - b.portNumber;
+    }
+    return a.iface.localeCompare(b.iface);
+  });
+
+  return { switchPorts, fdbByMac };
+}
+
 export function parseSshTelemetryOutput(hostConfig, stdout, prevSample = null) {
   const sections = {};
   let currentKey = null;
@@ -1065,6 +1287,7 @@ export function parseSshTelemetryOutput(hostConfig, stdout, prevSample = null) {
   const ubusDhcpJson = getSectionJson('UBUS_DHCP');
   const ethersTxt = getSectionText('ETHERS');
   const arpTxt = getSectionText('ARP');
+  const switchFdbTxt = getSectionText('SWITCH_FDB');
   const rdnsTxt = getSectionText('RDNS');
   const opkgUpgradableTxt = getSectionText('OPKG_UPGRADABLE');
   const asuStatusTxt = getSectionText('ASU_STATUS');
@@ -1503,6 +1726,9 @@ export function parseSshTelemetryOutput(hostConfig, stdout, prevSample = null) {
   }
   flushStation();
 
+  // 9b. Parse physical switch ports & bridge FDB (`===SWITCH_FDB===`)
+  const { switchPorts, fdbByMac } = parseSwitchFdbSection(switchFdbTxt, iwInterfaces);
+
   // If this host has DHCP leases (e.g. gateway) and wired clients in ARP/DHCP not seen in WiFi stations
   const wifiMacs = new Set(clients.map((c) => c.mac));
   if (dhcpByMac.size > 0) {
@@ -1511,6 +1737,16 @@ export function parseSshTelemetryOutput(hostConfig, stdout, prevSample = null) {
       if (mac && dMac === mac) continue;
       const arp = arpByMac.get(dMac);
       if (arp && arp.flags === '0x0') continue; // incomplete ARP entry
+      const fdb = fdbByMac.get(dMac);
+      const rawIface = fdb?.iface || arp?.device || 'br-lan';
+      const portMeta = fdb || formatSwitchPortLabel(rawIface) || {
+        iface: rawIface,
+        switchPort: 'LAN Bridge',
+        portLabel: `LAN Bridge (${rawIface})`,
+        portNumber: null,
+        speedMbps: 1000,
+      };
+      const linkSpeed = portMeta.speedMbps || 1000;
       clients.push({
         mac: dMac,
         ip: dhcp.ip,
@@ -1520,16 +1756,20 @@ export function parseSshTelemetryOutput(hostConfig, stdout, prevSample = null) {
         connectedTo: {
           hostId: hostConfig.id,
           hostName: hostConfig.name || hostname,
-          iface: arp?.device || 'br-lan',
+          iface: portMeta.iface || rawIface,
+          switchPort: portMeta.switchPort || null,
+          portLabel: portMeta.portLabel || null,
+          portNumber: portMeta.portNumber ?? null,
+          speedMbps: linkSpeed,
         },
-        vlan: 1,
+        vlan: fdb?.vlan || 1,
         isGuest: false,
         signalDbm: null,
         noiseDbm: null,
         snrDb: null,
-        speedMbps: 1000,
-        rxRateMbps: 1000,
-        txRateMbps: 1000,
+        speedMbps: linkSpeed,
+        rxRateMbps: linkSpeed,
+        txRateMbps: linkSpeed,
         rxRateBps: 0,
         txRateBps: 0,
         rxBytesTotal: 0,
@@ -1685,12 +1925,14 @@ export function parseSshTelemetryOutput(hostConfig, stdout, prevSample = null) {
     txRateBps,
     wan: wanInfo,
     radios,
+    switchPorts,
     neighbors,
     clients,
     updates,
     dhcpMap: Object.fromEntries(dhcpByMac),
     arpMap: Object.fromEntries(arpByMac),
     rdnsMap: Object.fromEntries(rdnsByMac),
+    fdbMap: Object.fromEntries(fdbByMac),
     sample: {
       timestamp: nowMs,
       cpuStat: stat2 || stat1,
