@@ -4,7 +4,7 @@
 [![Node.js](https://img.shields.io/badge/Node.js-20%2B%20LTS-339933?logo=nodedotjs&logoColor=white)](https://nodejs.org/)
 [![OpenWrt](https://img.shields.io/badge/OpenWrt-21.02%20|%2022.03%20|%2023.05%2B-0082c9?logo=openwrt&logoColor=white)](https://openwrt.org/)
 [![Architecture](https://img.shields.io/badge/Architecture-Pure%20ESM%20%7C%20Zero--Bundler-f59e0b)](#system-architecture--design)
-[![Tests](https://img.shields.io/badge/Tests-21%20Passing-10b981?logo=checkmarx&logoColor=white)](#testing--quality-assurance)
+[![Tests](https://img.shields.io/badge/Tests-31%20Passing-10b981?logo=checkmarx&logoColor=white)](#testing--quality-assurance)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 **OpenWrt Manager** is a high-performance, lightweight, self-hosted web management console engineered specifically to run in Docker on **TrueNAS SCALE** (or any Docker/Linux host). It unifies the monitoring, visualization, and automated configuration backups for fleets of OpenWrt routers, access points (APs), and wireless mesh extenders.
@@ -19,6 +19,7 @@ Out of the box, it features a built-in **Live Multi-Host Telemetry Simulator** g
 - [System Architecture & Design](#system-architecture--design)
   - [High-Level Architecture](#high-level-architecture)
   - [Hybrid Real Hardware & Simulator Pipeline](#hybrid-real-hardware--simulator-pipeline)
+  - [Multi-Radio RF Spectrum Congestion & 3D Wi-Fi Location Triangulation](#multi-radio-rf-spectrum-congestion--3d-wi-fi-location-triangulation)
   - [Multi-AP Client De-Duplication & Roaming Resolution](#multi-ap-client-de-duplication--roaming-resolution)
   - [Automated Backup, Retention & UCI Diff Pipeline](#automated-backup-retention--uci-diff-pipeline)
 - [TrueNAS SCALE Docker Deployment Guide](#truenas-scale-docker-deployment-guide)
@@ -72,8 +73,11 @@ Automated cron/interval backup engine with persistent TrueNAS ZFS storage tracki
 - **TrueNAS SCALE Native:** Designed from the ground up for TrueNAS SCALE Docker deployment with decoupled `/data` (application configuration) and `/backups` (OpenWrt `.tar.gz` configuration archives) volumes, unprivileged execution (`node` user UID/GID 1000), and automated health checks.
 - **Hybrid Real & Simulated Operation:** Works instantly out of the box with a rich 4-node simulated homelab fleet (Dual-2.5G Gateway, Wi-Fi 6 Living Room AP, Wi-Fi 6 Office AP, Wi-Fi 5 Mesh AP, and 22 active client devices), while fully supporting physical OpenWrt devices via HTTP `ubus` JSON-RPC and SSH.
 - **Zero-Bundler Modern Web Frontend:** Pure native ES Modules (ESM) with zero Webpack/Vite build steps, native CSS Custom Properties, semantic HTML5 `<dialog>` modals, and responsive layout for desktop, tablet, and mobile browsers.
-- **Multi-AP Client De-Duplication:** Resolves roaming clients across multiple access points by correlating Wi-Fi association inactive times, signal strengths, DHCP leases, and IEEE OUI vendor hardware lookups.
-- **Tri-Band Wi-Fi Spectrum Visualizer:** Generates mathematical spectral bandwidth masks (20, 40, 80, 160 MHz) and alerts network administrators to co-channel contention and adjacent-channel degradation.
+- **Multi-AP Client De-Duplication & Manufacturer Identification:** Resolves roaming clients across multiple access points by correlating Wi-Fi association inactive times, signal strengths, DHCP leases, ARP/reverse-DNS tables, and IEEE OUI + locally-administered virtual MAC + SSID manufacturer lookups.
+- **Tri-Band Wi-Fi Spectrum Congestion & Airtime Analyzer:** Aggregates real-time `iw survey dump` channel busy/active ratios across all 2.4 GHz, 5 GHz, and 6 GHz radios, visualizes mathematical spectral envelopes (20/40/80/160 MHz) alongside scanned neighboring networks, highlights co-channel/adjacent-channel overlap zones, and recommends the least congested channel per band.
+- **3D Foreign AP RF Triangulation & Geodetic (Lat/Long/Altitude) Location Engine:** Scans surrounding wireless networks across all OpenWrt radios, compares relative RSSI per radio, and triangulates approximate 2D/3D locations for foreign APs using log-distance path loss, radical-axis circle intersection, and weighted non-linear least squares. Supports calibrating each wireless OpenWrt AP with **Latitude (°)**, **Longitude (°)**, and **Altitude (m)** (or draggable floorplan anchors) for East-North-Up (ENU) geodetic projection, multi-floor 3D slant-range compensation, and estimated foreign AP GPS coordinates—complete with an expandable **Large / Full Screen** spatial radar map with interactive zoom and pan.
+- **Background Software Package & Attended Sysupgrade Firmware Manager:** Tracks pending `opkg` / `apk` package updates and advises when new OpenWrt firmware releases are available via Attended Sysupgrade (`auc` / `owut`), executing upgrades in background SSH streams with a global real-time progress banner.
+- **Hermes & External Agent REST API (`/api/agent/*` & `/api/v1/*`):** Built-in OpenAPI 3.1.0 specification (`/api/openapi.json`), tool manifest (`/api/agent/manifest`), and optional API-key authentication enabling AI agents (such as Hermes) and external automation to query fleet health, host status, clients, Wi-Fi spectrum, backups, and updates.
 - **Automated Configuration Backup & Inspection Engine:** Scheduled cron/interval backups per router, SHA-256 checksum tracking, automated retention policy pruning, zero-temporary-file in-memory `.tar.gz` UCI configuration extraction, and side-by-side colorized diffing.
 - **Atomic Flat-File Storage Engine:** Zero external database dependencies; app configuration and schedules are written atomically using a write-to-temp, `fsync`, and atomic rename pattern (`0o600` permissions) preventing corruption during sudden NAS power loss.
 
@@ -173,6 +177,50 @@ flowchart LR
     SSHClient --> RealTarball --> UnifiedNorm
     UnifiedNorm --> Aggregator
 ```
+
+---
+
+### Multi-Radio RF Spectrum Congestion & 3D Wi-Fi Location Triangulation
+
+```mermaid
+flowchart LR
+    subgraph OpenWrtRadios["Wireless OpenWrt AP Fleet"]
+        AP1["AP 1 (Lat, Lng, Alt)<br/>iw survey dump + iw scan"]
+        AP2["AP 2 (Lat, Lng, Alt)<br/>iw survey dump + iw scan"]
+        AP3["AP 3 (Lat, Lng, Alt)<br/>iw survey dump + iw scan"]
+    end
+
+    subgraph SpectrumEngine["Spectrum Congestion & Triangulation Engine (wifiEngine.js)"]
+        SurveyAgg["Airtime Congestion Aggregator<br/>(Busy/Active Ratio, Overlap Zones & Best Channel)"]
+        MfgLookup["Manufacturer Resolver<br/>(IEEE OUI + Virtual BSSID Masking + SSID Heuristics)"]
+        GeoProj["Geodetic ENU & 3D Slant-Range Projector<br/>(Lat/Long -> East/North Meters, Altitude dz Compensation)"]
+        Solver["Weighted Non-Linear Least Squares Solver<br/>(Radical-Axis Seed + 65-Iter Gauss-Newton Trilateration)"]
+    end
+
+    subgraph SpatialUI["Interactive Spectrum & Spatial Radar UI"]
+        SpecChart["SVG Spectrum Curve & Overlap Visualizer"]
+        RadarMap["Interactive 2D/3D Spatial Triangulation Map<br/>(Draggable AP Anchors, Zoom/Pan, Large & Fullscreen Modes)"]
+        NeighborTable["Neighboring Networks Table<br/>(Per-Radio RSSI, Horiz/3D Distance, Est. GPS & Altitude)"]
+    end
+
+    AP1 & AP2 & AP3 --> SurveyAgg & MfgLookup & GeoProj
+    GeoProj --> Solver
+    MfgLookup --> Solver
+    SurveyAgg --> SpecChart
+    Solver --> RadarMap & NeighborTable
+```
+
+1. **Multi-Radio Spectrum Congestion Analysis:**
+   - Polls `iw dev <iface> survey dump` across all managed wireless interfaces to compute real-time channel busy-time vs. active-time utilization percentages and noise floors ($-101\text{ dBm}$ to $-90\text{ dBm}$).
+   - Evaluates pairwise spectral overlap across $20/40/80/160\text{ MHz}$ channels on $2.4\text{ GHz}$, $5\text{ GHz}$, and $6\text{ GHz}$, factoring in both managed AP co-channel/adjacent-channel contention and strong external neighboring networks ($\ge -70\text{ dBm}$), and recommends the cleanest candidate channel per band.
+2. **Active Neighbor Scanning & Vendor Resolution:**
+   - Triggers fleet-wide `iw dev <iface> scan` (`POST /api/wifi/scan`) and aggregates observed BSSIDs across every OpenWrt radio, sorting per-radio RSSI observations from strongest to weakest.
+   - Identifies hardware manufacturers for both BSSIDs and SSIDs by combining an IEEE OUI database, locally-administered virtual BSSID bit-masking (`b0 & ~0x0e` for multi-VAP routers), and SSID prefix/keyword heuristics.
+3. **3D RF Triangulation with Geodetic (Lat / Long / Altitude) Calibration:**
+   - **Wireless-Only Anchor Filtering:** Automatically filters the fleet so only OpenWrt hosts with active wireless radios participate as triangulation anchors (excluding wired-only gateways or switches).
+   - **Geodetic ENU Projection (`latitude`, `longitude`):** When APs are configured with decimal **Latitude (°)** and **Longitude (°)**, their positions are projected into a local East-North-Up (ENU) meter tangent plane around the fleet centroid (`+x` = East, `-y` = North), and solved foreign AP coordinates are back-projected into estimated **GPS Latitude & Longitude**.
+   - **Multi-Floor 3D Slant-Range Compensation (`altitude`):** When APs are configured with **Altitude (m)** across different floors or mounting heights, the engine estimates the foreign AP's elevation (`altitudeMeters`) and projects 3D log-distance path-loss slant ranges onto horizontal ground-plane distances ($d_{\text{horiz}} = \sqrt{\max(0.5^2,\; d_{3\text{D}}^2 - \Delta z^2)}$).
+   - **Trilateration Solver & Interactive Radar Map:** Initializes with radical-axis circle-circle intersections and refines coordinates via 65 iterations of damped weighted non-linear least squares (Gauss-Newton). The SVG spatial map supports draggable AP anchor calibration, batch **Calibrate AP Lat / Long / Alt** editing, **Zoom (`+` / `-` / `100%`) & Pan**, and **Large Map / Full Screen** modes.
 
 ---
 
@@ -338,15 +386,25 @@ The application starts immediately in **Demo Mode**, displaying the 4-node simul
 | `GET` | `/api/hosts` | List all managed OpenWrt routers and APs |
 | `POST` | `/api/hosts` | Register a new OpenWrt host |
 | `GET` | `/api/hosts/:id` | Get single host configuration and telemetry |
-| `PUT` | `/api/hosts/:id` | Update host configuration |
+| `PUT` | `/api/hosts/:id` | Update host configuration, `mapPosition`, or `latitude`/`longitude`/`altitude` |
 | `DELETE`| `/api/hosts/:id` | Delete host from fleet |
 | `POST` | `/api/hosts/test` | Test credentials and connectivity for unsaved host |
 | `POST` | `/api/hosts/:id/test` | Test credentials and connectivity for registered host |
+| `POST` | `/api/hosts/:id/updates/check` | Check pending `opkg`/`apk` package updates & Attended Sysupgrade status |
+| `POST` | `/api/hosts/:id/updates/upgrade` | Start background package upgrade job (`all` or selected packages) |
+| `POST` | `/api/hosts/:id/sysupgrade` | Start background Attended Sysupgrade (`auc` / `owut`) firmware upgrade job |
+| `GET` | `/api/upgrades/jobs` | Poll active and recent background software/firmware upgrade jobs |
 | `GET` | `/api/topology` | Synthesized network topology graph (`nodes` & `links`) |
 | `GET` | `/api/clients` | Searchable, filterable network client inventory |
 | `GET` | `/api/clients/:mac` | Client detail view with roaming and signal history |
-| `GET` | `/api/wifi/channels` | Tri-band (2.4/5/6 GHz) spectrum dataset & radios |
-| `GET` | `/api/wifi/interference`| Co-channel and adjacent-channel interference warnings |
+| `GET` | `/api/wifi/channels` | Tri-band (2.4/5/6 GHz) spectrum radios, scanned neighbors, AP anchors & 3D triangulation |
+| `GET` | `/api/wifi/interference`| Airtime congestion scores, overlapping zones, and channel recommendations |
+| `POST` | `/api/wifi/scan` | Trigger active wireless scan (`iw scan`) across all wireless OpenWrt radios |
+| `GET` | `/api/openapi.json` | OpenAPI 3.1.0 specification for Hermes & external AI agents |
+| `GET` | `/api/agent/manifest` | Agent tool manifest & endpoint discovery |
+| `GET` | `/api/agent/status` | Consolidated fleet health, alerts, Wi-Fi congestion, and update summary |
+| `GET` | `/api/agent/hosts` | Agent-friendly host list & lookup (`/api/agent/hosts/:idOrName`) |
+| `GET` | `/api/agent/wifi` | Agent-friendly Wi-Fi spectrum, congestion, and triangulated neighbors |
 | `GET` | `/api/backups` | List all stored OpenWrt backup archives and metadata |
 | `POST` | `/api/backups/run` | Execute on-demand configuration backup (`hostId: "all"`) |
 | `GET` | `/api/backups/:id/download` | Stream `.tar.gz` archive download |
@@ -371,14 +429,16 @@ The test suite runs using Node.js's native test runner (`node:test` and `node:as
 npm test
 ```
 
-### Test Suite Highlights (21 Passing Tests):
+### Test Suite Highlights (31 Passing Tests):
 - **Health & System Info:** Validates 200 responses, memory metrics, and volume availability.
 - **Host Management & Probes:** Validates CRUD operations, credential masking, and live async connection testing.
 - **Topology Synthesis:** Verifies multi-tier node hierarchies, edge capacities, throughput aggregation, and VLAN mapping.
-- **Client De-Duplication & Roaming:** Verifies de-duplication across multi-AP association lists, RSSI arbitration, and OUI lookups.
-- **Wi-Fi RF Spectrum & Overlap:** Verifies 2.4 GHz, 5 GHz, and 6 GHz spectrum models and co-channel interference detection.
-- **Tarball Inspection & UCI Diff:** Verifies in-memory gzip tarball unpacking, file manifests, and colorized unified line diff generation.
-- **Retention Pruning Engine:** Verifies max backup counts, age limits, and minimum retention guarantees.
+- **Client De-Duplication, DHCP/ARP/rDNS & Manufacturer Resolution:** Verifies de-duplication across multi-AP association lists, gateway DHCP/ARP/rDNS IP resolution, IEEE OUI lookups, virtual locally-administered BSSID masking, and SSID vendor heuristics.
+- **Wi-Fi RF Spectrum Congestion & Neighbor Scanning:** Verifies `iw survey dump` airtime busy/active ratio aggregation, overlapping congestion zones, and multi-radio `iw scan` relative signal strength sorting.
+- **3D Foreign AP RF Triangulation & Geodetic (Lat/Long/Altitude) Calibration:** Verifies wireless-only OpenWrt anchor filtering (excluding wired-only gateways), log-distance path-loss trilateration, East-North-Up (ENU) GPS projection, and multi-floor altitude slant-range compensation.
+- **Package Updates, Background Jobs & Attended Sysupgrade:** Verifies `opkg` / `apk` update parsing, `auc` / `owut` / LuCI Attended Sysupgrade detection, and streaming background upgrade jobs.
+- **Hermes & External Agent REST API:** Verifies OpenAPI 3.1.0 schema, agent manifest, fleet status summary, flexible host lookup, and optional Bearer/`X-API-Key` authentication.
+- **Tarball Inspection, Cron Schedules & UCI Diff:** Verifies in-memory gzip tarball unpacking, cron schedule persistence, retention syncing, and colorized unified line diff generation.
 - **Atomic Storage Engine:** Verifies collision-free atomic writes with `fsync` and `0o600` file mode permissions.
 
 ---

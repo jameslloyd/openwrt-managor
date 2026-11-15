@@ -441,13 +441,34 @@ Each active AP radio generates an RF spectral envelope curve rendered in the fro
   - Peak amplitude: Corresponds to measured AP TX Power or Signal level in dBm (e.g., $-30\text{ dBm}$ to $-80\text{ dBm}$)
   - Baseline: Ambient noise floor (e.g., $-95\text{ dBm}$)
 
-### 7.4 Interference Detection Algorithm
-The Wi-Fi engine analyzes all active radios across the OpenWrt fleet and detects interference:
-1. **Co-Channel Interference (CCI):** Two or more APs sharing the exact same primary channel (or overlapping center frequencies within the channel width).
-   - *Severity: High* if both APs have $> 5$ active clients or active channel utilization $> 40\%$.
-2. **Adjacent-Channel Interference (ACI):** Partially overlapping channels where channel edges collide (e.g., in 2.4 GHz, AP A on Channel 1 and AP B on Channel 3).
-   - *Severity: Critical* because non-orthogonal OFDM subcarriers cause unrecoverable frame collisions and back-off deadlocks.
-3. **DFS Radar Detection State:** For 5 GHz channels in UNII-2 and UNII-2 Extended (channels 52–144), flag DFS state (`cac_in_progress`, `active_dfs`, `radar_detected`).
+### 7.4 Multi-Radio Airtime Congestion & Interference Detection Algorithm
+The Wi-Fi engine (`server/services/wifiEngine.js`) analyzes all active radios and scanned external networks across the OpenWrt fleet:
+1. **Airtime Survey Utilization (`iw dev <iface> survey dump`):**
+   - Computes per-radio channel busy/active ratios (`utilizationPct`) and noise floors (`noiseDbm`).
+   - Calculates a composite **Band Congestion Index (`0–100%`)** and recommends the cleanest candidate channel (`recommendedChannel`) per band (`2.4GHz`, `5GHz`, `6GHz`).
+2. **Co-Channel Interference (CCI) & Adjacent-Channel Interference (ACI):**
+   - Evaluates spectral span overlap $[f_c - \frac{BW}{2}, f_c + \frac{BW}{2}]$ across managed radios and external neighbors ($\ge -70\text{ dBm}$), returning structured `overlappingZones` (`startFreqMhz`, `endFreqMhz`, `combinedUtilizationPct`) for hatched SVG rendering.
+3. **Active Neighbor Scanning & Manufacturer Identification (`server/services/ouiVendor.js`):**
+   - Aggregates `iw dev <iface> scan` BSSIDs across all wireless OpenWrt radios, recording each observing radio's RSSI (`observations` sorted strongest first).
+   - Resolves both `bssidManufacturer` and `ssidManufacturer` using an IEEE OUI lookup table, locally-administered virtual BSSID bit-masking (`b0 & ~0x0e` to recover the base hardware OUI on multi-SSID routers), and SSID vendor heuristics.
+
+### 7.5 3D Foreign AP RF Triangulation & Geodetic (Lat / Long / Altitude) Engine
+The RF Location Engine (`computeHostAnchorPositions`, `triangulateForeignAp`, and `triangulateBandNeighbors` in `server/services/wifiEngine.js`) estimates physical 2D/3D coordinates and GPS locations for surrounding foreign APs:
+1. **Wireless-Only OpenWrt Anchor Filtering (`filterWirelessHosts`):**
+   - Only OpenWrt hosts with active wireless radios (`radios.length > 0`) are included as triangulation anchors. Wired-only OpenWrt gateways, routers, or switches (`radios: []`) are automatically excluded so they do not skew default anchor geometry or appear on the RF spatial map.
+2. **Geodetic (Latitude / Longitude) East-North-Up (ENU) Projection:**
+   - Each OpenWrt host supports optional `latitude` ($-90^\circ$ to $90^\circ$), `longitude` ($-180^\circ$ to $180^\circ$), and `altitude` (meters).
+   - When GPS coordinates are configured on wireless APs, `computeHostAnchorPositions()` computes the fleet GPS centroid $(\text{lat}_0, \text{lng}_0, \text{alt}_0)$ and projects each AP's geodetic coordinates into local East-North-Up (ENU) meters ($R = 6,371,000\text{ m}$):
+     $$\Delta E_i = (\text{lng}_i - \text{lng}_0)\frac{\pi}{180} R \cos(\text{lat}_0), \quad \Delta N_i = (\text{lat}_i - \text{lat}_0)\frac{\pi}{180} R$$
+   - Projects ENU meter offsets onto the $0\dots 100$ floorplan canvas (`+x` = East, `-y` = North) and back-projects solved foreign AP positions into estimated **GPS Latitude & Longitude** (`triangulation.latitude`, `triangulation.longitude`).
+3. **Log-Distance Path Loss & Multi-Floor 3D Slant-Range Compensation:**
+   - Converts each observing radio's RSSI (dBm) into a 3D slant distance $d_{3\text{D}, i}$ using band-specific indoor log-distance path loss ($P_{\text{ref}}(1\text{m}) \in \{-38, -42, -45\}\text{ dBm}$, path-loss exponent $n \in \{2.7, 3.0, 3.2\}$):
+     $$d_{3\text{D}, i} = 10^{\frac{P_{\text{ref}} - \text{RSSI}_i}{10 n}}$$
+   - When APs have `altitude` (meters) configured across different floors or mounting heights, the solver estimates the foreign AP's elevation (`altitudeMeters`) via inverse-square-distance weighted interpolation and gradient refinement, then projects each 3D slant range onto the horizontal ground plane:
+     $$d_{\text{horiz}, i} = \sqrt{\max\left(0.5^2,\; d_{3\text{D}, i}^2 - \Delta z_i^2\right)}$$
+4. **Radical-Axis Initialization & Weighted Non-Linear Least Squares (Gauss-Newton):**
+   - For $1$ observing AP: places the foreign AP along an outward proximity ring (`method: "proximity_ring"`).
+   - For $\ge 2$ observing APs: computes circle-circle radical-axis intersection candidates and an inverse-distance weighted centroid seed, then refines $(x, y)$ over 65 iterations of damped weighted non-linear least squares (`method: "bilateration"` for 2 APs, `"trilateration"` for $\ge 3$ APs), outputting position `(x, y)`, `altitudeMeters`, `latitude`, `longitude`, `errorRadiusMeters`, `confidencePct`, and compass `bearingLabel`.
 
 ---
 

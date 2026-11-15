@@ -375,6 +375,16 @@ A visual RF spectrum analyzer mapping channel allocations across all managed Ope
    - **Co-Channel Interference (CCI):** Triggered when two or more AP radios in the same deployment share the exact same primary channel or overlapping spectrum slice.
      - **Visual Cue:** Overlapping curve area is filled with a semi-transparent amber hatch pattern; an amber warning banner appears above the spectrum chart listing conflicting AP names and recommending alternate clean channels.
    - **DFS Status Indication:** APs operating on DFS channels display a blue badge `DFS (Monitoring)` or amber badge `DFS Radar Detected (Channel Switched)`.
+4. **Foreign AP RF Triangulation & Spatial Radar Map (`public/js/charts/triangulation-map.js`):**
+   - **Wireless-Only OpenWrt AP Anchor Nodes:** Renders draggable blue anchor nodes exclusively for managed OpenWrt hosts that have wireless radios (excluding wired-only routers/gateways). Each anchor displays its hostname and, when calibrated, its GPS (`lat°, lng°`) and `Alt (m)` badge.
+   - **Geodetic (Lat / Long) & Altitude Calibration:**
+     - Clicking **`Calibrate AP Lat / Long / Alt`** in the triangulation card header opens a batch calibration `<dialog>` modal listing all wireless OpenWrt APs with inputs for **Latitude (°)**, **Longitude (°)**, and **Altitude (m)**.
+     - Individual AP coordinates can also be configured in the **Add / Edit OpenWrt Host** modal on the Fleet page (including a **Use Browser GPS** auto-fill button) or calibrated by dragging blue AP anchor nodes directly on the floorplan canvas.
+   - **Viewport Sizing & Interactive Zoom/Pan:**
+     - Header and on-canvas toolbar controls allow toggling between **Standard Size**, **Large Map** (`620px–780px` tall viewport persisted in `localStorage`), and **Full Screen** mode (`Esc` to exit).
+     - Floating toolbar provides **Zoom In (`+`)**, **Zoom Out (`-`)**, and **Reset Zoom (`100%`)** up to `350%`, with mouse-wheel zoom and drag-to-pan across dense AP clusters.
+   - **Triangulation Rings, Signal Vectors & Inspector Bar:**
+     - Selecting any foreign AP (by clicking its crosshair marker on the map or clicking **`Locate`** in the Neighboring Networks table) renders dashed per-AP RSSI distance rings, signal power vectors (`dBm` & horizontal/3D distance in meters), an uncertainty halo (`±errorRadiusMeters`), and a bottom inspector bar showing solved `(x, y)` meters, **Est. Altitude (`m`)**, **Est. GPS (`lat°, lng°`)**, compass bearing, and confidence score.
 
 ---
 
