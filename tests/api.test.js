@@ -708,9 +708,27 @@ test('Foreign AP RF Triangulation: trilaterates approximate 2D coordinates from 
       '\t\t * channel width: 1 (80 MHz)',
     ].join('\n');
 
+  const wiredGwOutput = [
+    '===BOARD===',
+    JSON.stringify({ hostname: 'Core-Wired-Gateway', model: 'FriendlyElec NanoPi R6S' }),
+    '===UPTIME===',
+    '86400.00 100000.00',
+    '===IWDEV===',
+  ].join('\n');
+
+  const wiredGateway = { id: 'gw-wired', name: 'Core Wired Gateway', role: 'gateway', mapPosition: { x: 50, y: 50 } };
   const apWest = { id: 'ap-west', name: 'West Wing AP', mapPosition: { x: 20, y: 20 } };
   const apEast = { id: 'ap-east', name: 'East Wing AP', mapPosition: { x: 80, y: 20 } };
   const apSouth = { id: 'ap-south', name: 'South Patio AP', mapPosition: { x: 50, y: 80 } };
+
+  // Include a wired-only OpenWrt gateway (no wireless radios) and ensure it is excluded from AP triangulation
+  const gwTelemetry = parseSshTelemetryOutput(wiredGateway, wiredGwOutput);
+  assert.equal(gwTelemetry.radios.length, 0);
+  hostManager.applyTelemetryToHost(wiredGateway, gwTelemetry);
+  hostManager.hostsCacheById.set('gw-wired', {
+    ...hostManager.hostsCacheById.get('gw-wired'),
+    persisted: true,
+  });
 
   // Foreign AP is much closer to West Wing AP (-48 dBm -> ~1.6m) than East (-74 dBm -> ~11.7m) or South (-78 dBm -> ~15.8m)
   hostManager.applyTelemetryToHost(apWest, parseSshTelemetryOutput(apWest, makeApScan('West-AP', -48)));
@@ -720,6 +738,11 @@ test('Foreign AP RF Triangulation: trilaterates approximate 2D coordinates from 
   const bands = hostManager.getLiveWifiBands();
   const band5g = bands['5GHz'];
   assert.equal(band5g.anchors.length, 3);
+  assert.equal(band5g.anchors.some((a) => a.hostId === 'gw-wired'), false);
+  assert.deepEqual(
+    band5g.anchors.map((a) => a.hostId).sort(),
+    ['ap-east', 'ap-south', 'ap-west']
+  );
   assert.equal(band5g.neighbors.length, 1);
 
   const foreignAp = band5g.neighbors[0];
@@ -739,7 +762,7 @@ test('Foreign AP RF Triangulation: trilaterates approximate 2D coordinates from 
   assert.ok(distToWest < distToSouth, `Expected distToWest (${distToWest}) < distToSouth (${distToSouth})`);
 
   // Clean up test state
-  for (const id of ['ap-west', 'ap-east', 'ap-south']) {
+  for (const id of ['gw-wired', 'ap-west', 'ap-east', 'ap-south']) {
     hostManager.liveRadiosByHost.delete(id);
     hostManager.liveNeighborsByHost.delete(id);
     hostManager.hostsCacheById.delete(id);

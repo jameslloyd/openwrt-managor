@@ -17,6 +17,27 @@ let activeBand = '5GHz';
 let selectedNeighborBssid = null;
 let isScanning = false;
 
+function getWirelessAnchors(bandData = {}, allBands = {}, hosts = []) {
+  const rawAnchors = Array.isArray(bandData?.anchors) ? bandData.anchors : [];
+  const radioHostIds = new Set();
+  for (const b of Object.values(allBands || {})) {
+    for (const r of b?.radios || []) {
+      if (r?.hostId) radioHostIds.add(r.hostId);
+    }
+  }
+  const hostsById = new Map((hosts || []).map((h) => [h.id, h]));
+  return rawAnchors.filter((anchor) => {
+    if (!anchor?.hostId) return false;
+    if (anchor.hasWirelessRadios === false) return false;
+    if (radioHostIds.has(anchor.hostId)) return true;
+    const host = hostsById.get(anchor.hostId);
+    if (host && Array.isArray(host.radios)) {
+      return host.radios.length > 0;
+    }
+    return anchor.hasWirelessRadios === true || radioHostIds.size === 0;
+  });
+}
+
 export function renderWifi(container) {
   const { wifiChannels, wifiInterference } = store.state;
   const bands = wifiChannels?.bands || {};
@@ -198,7 +219,7 @@ export function renderWifi(container) {
           store.setState({ wifiChannels: channelsRes });
           const updatedBand = channelsRes.bands[activeBand] || currentBandData;
           triangulationMapInstance.setData({
-            anchors: updatedBand.anchors || [],
+            anchors: getWirelessAnchors(updatedBand, channelsRes.bands, store.state.hosts),
             neighbors: updatedBand.neighbors || [],
             selectedBssid: selectedNeighborBssid,
           });
@@ -217,7 +238,7 @@ export function renderWifi(container) {
   });
 
   triangulationMapInstance.setData({
-    anchors: currentBandData.anchors || [],
+    anchors: getWirelessAnchors(currentBandData, bands, store.state.hosts),
     neighbors: currentBandData.neighbors || [],
     selectedBssid: selectedNeighborBssid,
   });
@@ -266,7 +287,7 @@ export function renderWifi(container) {
       selectedNeighborBssid = null;
       triangulationMapInstance.setBand(activeBand);
       triangulationMapInstance.setData({
-        anchors: bandData.anchors || [],
+        anchors: getWirelessAnchors(bandData, allBands, store.state.hosts),
         neighbors: bandData.neighbors || [],
         selectedBssid: null,
       });

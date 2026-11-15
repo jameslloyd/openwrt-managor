@@ -399,12 +399,38 @@ function computeCompassBearing(dx, dy) {
 }
 
 /**
- * Computes 2D coordinate anchors (on a 0..100 meter floorplan grid) for all managed OpenWrt hosts.
+ * Filters a list of OpenWrt hosts to only those with wireless radios.
+ */
+export function filterWirelessHosts(hosts = [], bandsData = null) {
+  const radioHostIds = new Set();
+  if (bandsData && typeof bandsData === 'object') {
+    for (const bandInfo of Object.values(bandsData)) {
+      for (const r of bandInfo?.radios || []) {
+        if (r?.hostId) radioHostIds.add(r.hostId);
+      }
+    }
+  }
+
+  return (hosts || []).filter((host) => {
+    if (!host || !host.id) return false;
+    if (Array.isArray(host.radios)) {
+      return host.radios.length > 0 || radioHostIds.has(host.id);
+    }
+    if (typeof host.hasWirelessRadios === 'boolean') {
+      return host.hasWirelessRadios || radioHostIds.has(host.id);
+    }
+    return radioHostIds.size === 0 || radioHostIds.has(host.id);
+  });
+}
+
+/**
+ * Computes 2D coordinate anchors (on a 0..100 meter floorplan grid) for managed OpenWrt hosts with wireless radios.
  * Preserves user-defined `host.mapPosition` ({ x, y }) when present.
  */
 export function computeHostAnchorPositions(hosts = []) {
-  const total = hosts.length;
-  return hosts.map((host, idx) => {
+  const wirelessHosts = filterWirelessHosts(hosts);
+  const total = wirelessHosts.length;
+  return wirelessHosts.map((host, idx) => {
     const customX = Number(host?.mapPosition?.x);
     const customY = Number(host?.mapPosition?.y);
     if (Number.isFinite(customX) && Number.isFinite(customY)) {
@@ -412,6 +438,7 @@ export function computeHostAnchorPositions(hosts = []) {
         hostId: host.id,
         hostName: host.name || host.hostname || host.id,
         role: host.role || 'ap',
+        hasWirelessRadios: true,
         x: Math.round(Math.max(6, Math.min(94, customX)) * 10) / 10,
         y: Math.round(Math.max(6, Math.min(94, customY)) * 10) / 10,
         isCustomPosition: true,
@@ -442,6 +469,7 @@ export function computeHostAnchorPositions(hosts = []) {
       hostId: host.id,
       hostName: host.name || host.hostname || host.id,
       role: host.role || 'ap',
+      hasWirelessRadios: true,
       x,
       y,
       isCustomPosition: false,
@@ -668,10 +696,11 @@ export function triangulateForeignAp(neighbor, anchorsByHostId) {
 }
 
 /**
- * Enriches all bands in `bandsData` with host anchor positions and per-neighbor RF triangulation.
+ * Enriches all bands in `bandsData` with host anchor positions (wireless hosts only) and per-neighbor RF triangulation.
  */
 export function triangulateBandNeighbors(bandsData, hosts = []) {
-  const anchors = computeHostAnchorPositions(hosts);
+  const wirelessHosts = filterWirelessHosts(hosts, bandsData);
+  const anchors = computeHostAnchorPositions(wirelessHosts);
   const anchorsByHostId = new Map(anchors.map((a) => [a.hostId, a]));
 
   for (const bandInfo of Object.values(bandsData || {})) {

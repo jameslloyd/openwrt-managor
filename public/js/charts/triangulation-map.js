@@ -20,7 +20,16 @@ export class TriangulationMap {
   }
 
   setData({ anchors = [], neighbors = [], selectedBssid = null }) {
-    this.anchors = Array.isArray(anchors) ? anchors.map((a) => ({ ...a })) : [];
+    this.anchors = Array.isArray(anchors)
+      ? anchors
+          .filter(
+            (a) =>
+              a &&
+              a.hasWirelessRadios !== false &&
+              (!Array.isArray(a.radios) || a.radios.length > 0)
+          )
+          .map((a) => ({ ...a }))
+      : [];
     this.neighbors = Array.isArray(neighbors)
       ? neighbors.filter((n) => !n.isManagedFleet && n.triangulation)
       : [];

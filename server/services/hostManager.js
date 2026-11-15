@@ -157,11 +157,16 @@ export class HostManager {
     if (Array.isArray(telemetry.radios)) {
       host.radios = telemetry.radios;
       this.liveRadiosByHost.set(host.id, telemetry.radios);
+      if (telemetry.radios.length === 0) {
+        this.liveNeighborsByHost.delete(host.id);
+      }
     }
-    if (Array.isArray(telemetry.neighbors) && telemetry.neighbors.length > 0) {
-      this.liveNeighborsByHost.set(host.id, telemetry.neighbors);
-    } else if (!this.liveNeighborsByHost.has(host.id) && Array.isArray(telemetry.neighbors)) {
-      this.liveNeighborsByHost.set(host.id, telemetry.neighbors);
+    if (!Array.isArray(telemetry.radios) || telemetry.radios.length > 0) {
+      if (Array.isArray(telemetry.neighbors) && telemetry.neighbors.length > 0) {
+        this.liveNeighborsByHost.set(host.id, telemetry.neighbors);
+      } else if (!this.liveNeighborsByHost.has(host.id) && Array.isArray(telemetry.neighbors)) {
+        this.liveNeighborsByHost.set(host.id, telemetry.neighbors);
+      }
     }
     if (Array.isArray(telemetry.clients)) {
       host.clientCount = telemetry.clients.length;
@@ -192,12 +197,17 @@ export class HostManager {
     if (telemetry.sample) {
       this.prevSamples.set(host.id, telemetry.sample);
     }
+    const prevCache = this.hostsCacheById.get(host.id);
+    const radios = Array.isArray(host.radios) ? host.radios : (this.liveRadiosByHost.get(host.id) || []);
     this.hostsCacheById.set(host.id, {
       id: host.id,
       name: host.name || host.hostname || host.id,
       hostname: host.hostname || host.name || host.id,
       role: host.role || 'ap',
-      mapPosition: host.mapPosition || null,
+      mapPosition: host.mapPosition || prevCache?.mapPosition || null,
+      radios,
+      hasWirelessRadios: radios.length > 0,
+      persisted: Boolean(prevCache?.persisted),
     });
     host.lastSeen = new Date().toISOString();
     return true;
@@ -490,31 +500,45 @@ export class HostManager {
       bands[bandName].neighbors = list;
     }
 
-    // Collect active hosts for RF triangulation anchor coordinates
+    // Collect active hosts for RF triangulation anchor coordinates (only OpenWrt hosts with wireless radios)
     const activeHostIds = new Set();
     for (const [id, radios] of this.liveRadiosByHost.entries()) {
       if (Array.isArray(radios) && radios.length > 0) activeHostIds.add(id);
     }
-    for (const [id, neighbors] of this.liveNeighborsByHost.entries()) {
-      if (Array.isArray(neighbors) && neighbors.length > 0) activeHostIds.add(id);
-    }
     for (const [id, h] of this.hostsCacheById.entries()) {
-      if (h.persisted) activeHostIds.add(id);
+      const liveRadios = this.liveRadiosByHost.get(id);
+      const hasLiveRadios = Array.isArray(liveRadios) && liveRadios.length > 0;
+      const hasCachedRadios = Boolean(h.persisted && !this.liveRadiosByHost.has(id) && h.hasWirelessRadios);
+      if (hasLiveRadios || hasCachedRadios) {
+        activeHostIds.add(id);
+      }
     }
 
     const activeHosts = [];
     for (const hostId of activeHostIds) {
       const cached = this.hostsCacheById.get(hostId);
+      const liveRadios = this.liveRadiosByHost.get(hostId) || cached?.radios || [];
+      if (!Array.isArray(liveRadios) || liveRadios.length === 0) continue;
       if (cached) {
-        activeHosts.push(cached);
+        activeHosts.push({
+          ...cached,
+          radios: liveRadios,
+          hasWirelessRadios: true,
+        });
       } else {
-        const radios = this.liveRadiosByHost.get(hostId) || [];
         const neighbors = this.liveNeighborsByHost.get(hostId) || [];
         const hostName =
-          radios[0]?.hostName ||
+          liveRadios[0]?.hostName ||
           neighbors[0]?.seenByHostName ||
           hostId;
-        activeHosts.push({ id: hostId, name: hostName, role: 'ap', mapPosition: null });
+        activeHosts.push({
+          id: hostId,
+          name: hostName,
+          role: 'ap',
+          mapPosition: null,
+          radios: liveRadios,
+          hasWirelessRadios: true,
+        });
       }
     }
 
@@ -525,9 +549,18 @@ export class HostManager {
 
   async scanAllWifiNetworks(targetHostId = 'all') {
     const hosts = await this.getAllHosts({ sanitized: false });
-    const onlineHosts = hosts.filter(
-      (h) => !h.isSimulated && (targetHostId === 'all' || h.id === targetHostId)
-    );
+    const onlineHosts = hosts.filter((h) => {
+      if (h.isSimulated) return false;
+      if (targetHostId !== 'all' && h.id !== targetHostId) return false;
+      // If scanning all hosts, skip hosts that were already polled and confirmed to have 0 wireless radios
+      if (targetHostId === 'all') {
+        const liveRadios = this.liveRadiosByHost.get(h.id);
+        if (Array.isArray(liveRadios) && liveRadios.length === 0 && (!Array.isArray(h.radios) || h.radios.length === 0)) {
+          return false;
+        }
+      }
+      return true;
+    });
 
     await Promise.all(
       onlineHosts.map(async (h) => {
@@ -558,12 +591,23 @@ export class HostManager {
       }
     }
     for (const h of hosts) {
+      const liveRadios = this.liveRadiosByHost.get(h.id);
+      const radios = Array.isArray(liveRadios)
+        ? liveRadios
+        : Array.isArray(h.radios)
+          ? h.radios
+          : [];
+      if (!this.liveRadiosByHost.has(h.id) && radios.length > 0) {
+        this.liveRadiosByHost.set(h.id, radios);
+      }
       this.hostsCacheById.set(h.id, {
         id: h.id,
         name: h.name || h.hostname || h.id,
         hostname: h.hostname || h.name || h.id,
         role: h.role || 'ap',
         mapPosition: h.mapPosition || null,
+        radios,
+        hasWirelessRadios: radios.length > 0,
         persisted: true,
       });
     }
@@ -608,7 +652,7 @@ export class HostManager {
       rxRateBps: 0,
       txRateBps: 0,
       clientCount: 0,
-      radios: [],
+      radios: Array.isArray(data.radios) ? data.radios : [],
       lastSeen: new Date().toISOString(),
     };
 
@@ -626,12 +670,18 @@ export class HostManager {
     }
 
     hosts.push(newHost);
+    const radios = Array.isArray(newHost.radios) ? newHost.radios : [];
+    if (radios.length > 0) {
+      this.liveRadiosByHost.set(newHost.id, radios);
+    }
     this.hostsCacheById.set(newHost.id, {
       id: newHost.id,
       name: newHost.name || newHost.hostname || newHost.id,
       hostname: newHost.hostname || newHost.name || newHost.id,
       role: newHost.role || 'ap',
       mapPosition: newHost.mapPosition || null,
+      radios,
+      hasWirelessRadios: radios.length > 0,
       persisted: true,
     });
     await db.saveHosts(hosts);
@@ -663,12 +713,17 @@ export class HostManager {
     }
 
     hosts[idx] = updated;
+    const radios = Array.isArray(updated.radios)
+      ? updated.radios
+      : (this.liveRadiosByHost.get(updated.id) || []);
     this.hostsCacheById.set(updated.id, {
       id: updated.id,
       name: updated.name || updated.hostname || updated.id,
       hostname: updated.hostname || updated.name || updated.id,
       role: updated.role || 'ap',
       mapPosition: updated.mapPosition || null,
+      radios,
+      hasWirelessRadios: radios.length > 0,
       persisted: true,
     });
     await db.saveHosts(hosts);
