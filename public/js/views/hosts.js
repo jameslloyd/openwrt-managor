@@ -190,6 +190,35 @@ export function renderHosts(container) {
             <input type="password" id="host-password-input" class="form-input" placeholder="Router password or ubus token" />
           </div>
 
+          <!-- Physical Geolocation (Latitude, Longitude & Altitude for RF Triangulation) -->
+          <div style="border-top: 1px solid var(--color-border); padding-top: 10px; margin-top: 4px;">
+            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; gap: 8px; flex-wrap: wrap;">
+              <div>
+                <span class="form-label" style="margin-bottom: 0;">Physical AP Location (GPS &amp; Altitude for RF Triangulation)</span>
+                <div style="font-size: 11px; color: var(--color-text-muted);">
+                  Optional decimal degrees &amp; elevation (meters) to anchor 3D multi-AP RF triangulation
+                </div>
+              </div>
+              <button type="button" class="btn btn-secondary" id="host-use-gps-btn" style="padding: 3px 8px; font-size: 11px;">
+                ${renderIcon('globe', 'icon')} Use Browser GPS
+              </button>
+            </div>
+            <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px;">
+              <div class="form-group" style="margin-bottom: 0;">
+                <label class="form-label" for="host-latitude-input" style="font-size: 11.5px;">Latitude (°)</label>
+                <input type="number" step="any" min="-90" max="90" id="host-latitude-input" class="form-input font-mono" placeholder="e.g. 51.507351" />
+              </div>
+              <div class="form-group" style="margin-bottom: 0;">
+                <label class="form-label" for="host-longitude-input" style="font-size: 11.5px;">Longitude (°)</label>
+                <input type="number" step="any" min="-180" max="180" id="host-longitude-input" class="form-input font-mono" placeholder="e.g. -0.127758" />
+              </div>
+              <div class="form-group" style="margin-bottom: 0;">
+                <label class="form-label" for="host-altitude-input" style="font-size: 11.5px;">Altitude (m)</label>
+                <input type="number" step="any" min="-500" max="10000" id="host-altitude-input" class="form-input font-mono" placeholder="e.g. 12.5" />
+              </div>
+            </div>
+          </div>
+
           <!-- Connection Test Feedback Box -->
           <div style="margin-top: 6px;">
             <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px;">
@@ -247,6 +276,35 @@ export function renderHosts(container) {
     openModal('host-form-dialog');
   });
 
+  // Attach Use Browser GPS button
+  container.querySelector('#host-use-gps-btn')?.addEventListener('click', () => {
+    if (!navigator.geolocation) {
+      toast.error('Geolocation Unavailable', 'Your browser does not support the Geolocation API.');
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        const latEl = container.querySelector('#host-latitude-input');
+        const lngEl = container.querySelector('#host-longitude-input');
+        const altEl = container.querySelector('#host-altitude-input');
+        if (latEl && Number.isFinite(pos.coords.latitude)) {
+          latEl.value = (Math.round(pos.coords.latitude * 1e6) / 1e6).toString();
+        }
+        if (lngEl && Number.isFinite(pos.coords.longitude)) {
+          lngEl.value = (Math.round(pos.coords.longitude * 1e6) / 1e6).toString();
+        }
+        if (altEl && Number.isFinite(pos.coords.altitude) && pos.coords.altitude !== null) {
+          altEl.value = (Math.round(pos.coords.altitude * 10) / 10).toString();
+        }
+        toast.success('GPS Coordinates Filled', 'Populated Latitude, Longitude, and Altitude from browser geolocation.');
+      },
+      (err) => {
+        toast.error('Geolocation Failed', err.message || 'Unable to retrieve browser GPS coordinates.');
+      },
+      { enableHighAccuracy: true, timeout: 8000 }
+    );
+  });
+
   // Attach Form Submit
   const form = container.querySelector('#host-form');
   form?.addEventListener('submit', async (e) => {
@@ -258,8 +316,26 @@ export function renderHosts(container) {
     const protocol = container.querySelector('#host-protocol-select').value;
     const username = container.querySelector('#host-username-input').value;
     const password = container.querySelector('#host-password-input').value;
+    const rawLat = container.querySelector('#host-latitude-input')?.value?.trim() ?? '';
+    const rawLng = container.querySelector('#host-longitude-input')?.value?.trim() ?? '';
+    const rawAlt = container.querySelector('#host-altitude-input')?.value?.trim() ?? '';
 
-    const payload = { name, ip, role, protocol, username, password, isSimulated: false };
+    const latitude = rawLat !== '' && Number.isFinite(Number(rawLat)) ? Number(rawLat) : null;
+    const longitude = rawLng !== '' && Number.isFinite(Number(rawLng)) ? Number(rawLng) : null;
+    const altitude = rawAlt !== '' && Number.isFinite(Number(rawAlt)) ? Number(rawAlt) : null;
+
+    const payload = {
+      name,
+      ip,
+      role,
+      protocol,
+      username,
+      password,
+      latitude,
+      longitude,
+      altitude,
+      isSimulated: false,
+    };
 
     try {
       if (id) {
@@ -367,6 +443,12 @@ export function renderHosts(container) {
         const passInput = document.getElementById('host-password-input');
         passInput.value = '';
         passInput.placeholder = host.hasPassword ? 'Leave blank to keep saved password' : 'Router password or ubus token';
+        const latInput = document.getElementById('host-latitude-input');
+        const lngInput = document.getElementById('host-longitude-input');
+        const altInput = document.getElementById('host-altitude-input');
+        if (latInput) latInput.value = typeof host.latitude === 'number' ? host.latitude : '';
+        if (lngInput) lngInput.value = typeof host.longitude === 'number' ? host.longitude : '';
+        if (altInput) altInput.value = typeof host.altitude === 'number' ? host.altitude : '';
         document.getElementById('host-modal-title').textContent = `Edit Host: ${host.name || host.id}`;
         const fb = document.getElementById('host-test-feedback');
         if (fb) fb.style.display = 'none';
@@ -429,6 +511,13 @@ function renderHostRow(h) {
           ${escapeHtml(h.model || 'OpenWrt')}${hostVendor && hostVendor !== 'Unknown Manufacturer' ? ` • ${escapeHtml(hostVendor)}` : ''}
         </div>
         ${h.mac ? `<div class="font-mono" style="font-size: 10.5px; color: var(--color-text-muted);">${escapeHtml(formatMac(h.mac))} (${escapeHtml(hostVendor)})</div>` : ''}
+        ${
+          typeof h.latitude === 'number' || typeof h.altitude === 'number'
+            ? `<div class="font-mono" style="font-size: 10.5px; color: var(--color-primary); margin-top: 2px;">
+                ${typeof h.latitude === 'number' && typeof h.longitude === 'number' ? `GPS: ${h.latitude.toFixed(5)}°, ${h.longitude.toFixed(5)}°` : ''}${typeof h.latitude === 'number' && typeof h.altitude === 'number' ? ' • ' : ''}${typeof h.altitude === 'number' ? `Alt: ${h.altitude}m` : ''}
+              </div>`
+            : ''
+        }
       </td>
       <td>
         <span class="font-mono">${escapeHtml(h.ip)}</span>

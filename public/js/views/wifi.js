@@ -6,6 +6,7 @@
 import { store } from '../store.js';
 import { api } from '../api.js';
 import { toast } from '../components/toast.js';
+import { openModal, closeModal } from '../components/modal.js';
 import { SpectrumChart } from '../charts/spectrum-chart.js';
 import { TriangulationMap } from '../charts/triangulation-map.js';
 import { renderIcon } from '../utils/icons.js';
@@ -147,6 +148,10 @@ export function renderWifi(container) {
           </div>
           <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
             <span class="status-pill info">Log-Distance Path Loss + Weighted Least Squares</span>
+            <button type="button" class="btn btn-secondary btn-sm" id="wifi-calibrate-gps-btn" style="padding: 4px 10px; font-size: 12px;">
+              ${renderIcon('globe', 'icon')}
+              <span>Calibrate AP Lat / Long / Alt</span>
+            </button>
             <button type="button" class="btn btn-secondary btn-sm" id="wifi-tri-expand-btn" style="padding: 4px 10px; font-size: 12px;">
               ${renderIcon(triangulationSizeMode === 'large' ? 'minimize' : 'maximize', 'icon')}
               <span>${triangulationSizeMode === 'large' ? 'Standard Size' : 'Large Map'}</span>
@@ -159,6 +164,29 @@ export function renderWifi(container) {
         </div>
         <div id="wifi-triangulation-map-mount"></div>
       </div>
+
+      <!-- AP GPS (Latitude / Longitude) & Altitude Calibration Native <dialog> Modal -->
+      <dialog id="wifi-ap-gps-dialog" aria-labelledby="wifi-ap-gps-modal-title" style="max-width: 720px;">
+        <form id="wifi-ap-gps-form" method="dialog">
+          <div class="modal-header">
+            <h2 id="wifi-ap-gps-modal-title" class="modal-title">Calibrate AP GPS (Lat / Long) &amp; Altitude</h2>
+            <button type="button" class="btn-icon" onclick="document.getElementById('wifi-ap-gps-dialog').close()" aria-label="Close">
+              ${renderIcon('x', 'icon')}
+            </button>
+          </div>
+          <div class="modal-body" style="gap: 12px;">
+            <p style="font-size: 12.5px; color: var(--color-text-secondary); margin: 0;">
+              Enter the decimal <strong>Latitude (°)</strong>, <strong>Longitude (°)</strong>, and <strong>Altitude (m)</strong> for each wireless OpenWrt AP.
+              GPS coordinates project your APs onto an exact East-North-Up (ENU) meter floorplan, and Altitude compensates 3D slant-range RSSI across floors.
+            </p>
+            <div id="wifi-ap-gps-rows-mount"></div>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" onclick="document.getElementById('wifi-ap-gps-dialog').close()">Cancel</button>
+            <button type="submit" class="btn btn-primary" id="wifi-ap-gps-save-btn">Save Coordinates &amp; Re-Triangulate</button>
+          </div>
+        </form>
+      </dialog>
 
       <!-- Scanned Neighboring Networks & Relative Signal Strength per Radio -->
       <div id="wifi-neighbors-mount">
@@ -296,6 +324,108 @@ export function renderWifi(container) {
   triFullscreenBtn?.addEventListener('click', () => {
     const nextMode = triangulationSizeMode === 'fullscreen' ? 'standard' : 'fullscreen';
     triangulationMapInstance.setSizeMode(nextMode);
+  });
+
+  // Attach Calibrate AP Lat / Long / Alt modal handler
+  const calibrateGpsBtn = container.querySelector('#wifi-calibrate-gps-btn');
+  const gpsRowsMount = container.querySelector('#wifi-ap-gps-rows-mount');
+  const gpsForm = container.querySelector('#wifi-ap-gps-form');
+
+  const getWirelessFleetHosts = () => {
+    const allBands = store.state.wifiChannels?.bands || {};
+    const radioHostIds = new Set();
+    for (const b of Object.values(allBands)) {
+      for (const r of b?.radios || []) {
+        if (r?.hostId) radioHostIds.add(r.hostId);
+      }
+    }
+    return (store.state.hosts || []).filter(
+      (h) => (Array.isArray(h.radios) && h.radios.length > 0) || radioHostIds.has(h.id)
+    );
+  };
+
+  calibrateGpsBtn?.addEventListener('click', () => {
+    const wirelessHosts = getWirelessFleetHosts();
+    if (gpsRowsMount) {
+      if (wirelessHosts.length === 0) {
+        gpsRowsMount.innerHTML = `<div class="empty-state" style="padding: 16px;">No OpenWrt hosts with wireless radios found.</div>`;
+      } else {
+        gpsRowsMount.innerHTML = `
+          <div class="table-responsive">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Wireless OpenWrt AP</th>
+                  <th>Latitude (°)</th>
+                  <th>Longitude (°)</th>
+                  <th>Altitude (m)</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${wirelessHosts
+                  .map(
+                    (h) => `
+                  <tr data-gps-host-row="${escapeHtml(h.id)}">
+                    <td>
+                      <div style="font-weight: 600;">${escapeHtml(h.name || h.hostname)}</div>
+                      <div class="font-mono" style="font-size: 11px; color: var(--color-text-muted);">${escapeHtml(h.ip || '')}</div>
+                    </td>
+                    <td>
+                      <input type="number" step="any" min="-90" max="90" class="form-input font-mono gps-lat-input"
+                             value="${typeof h.latitude === 'number' ? h.latitude : ''}" placeholder="e.g. 51.507351" style="min-width: 130px;" />
+                    </td>
+                    <td>
+                      <input type="number" step="any" min="-180" max="180" class="form-input font-mono gps-lng-input"
+                             value="${typeof h.longitude === 'number' ? h.longitude : ''}" placeholder="e.g. -0.127758" style="min-width: 130px;" />
+                    </td>
+                    <td>
+                      <input type="number" step="any" min="-500" max="10000" class="form-input font-mono gps-alt-input"
+                             value="${typeof h.altitude === 'number' ? h.altitude : ''}" placeholder="e.g. 12.5" style="min-width: 100px;" />
+                    </td>
+                  </tr>
+                `
+                  )
+                  .join('')}
+              </tbody>
+            </table>
+          </div>
+        `;
+      }
+    }
+    openModal('wifi-ap-gps-dialog');
+  });
+
+  gpsForm?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const rows = Array.from(container.querySelectorAll('[data-gps-host-row]'));
+    const saveBtn = container.querySelector('#wifi-ap-gps-save-btn');
+    try {
+      if (saveBtn) saveBtn.disabled = true;
+      for (const row of rows) {
+        const hostId = row.getAttribute('data-gps-host-row');
+        const rawLat = row.querySelector('.gps-lat-input')?.value?.trim() ?? '';
+        const rawLng = row.querySelector('.gps-lng-input')?.value?.trim() ?? '';
+        const rawAlt = row.querySelector('.gps-alt-input')?.value?.trim() ?? '';
+
+        const latitude = rawLat !== '' && Number.isFinite(Number(rawLat)) ? Number(rawLat) : null;
+        const longitude = rawLng !== '' && Number.isFinite(Number(rawLng)) ? Number(rawLng) : null;
+        const altitude = rawAlt !== '' && Number.isFinite(Number(rawAlt)) ? Number(rawAlt) : null;
+
+        await api.updateHost(hostId, { latitude, longitude, altitude });
+      }
+      closeModal('wifi-ap-gps-dialog');
+      await store.poll(true);
+      const channelsRes = await api.getWifiChannels();
+      if (channelsRes?.bands) {
+        store.setState({ wifiChannels: channelsRes });
+      }
+      renderWifi(container);
+      toast.success('AP Geolocation Calibrated', 'Saved AP Latitude, Longitude, and Altitude and re-triangulated foreign networks.');
+    } catch (err) {
+      toast.error('Failed to Save AP Coordinates', err.message || 'Could not update AP geolocation.');
+    } finally {
+      if (saveBtn) saveBtn.disabled = false;
+    }
   });
 
   if (escKeyHandler) {
@@ -529,7 +659,18 @@ function renderNeighborNetworksSection(bandData = {}, bandName = '5GHz', highlig
                     .map((obs) => {
                       const pct = dbmToQualityPct(obs.signalDbm);
                       const barClass = obs.signalDbm >= -60 ? 'high' : obs.signalDbm >= -75 ? 'medium' : 'low';
-                      const distLabel = typeof obs.distanceMeters === 'number' ? ` • ~${obs.distanceMeters}m` : '';
+                      const horizM = obs.horizontalDistanceMeters ?? obs.distanceMeters;
+                      const slantM = obs.slantDistanceMeters;
+                      const hasSlantDiff =
+                        typeof slantM === 'number' &&
+                        typeof horizM === 'number' &&
+                        Math.abs(slantM - horizM) >= 0.2;
+                      const distLabel =
+                        typeof horizM === 'number'
+                          ? hasSlantDiff
+                            ? ` • ~${horizM}m horiz (${slantM}m 3D)`
+                            : ` • ~${horizM}m`
+                          : '';
                       return `
                         <div class="neighbor-radio-rssi-item" title="${escapeHtml(obs.hostName)} (${escapeHtml(obs.device)}): ${obs.signalDbm} dBm (${pct}% relative strength${distLabel})">
                           <div class="neighbor-radio-rssi-header">
@@ -558,9 +699,16 @@ function renderNeighborNetworksSection(bandData = {}, bandName = '5GHz', highlig
                         <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
                           ${methodBadge}
                           <span class="font-mono" style="font-size: 11px; color: var(--color-text-secondary);">
-                            (${tri.x}m, ${tri.y}m) ±${tri.errorRadiusMeters}m
+                            (${tri.x}m, ${tri.y}m${typeof tri.altitudeMeters === 'number' ? `, Alt ${tri.altitudeMeters}m` : ''}) ±${tri.errorRadiusMeters}m
                           </span>
                         </div>
+                        ${
+                          typeof tri.latitude === 'number' && typeof tri.longitude === 'number'
+                            ? `<div class="font-mono" style="font-size: 11px; color: var(--color-primary);">
+                                Est. GPS: ${tri.latitude.toFixed(6)}°, ${tri.longitude.toFixed(6)}°
+                              </div>`
+                            : ''
+                        }
                         <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 11.5px; color: var(--color-text-secondary);">
                           <span>${escapeHtml(tri.bearingLabel || '')}</span>
                           ${

@@ -399,6 +399,42 @@ function computeCompassBearing(dx, dy) {
 }
 
 /**
+ * Extracts normalized GPS (latitude, longitude) and altitude (meters) from a host object.
+ */
+export function extractHostGeolocation(host = {}) {
+  const rawLat = host?.latitude ?? host?.lat ?? host?.geoLocation?.lat ?? host?.geoLocation?.latitude;
+  const rawLng =
+    host?.longitude ??
+    host?.lng ??
+    host?.lon ??
+    host?.geoLocation?.lng ??
+    host?.geoLocation?.lon ??
+    host?.geoLocation?.longitude;
+  const rawAlt = host?.altitude ?? host?.alt ?? host?.geoLocation?.alt ?? host?.geoLocation?.altitude;
+
+  const latNum = rawLat !== null && rawLat !== undefined && rawLat !== '' ? Number(rawLat) : NaN;
+  const lngNum = rawLng !== null && rawLng !== undefined && rawLng !== '' ? Number(rawLng) : NaN;
+  const altNum = rawAlt !== null && rawAlt !== undefined && rawAlt !== '' ? Number(rawAlt) : NaN;
+
+  const hasGps =
+    Number.isFinite(latNum) &&
+    Number.isFinite(lngNum) &&
+    latNum >= -90 &&
+    latNum <= 90 &&
+    lngNum >= -180 &&
+    lngNum <= 180;
+  const hasAlt = Number.isFinite(altNum) && altNum >= -500 && altNum <= 10000;
+
+  return {
+    latitude: hasGps ? Math.round(latNum * 1e6) / 1e6 : null,
+    longitude: hasGps ? Math.round(lngNum * 1e6) / 1e6 : null,
+    altitude: hasAlt ? Math.round(altNum * 100) / 100 : null,
+    hasGps,
+    hasAlt,
+  };
+}
+
+/**
  * Filters a list of OpenWrt hosts to only those with wireless radios.
  */
 export function filterWirelessHosts(hosts = [], bandsData = null) {
@@ -424,16 +460,93 @@ export function filterWirelessHosts(hosts = [], bandsData = null) {
 }
 
 /**
- * Computes 2D coordinate anchors (on a 0..100 meter floorplan grid) for managed OpenWrt hosts with wireless radios.
- * Preserves user-defined `host.mapPosition` ({ x, y }) when present.
+ * Computes 2D/3D coordinate anchors (on a 0..100 meter floorplan grid) for managed OpenWrt hosts with wireless radios.
+ * Projects GPS (latitude, longitude) into local East-North-Up (ENU) meters when configured,
+ * preserves altitude (meters) for 3D slant-range triangulation, and honors `host.mapPosition` ({ x, y }).
  */
 export function computeHostAnchorPositions(hosts = []) {
   const wirelessHosts = filterWirelessHosts(hosts);
   const total = wirelessHosts.length;
-  return wirelessHosts.map((host, idx) => {
+
+  const hostGeoList = wirelessHosts.map((h) => ({
+    host: h,
+    geo: extractHostGeolocation(h),
+  }));
+
+  const gpsItems = hostGeoList.filter((item) => item.geo.hasGps);
+  const altItems = hostGeoList.filter((item) => item.geo.hasAlt);
+
+  let gpsOrigin = null;
+  const enuByHostId = new Map();
+
+  if (gpsItems.length > 0) {
+    const refLat = gpsItems.reduce((acc, item) => acc + item.geo.latitude, 0) / gpsItems.length;
+    const refLng = gpsItems.reduce((acc, item) => acc + item.geo.longitude, 0) / gpsItems.length;
+    const refAlt =
+      altItems.length > 0
+        ? altItems.reduce((acc, item) => acc + item.geo.altitude, 0) / altItems.length
+        : 0;
+
+    const metersPerDegLat = (Math.PI / 180) * 6371000;
+    const metersPerDegLng = metersPerDegLat * Math.max(0.05, Math.cos((refLat * Math.PI) / 180));
+
+    let maxAbsMeters = 0;
+    for (const item of gpsItems) {
+      const eastMeters = (item.geo.longitude - refLng) * metersPerDegLng;
+      const northMeters = (item.geo.latitude - refLat) * metersPerDegLat;
+      enuByHostId.set(item.host.id, { eastMeters, northMeters });
+      maxAbsMeters = Math.max(maxAbsMeters, Math.abs(eastMeters), Math.abs(northMeters));
+    }
+
+    // Fit GPS perimeter into [18..82] (radius 32 around 50,50) so foreign APs outside the perimeter stay visible
+    const spanMeters = Math.max(12, maxAbsMeters * 2);
+    const canvasUnitsPerMeter =
+      gpsItems.length >= 2 && maxAbsMeters > 0.25
+        ? Math.round((64 / spanMeters) * 1000) / 1000
+        : 1.8;
+
+    gpsOrigin = {
+      refLat: Math.round(refLat * 1e6) / 1e6,
+      refLng: Math.round(refLng * 1e6) / 1e6,
+      refAlt: Math.round(refAlt * 100) / 100,
+      metersPerDegLat,
+      metersPerDegLng,
+      canvasUnitsPerMeter,
+      gpsAnchorCount: gpsItems.length,
+    };
+  }
+
+  return hostGeoList.map(({ host, geo }, idx) => {
     const customX = Number(host?.mapPosition?.x);
     const customY = Number(host?.mapPosition?.y);
-    if (Number.isFinite(customX) && Number.isFinite(customY)) {
+    const hasCustomPos = Number.isFinite(customX) && Number.isFinite(customY);
+    const enu = enuByHostId.get(host.id);
+
+    // If GPS is provided on 2+ hosts (or on this host when no custom mapPosition overrides it), project from GPS ENU
+    if (geo.hasGps && enu && gpsOrigin && (gpsItems.length >= 2 || !hasCustomPos)) {
+      const projX = 50 + enu.eastMeters * gpsOrigin.canvasUnitsPerMeter;
+      const projY = 50 - enu.northMeters * gpsOrigin.canvasUnitsPerMeter;
+      return {
+        hostId: host.id,
+        hostName: host.name || host.hostname || host.id,
+        role: host.role || 'ap',
+        hasWirelessRadios: true,
+        x: Math.round(Math.max(6, Math.min(94, projX)) * 10) / 10,
+        y: Math.round(Math.max(6, Math.min(94, projY)) * 10) / 10,
+        altitude: geo.altitude,
+        latitude: geo.latitude,
+        longitude: geo.longitude,
+        hasGps: true,
+        hasAlt: geo.hasAlt,
+        eastMeters: Math.round(enu.eastMeters * 10) / 10,
+        northMeters: Math.round(enu.northMeters * 10) / 10,
+        gpsOrigin,
+        isCustomPosition: true,
+        isGpsProjected: true,
+      };
+    }
+
+    if (hasCustomPos) {
       return {
         hostId: host.id,
         hostName: host.name || host.hostname || host.id,
@@ -441,7 +554,14 @@ export function computeHostAnchorPositions(hosts = []) {
         hasWirelessRadios: true,
         x: Math.round(Math.max(6, Math.min(94, customX)) * 10) / 10,
         y: Math.round(Math.max(6, Math.min(94, customY)) * 10) / 10,
+        altitude: geo.altitude,
+        latitude: geo.latitude,
+        longitude: geo.longitude,
+        hasGps: geo.hasGps,
+        hasAlt: geo.hasAlt,
+        gpsOrigin,
         isCustomPosition: true,
+        isGpsProjected: false,
       };
     }
 
@@ -472,14 +592,22 @@ export function computeHostAnchorPositions(hosts = []) {
       hasWirelessRadios: true,
       x,
       y,
+      altitude: geo.altitude,
+      latitude: geo.latitude,
+      longitude: geo.longitude,
+      hasGps: geo.hasGps,
+      hasAlt: geo.hasAlt,
+      gpsOrigin,
       isCustomPosition: false,
+      isGpsProjected: false,
     };
   });
 }
 
 /**
- * Solves for the approximate 2D location of a foreign AP from multi-AP RSSI observations
- * using log-distance path loss + radical-axis initialization + weighted non-linear least squares.
+ * Solves for the approximate 2D/3D location (and GPS Lat/Lng/Altitude when configured) of a foreign AP
+ * from multi-AP RSSI observations using log-distance path loss + 3D altitude slant-range compensation +
+ * radical-axis initialization + weighted non-linear least squares.
  */
 export function triangulateForeignAp(neighbor, anchorsByHostId) {
   const band = neighbor.band || '5GHz';
@@ -487,13 +615,23 @@ export function triangulateForeignAp(neighbor, anchorsByHostId) {
 
   // Deduplicate observations by hostId (keep strongest radio per physical OpenWrt host)
   const byHost = new Map();
+  let gpsOrigin = null;
+
   for (const obs of rawObs) {
     const anchor = anchorsByHostId.get(obs.hostId);
     if (!anchor) continue;
-    const distanceMeters = rssiToDistanceMeters(obs.signalDbm, band);
-    obs.distanceMeters = distanceMeters;
+    if (!gpsOrigin && anchor.gpsOrigin) {
+      gpsOrigin = anchor.gpsOrigin;
+    }
+
+    const slantDistanceMeters = rssiToDistanceMeters(obs.signalDbm, band);
+    obs.slantDistanceMeters = slantDistanceMeters;
+    obs.distanceMeters = slantDistanceMeters;
     obs.anchorX = anchor.x;
     obs.anchorY = anchor.y;
+    obs.anchorAltitude = anchor.hasAlt ? anchor.altitude : null;
+    obs.anchorLatitude = anchor.hasGps ? anchor.latitude : null;
+    obs.anchorLongitude = anchor.hasGps ? anchor.longitude : null;
 
     const existing = byHost.get(obs.hostId);
     if (!existing || obs.signalDbm > existing.signalDbm) {
@@ -503,9 +641,16 @@ export function triangulateForeignAp(neighbor, anchorsByHostId) {
         hostName: obs.hostName || anchor.hostName,
         device: obs.device,
         signalDbm: obs.signalDbm,
-        distanceMeters,
+        slantDistanceMeters,
+        distanceMeters: slantDistanceMeters,
+        horizontalDistanceMeters: slantDistanceMeters,
         anchorX: anchor.x,
         anchorY: anchor.y,
+        anchorAltitude: anchor.hasAlt ? anchor.altitude : null,
+        anchorLatitude: anchor.hasGps ? anchor.latitude : null,
+        anchorLongitude: anchor.hasGps ? anchor.longitude : null,
+        hasAlt: Boolean(anchor.hasAlt),
+        hasGps: Boolean(anchor.hasGps),
         weight: Math.round(normSig * normSig * 1000) / 1000,
       });
     }
@@ -517,16 +662,66 @@ export function triangulateForeignAp(neighbor, anchorsByHostId) {
     return null;
   }
 
-  // Nominal scale: 1 meter = 1.8 canvas units (100x100 canvas ~ 55m x 55m floorplan).
-  // Adapt scale so pairwise distance circles meet when anchors are placed far apart.
-  let canvasScale = 1.8;
+  // Estimate foreign AP altitude (z) if any observing OpenWrt AP has a configured altitude
+  const altMeasurements = measurements.filter((m) => m.hasAlt && typeof m.anchorAltitude === 'number');
+  let estAltitudeMeters = null;
+  if (altMeasurements.length > 0) {
+    let zWeightSum = 0;
+    let zWeightedVal = 0;
+    for (const m of altMeasurements) {
+      const wZ = m.weight / Math.max(0.5, m.slantDistanceMeters * m.slantDistanceMeters);
+      zWeightedVal += m.anchorAltitude * wZ;
+      zWeightSum += wZ;
+    }
+    estAltitudeMeters = zWeightSum > 0 ? zWeightedVal / zWeightSum : altMeasurements[0].anchorAltitude;
+
+    // Refine altitude with vertical path-loss gradient when APs are at different elevations
+    for (let iter = 0; iter < 25; iter++) {
+      let gz = 0;
+      let wTot = 0;
+      for (const m of altMeasurements) {
+        const dz = estAltitudeMeters - m.anchorAltitude;
+        const maxDz = m.slantDistanceMeters * 0.85;
+        if (Math.abs(dz) > maxDz) {
+          gz += m.weight * (dz - Math.sign(dz) * maxDz);
+        }
+        wTot += m.weight;
+      }
+      if (wTot > 0) {
+        estAltitudeMeters -= 0.25 * (gz / wTot);
+      }
+    }
+    estAltitudeMeters = Math.round(estAltitudeMeters * 10) / 10;
+
+    // Project 3D slant distance onto the horizontal ground plane: d_horiz = sqrt(max(0.5^2, d_slant^2 - dz^2))
+    for (const m of measurements) {
+      if (m.hasAlt && typeof m.anchorAltitude === 'number') {
+        const dz = Math.min(m.slantDistanceMeters * 0.88, Math.abs(estAltitudeMeters - m.anchorAltitude));
+        const horiz = Math.sqrt(Math.max(0.25, m.slantDistanceMeters * m.slantDistanceMeters - dz * dz));
+        m.horizontalDistanceMeters = Math.round(horiz * 10) / 10;
+        m.distanceMeters = m.horizontalDistanceMeters;
+      }
+    }
+
+    // Also update rawObs so UI table shows horizontal ground distance alongside slant distance
+    for (const obs of rawObs) {
+      const matched = byHost.get(obs.hostId);
+      if (matched) {
+        obs.horizontalDistanceMeters = matched.horizontalDistanceMeters;
+      }
+    }
+  }
+
+  // Nominal scale: 1 meter = 1.8 canvas units (or GPS-derived scale when GPS anchors exist).
+  // Adapt scale so pairwise horizontal distance circles meet when anchors are placed far apart.
+  let canvasScale = gpsOrigin?.canvasUnitsPerMeter || 1.8;
   if (apCount >= 2) {
     for (let i = 0; i < apCount; i++) {
       for (let j = i + 1; j < apCount; j++) {
         const m1 = measurements[i];
         const m2 = measurements[j];
         const anchorDist = Math.hypot(m2.anchorX - m1.anchorX, m2.anchorY - m1.anchorY);
-        const sumMeters = m1.distanceMeters + m2.distanceMeters;
+        const sumMeters = m1.horizontalDistanceMeters + m2.horizontalDistanceMeters;
         if (sumMeters > 0 && sumMeters * canvasScale < anchorDist * 1.04) {
           canvasScale = (anchorDist * 1.04) / sumMeters;
         }
@@ -535,7 +730,7 @@ export function triangulateForeignAp(neighbor, anchorsByHostId) {
   }
 
   for (const m of measurements) {
-    m.canvasRadius = Math.round(Math.max(3, Math.min(85, m.distanceMeters * canvasScale)) * 10) / 10;
+    m.canvasRadius = Math.round(Math.max(3, Math.min(85, m.horizontalDistanceMeters * canvasScale)) * 10) / 10;
   }
 
   const hash = hashString(`${neighbor.bssid || ''}:${neighbor.ssid || ''}:${neighbor.channel || 0}`);
@@ -544,7 +739,7 @@ export function triangulateForeignAp(neighbor, anchorsByHostId) {
   let method = 'proximity_ring';
   let confidence = 'low';
   let confidencePct = 36;
-  let errorRadiusMeters = Math.round(Math.max(3.5, measurements[0].distanceMeters * 0.35) * 10) / 10;
+  let errorRadiusMeters = Math.round(Math.max(3.5, measurements[0].horizontalDistanceMeters * 0.35) * 10) / 10;
 
   if (apCount === 1) {
     const m1 = measurements[0];
@@ -562,7 +757,7 @@ export function triangulateForeignAp(neighbor, anchorsByHostId) {
     estY = m1.anchorY + rCanvas * Math.sin(angle);
     method = 'proximity_ring';
     confidence = 'low';
-    confidencePct = Math.min(48, Math.max(25, Math.round(45 - m1.distanceMeters * 0.4)));
+    confidencePct = Math.min(48, Math.max(25, Math.round(45 - m1.horizontalDistanceMeters * 0.4)));
   } else {
     // 2 or more APs: compute Radical Axis / Circle-Circle intersection between top 2 APs as seed
     const m1 = measurements[0];
@@ -599,7 +794,7 @@ export function triangulateForeignAp(neighbor, anchorsByHostId) {
     let cx = 0;
     let cy = 0;
     for (const m of measurements) {
-      const invD = m.weight / Math.max(0.5, m.distanceMeters);
+      const invD = m.weight / Math.max(0.5, m.horizontalDistanceMeters);
       cx += m.anchorX * invD;
       cy += m.anchorY * invD;
       wSum += invD;
@@ -653,7 +848,7 @@ export function triangulateForeignAp(neighbor, anchorsByHostId) {
     let weightedSqErrMeters = 0;
     for (const m of measurements) {
       const solvedMeters = Math.hypot(estX - m.anchorX, estY - m.anchorY) / canvasScale;
-      const errM = solvedMeters - m.distanceMeters;
+      const errM = solvedMeters - m.horizontalDistanceMeters;
       weightedSqErrMeters += m.weight * errM * errM;
     }
     const rmseMeters = Math.sqrt(weightedSqErrMeters / totalWeight);
@@ -676,11 +871,44 @@ export function triangulateForeignAp(neighbor, anchorsByHostId) {
 
   const closest = measurements[0];
   const bearing = computeCompassBearing(estX - closest.anchorX, estY - closest.anchorY);
-  const bearingLabel = `~${closest.distanceMeters}m ${bearing} of ${closest.hostName}`;
+  let verticalDeltaMeters = null;
+  let verticalLabel = null;
+  if (estAltitudeMeters !== null && typeof closest.anchorAltitude === 'number') {
+    verticalDeltaMeters = Math.round((estAltitudeMeters - closest.anchorAltitude) * 10) / 10;
+    if (Math.abs(verticalDeltaMeters) < 0.8) {
+      verticalLabel = `level with ${closest.hostName} (${estAltitudeMeters}m alt)`;
+    } else if (verticalDeltaMeters > 0) {
+      verticalLabel = `+${verticalDeltaMeters}m above ${closest.hostName} (${estAltitudeMeters}m alt)`;
+    } else {
+      verticalLabel = `${verticalDeltaMeters}m below ${closest.hostName} (${estAltitudeMeters}m alt)`;
+    }
+  }
+
+  const bearingLabel = `~${closest.horizontalDistanceMeters}m ${bearing} of ${closest.hostName}${
+    verticalLabel ? ` • ${verticalLabel}` : ''
+  }`;
+
+  // Back-project solved (estX, estY) to estimated GPS (latitude, longitude) when GPS anchors are configured
+  let estLatitude = null;
+  let estLongitude = null;
+  if (gpsOrigin) {
+    const scaleForGps = gpsOrigin.canvasUnitsPerMeter || canvasScale || 1.8;
+    const eastMetersFromOrigin = (estX - 50) / scaleForGps;
+    const northMetersFromOrigin = (50 - estY) / scaleForGps;
+    estLatitude = Math.round((gpsOrigin.refLat + northMetersFromOrigin / gpsOrigin.metersPerDegLat) * 1e6) / 1e6;
+    estLongitude = Math.round((gpsOrigin.refLng + eastMetersFromOrigin / gpsOrigin.metersPerDegLng) * 1e6) / 1e6;
+  }
 
   return {
     x: estX,
     y: estY,
+    altitudeMeters: estAltitudeMeters,
+    verticalDeltaMeters,
+    verticalLabel,
+    latitude: estLatitude,
+    longitude: estLongitude,
+    gpsCalibrated: Boolean(gpsOrigin),
+    altitudeCalibrated: estAltitudeMeters !== null,
     method,
     confidence,
     confidencePct,
@@ -688,7 +916,8 @@ export function triangulateForeignAp(neighbor, anchorsByHostId) {
     errorRadiusMeters,
     closestHostId: closest.hostId,
     closestHostName: closest.hostName,
-    minDistanceMeters: closest.distanceMeters,
+    minDistanceMeters: closest.horizontalDistanceMeters,
+    minSlantDistanceMeters: closest.slantDistanceMeters,
     bearing,
     bearingLabel,
     anchorMeasurements: measurements,

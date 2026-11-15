@@ -11,7 +11,7 @@ import {
   evaluateAttendedSysupgrade,
 } from './realUbus.js';
 import { backupEngine } from './backupEngine.js';
-import { triangulateBandNeighbors } from './wifiEngine.js';
+import { triangulateBandNeighbors, extractHostGeolocation } from './wifiEngine.js';
 import { lookupVendor, resolveWirelessNetworkManufacturer } from './ouiVendor.js';
 
 export function sanitizeHost(host, activeUpgradeJob = null) {
@@ -199,12 +199,23 @@ export class HostManager {
     }
     const prevCache = this.hostsCacheById.get(host.id);
     const radios = Array.isArray(host.radios) ? host.radios : (this.liveRadiosByHost.get(host.id) || []);
+    const geo = extractHostGeolocation(host.latitude !== undefined || host.altitude !== undefined || host.geoLocation ? host : prevCache || host);
+    if (geo.hasGps) {
+      host.latitude = geo.latitude;
+      host.longitude = geo.longitude;
+    }
+    if (geo.hasAlt) {
+      host.altitude = geo.altitude;
+    }
     this.hostsCacheById.set(host.id, {
       id: host.id,
       name: host.name || host.hostname || host.id,
       hostname: host.hostname || host.name || host.id,
       role: host.role || 'ap',
       mapPosition: host.mapPosition || prevCache?.mapPosition || null,
+      latitude: geo.latitude,
+      longitude: geo.longitude,
+      altitude: geo.altitude,
       radios,
       hasWirelessRadios: radios.length > 0,
       persisted: Boolean(prevCache?.persisted),
@@ -600,12 +611,16 @@ export class HostManager {
       if (!this.liveRadiosByHost.has(h.id) && radios.length > 0) {
         this.liveRadiosByHost.set(h.id, radios);
       }
+      const geo = extractHostGeolocation(h);
       this.hostsCacheById.set(h.id, {
         id: h.id,
         name: h.name || h.hostname || h.id,
         hostname: h.hostname || h.name || h.id,
         role: h.role || 'ap',
         mapPosition: h.mapPosition || null,
+        latitude: geo.latitude,
+        longitude: geo.longitude,
+        altitude: geo.altitude,
         radios,
         hasWirelessRadios: radios.length > 0,
         persisted: true,
@@ -629,6 +644,7 @@ export class HostManager {
     const id = data.id || `node-${(data.role || 'ap')}-${Date.now().toString(36)}`;
     const protocol = data.protocol || 'ssh';
     const defaultPort = protocol === 'ssh' ? 22 : data.useHttps || protocol === 'ubus_https' ? 443 : 80;
+    const geo = extractHostGeolocation(data);
 
     const newHost = {
       id,
@@ -652,6 +668,10 @@ export class HostManager {
       rxRateBps: 0,
       txRateBps: 0,
       clientCount: 0,
+      latitude: geo.latitude,
+      longitude: geo.longitude,
+      altitude: geo.altitude,
+      mapPosition: data.mapPosition || null,
       radios: Array.isArray(data.radios) ? data.radios : [],
       lastSeen: new Date().toISOString(),
     };
@@ -680,6 +700,9 @@ export class HostManager {
       hostname: newHost.hostname || newHost.name || newHost.id,
       role: newHost.role || 'ap',
       mapPosition: newHost.mapPosition || null,
+      latitude: newHost.latitude,
+      longitude: newHost.longitude,
+      altitude: newHost.altitude,
       radios,
       hasWirelessRadios: radios.length > 0,
       persisted: true,
@@ -694,9 +717,34 @@ export class HostManager {
     if (idx === -1) return null;
 
     const existing = hosts[idx];
-    const updated = {
+    const mergedRaw = {
       ...existing,
       ...updateData,
+    };
+
+    const hasGeoFieldsInUpdate =
+      'latitude' in updateData ||
+      'longitude' in updateData ||
+      'altitude' in updateData ||
+      'lat' in updateData ||
+      'lng' in updateData ||
+      'alt' in updateData ||
+      'geoLocation' in updateData;
+
+    const geo = hasGeoFieldsInUpdate ? extractHostGeolocation(updateData) : extractHostGeolocation(mergedRaw);
+
+    const updated = {
+      ...mergedRaw,
+      latitude: geo.latitude,
+      longitude: geo.longitude,
+      altitude: geo.altitude,
+      // If user explicitly updated GPS coordinates without specifying a custom mapPosition, let GPS drive the floorplan projection
+      mapPosition:
+        updateData.mapPosition !== undefined
+          ? updateData.mapPosition
+          : hasGeoFieldsInUpdate && geo.hasGps
+            ? null
+            : existing.mapPosition || null,
       // Preserve stored password if edit form submitted an empty password field
       password:
         updateData.password !== undefined && updateData.password !== ''
@@ -722,6 +770,9 @@ export class HostManager {
       hostname: updated.hostname || updated.name || updated.id,
       role: updated.role || 'ap',
       mapPosition: updated.mapPosition || null,
+      latitude: updated.latitude,
+      longitude: updated.longitude,
+      altitude: updated.altitude,
       radios,
       hasWirelessRadios: radios.length > 0,
       persisted: true,

@@ -16,6 +16,7 @@ export class TriangulationMap {
     onAnchorMove = null,
     onSelectNeighbor = null,
     onSizeModeChange = null,
+    onOpenGpsModal = null,
   }) {
     this.container = typeof container === 'string' ? document.querySelector(container) : container;
     this.band = band;
@@ -23,6 +24,7 @@ export class TriangulationMap {
     this.onAnchorMove = onAnchorMove;
     this.onSelectNeighbor = onSelectNeighbor;
     this.onSizeModeChange = onSizeModeChange;
+    this.onOpenGpsModal = onOpenGpsModal;
     this.anchors = [];
     this.neighbors = [];
     this.selectedBssid = null;
@@ -341,12 +343,21 @@ export class TriangulationMap {
           ? `${anchor.hostName.slice(0, 18)}…`
           : anchor.hostName;
 
+      const geoParts = [];
+      if (typeof anchor.latitude === 'number' && typeof anchor.longitude === 'number') {
+        geoParts.push(`${anchor.latitude.toFixed(4)}°, ${anchor.longitude.toFixed(4)}°`);
+      }
+      if (typeof anchor.altitude === 'number') {
+        geoParts.push(`Alt ${anchor.altitude}m`);
+      }
+      const geoSubLabel = geoParts.join(' • ');
+
       anchorNodesHtml += `
         <g class="triangulation-anchor-node"
            data-host-id="${escapeHtml(anchor.hostId)}"
            tabindex="0"
            role="button"
-           aria-label="Managed OpenWrt AP ${escapeHtml(anchor.hostName)} at (${anchor.x}m, ${anchor.y}m). Drag to calibrate physical AP position."
+           aria-label="Managed OpenWrt AP ${escapeHtml(anchor.hostName)} at (${anchor.x}m, ${anchor.y}m)${geoSubLabel ? `, ${escapeHtml(geoSubLabel)}` : ''}. Drag to calibrate physical AP position."
            transform="translate(${ax.toFixed(1)}, ${ay.toFixed(1)})">
           <circle cx="0" cy="0" r="15" fill="rgba(59, 130, 246, 0.16)" stroke="var(--color-primary)" stroke-width="1.5" />
           <circle cx="0" cy="0" r="9" fill="var(--color-primary)" />
@@ -359,6 +370,13 @@ export class TriangulationMap {
                 style="font-size: 10.5px; font-weight: 700; fill: var(--color-text-primary);">
             ${escapeHtml(shortName)}
           </text>
+          ${
+            geoSubLabel
+              ? `<text x="0" y="25" text-anchor="middle" style="font-size: 9px; font-family: var(--font-mono); font-weight: 600; fill: var(--color-primary);">
+                  ${escapeHtml(geoSubLabel)}
+                </text>`
+              : ''
+          }
         </g>
       `;
     }
@@ -413,6 +431,17 @@ export class TriangulationMap {
         </div>
         <div style="display: flex; align-items: center; gap: 14px; font-size: 12px; color: var(--color-text-secondary); flex-wrap: wrap;">
           <span>Position: <strong class="font-mono">(${selectedNeighbor.triangulation.x}m, ${selectedNeighbor.triangulation.y}m)</strong></span>
+          ${
+            typeof selectedNeighbor.triangulation.altitudeMeters === 'number'
+              ? `<span>Est. Altitude: <strong class="font-mono">${selectedNeighbor.triangulation.altitudeMeters}m</strong></span>`
+              : ''
+          }
+          ${
+            typeof selectedNeighbor.triangulation.latitude === 'number' &&
+            typeof selectedNeighbor.triangulation.longitude === 'number'
+              ? `<span>Est. GPS: <strong class="font-mono">${selectedNeighbor.triangulation.latitude.toFixed(6)}°, ${selectedNeighbor.triangulation.longitude.toFixed(6)}°</strong></span>`
+              : ''
+          }
           <span>Bearing: <strong>${escapeHtml(selectedNeighbor.triangulation.bearingLabel)}</strong></span>
           <span>Confidence: <strong class="font-mono">${selectedNeighbor.triangulation.confidencePct}% (±${selectedNeighbor.triangulation.errorRadiusMeters}m)</strong></span>
         </div>

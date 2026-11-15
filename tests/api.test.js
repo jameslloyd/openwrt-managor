@@ -761,6 +761,45 @@ test('Foreign AP RF Triangulation: trilaterates approximate 2D coordinates from 
   assert.ok(distToWest < distToEast, `Expected distToWest (${distToWest}) < distToEast (${distToEast})`);
   assert.ok(distToWest < distToSouth, `Expected distToWest (${distToWest}) < distToSouth (${distToSouth})`);
 
+  // Verify GPS (Latitude/Longitude) & Altitude 3D triangulation calibration
+  const apWestGps = {
+    id: 'ap-west',
+    name: 'West Wing AP',
+    latitude: 51.5075,
+    longitude: -0.128,
+    altitude: 12.0,
+  };
+  const apEastGps = {
+    id: 'ap-east',
+    name: 'East Wing AP',
+    latitude: 51.5075,
+    longitude: -0.1274,
+    altitude: 15.5,
+  };
+  const apSouthGps = {
+    id: 'ap-south',
+    name: 'South Patio AP',
+    latitude: 51.5071,
+    longitude: -0.1277,
+    altitude: 9.0,
+  };
+  hostManager.applyTelemetryToHost(apWestGps, parseSshTelemetryOutput(apWestGps, makeApScan('West-AP', -48)));
+  hostManager.applyTelemetryToHost(apEastGps, parseSshTelemetryOutput(apEastGps, makeApScan('East-AP', -74)));
+  hostManager.applyTelemetryToHost(apSouthGps, parseSshTelemetryOutput(apSouthGps, makeApScan('South-AP', -78)));
+
+  const gpsBands = hostManager.getLiveWifiBands();
+  const gpsBand5g = gpsBands['5GHz'];
+  assert.equal(gpsBand5g.anchors.every((a) => a.isGpsProjected && a.hasGps && a.hasAlt), true);
+
+  const gpsForeignAp = gpsBand5g.neighbors[0];
+  assert.equal(gpsForeignAp.triangulation.gpsCalibrated, true);
+  assert.equal(gpsForeignAp.triangulation.altitudeCalibrated, true);
+  assert.equal(typeof gpsForeignAp.triangulation.latitude, 'number');
+  assert.equal(typeof gpsForeignAp.triangulation.longitude, 'number');
+  assert.equal(typeof gpsForeignAp.triangulation.altitudeMeters, 'number');
+  // Because foreign AP is strongest at West Wing AP (12.0m alt, 51.5075, -0.1280), estimated altitude should be near 12.0m
+  assert.ok(gpsForeignAp.triangulation.altitudeMeters > 11.0 && gpsForeignAp.triangulation.altitudeMeters < 13.5);
+
   // Clean up test state
   for (const id of ['gw-wired', 'ap-west', 'ap-east', 'ap-south']) {
     hostManager.liveRadiosByHost.delete(id);
