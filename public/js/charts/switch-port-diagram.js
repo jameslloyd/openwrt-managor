@@ -1,8 +1,8 @@
 /**
  * OpenWrt Manager (openwrt-managor)
  * Interactive Physical NIC & Switch Port Wiring Diagram
- * Visualizes every OpenWrt host's hardware NIC ports, inter-host trunk/uplink patch cables,
- * negotiated link speeds, and attached wired devices across the fleet.
+ * Visualizes every OpenWrt host's hardware NIC ports (including 24/28/48-port core switches),
+ * inter-host trunk/uplink patch cables, negotiated link speeds, and attached wired devices across the fleet.
  */
 
 import { escapeHtml } from '../utils/formatters.js';
@@ -47,6 +47,15 @@ function getPortRoleMeta(port) {
   return { label: 'ACTIVE', bg: 'rgba(16, 185, 129, 0.12)', fg: 'var(--color-success)' };
 }
 
+function inferSwitchPortCapacity(host) {
+  const descriptor = `${host.name || ''} ${host.hostname || ''} ${host.model || ''}`;
+  const m = descriptor.match(/\b(48|52|28|26|24|18|16|10|8)\s*(?:-|\s)?(?:port|p|g|ge|rj45)/i) ||
+            descriptor.match(/(?:gs|dgs|sg|crs|css|tl-sg|usw|es|jgs)\D*(48|28|24|16|8)\b/i);
+  if (m) return Number(m[1]);
+  if (host.role === 'switch' || /\bswitch\b/i.test(descriptor)) return 24;
+  return 0;
+}
+
 export class SwitchPortDiagram {
   constructor({ container, onHostClick = null, onClientClick = null }) {
     this.container = typeof container === 'string' ? document.querySelector(container) : container;
@@ -71,7 +80,7 @@ export class SwitchPortDiagram {
               Physical NIC &amp; Switch Port Wiring Diagram
             </h2>
             <span style="font-size: 12px; color: var(--color-text-muted);">
-              Cross-host NIC port mapping, inter-router Ethernet/SFP+ patch links, and attached wired endpoints across all OpenWrt nodes
+              Cross-host NIC port mapping, multi-port core switch faceplates, inter-router Ethernet/SFP+ patch links, and attached wired endpoints
             </span>
           </div>
           <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
@@ -147,6 +156,54 @@ export class SwitchPortDiagram {
 
   normalizeHostPorts(host) {
     const rawPorts = Array.isArray(host.switchPorts) ? host.switchPorts : [];
+    const expectedSwitchCapacity = inferSwitchPortCapacity(host);
+
+    // If the host is a multi-port switch (e.g. 24-port core switch) but only reported <= 1 management/bridge interface
+    // (e.g. switch.1 or eth0 before full DSA/swconfig port enumeration), synthesize the full 24-port faceplate
+    if (rawPorts.length <= 1 && expectedSwitchCapacity >= 8) {
+      const existingPort = rawPorts[0] || null;
+      const existingDevices = Array.isArray(existingPort?.connectedDevices) ? [...existingPort.connectedDevices] : [];
+      const synthPorts = [];
+      for (let i = 1; i <= expectedSwitchCapacity; i++) {
+        const iface = `lan${i}`;
+        const switchPort = `LAN ${i}`;
+        const isUplinkPort = i === 1 && host.status === 'online';
+        const attachedClients = this.clients
+          .filter(
+            (c) =>
+              c.connectionType === 'wired' &&
+              c.connectedTo?.hostId === host.id &&
+              (c.connectedTo?.portNumber === i || c.connectedTo?.iface === iface || c.connectedTo?.switchPort === switchPort)
+          )
+          .map((c) => ({
+            mac: c.mac,
+            ip: c.ip,
+            hostname: c.hostname,
+            vendor: c.vendor || null,
+            type: 'client',
+          }));
+        const connectedDevices = i === 1 ? [...existingDevices, ...attachedClients] : attachedClients;
+        const isUp = isUplinkPort || connectedDevices.length > 0;
+        synthPorts.push({
+          iface,
+          switchPort,
+          portNumber: i,
+          portLabel: `LAN ${i} (${iface})`,
+          portRole: isUplinkPort ? 'uplink' : connectedDevices.length > 0 ? 'access' : 'down',
+          speedMbps: existingPort?.speedMbps || 1000,
+          duplex: 'full',
+          status: isUp ? 'up' : 'down',
+          linkUp: isUp,
+          connectedDevices,
+        });
+      }
+      if (this.showActiveOnly) {
+        const active = synthPorts.filter((p) => p.linkUp || p.connectedDevices.length > 0);
+        return active.length > 0 ? active : synthPorts;
+      }
+      return synthPorts;
+    }
+
     if (rawPorts.length > 0) {
       if (this.showActiveOnly) {
         const filtered = rawPorts.filter(
@@ -185,7 +242,7 @@ export class SwitchPortDiagram {
       svgWrap.innerHTML = `
         <div class="empty-state" style="padding: 24px;">
           <div class="empty-state-title">No OpenWrt Hosts Available</div>
-          <div class="empty-state-desc">Register an OpenWrt router or access point to inspect NIC &amp; switch port wiring.</div>
+          <div class="empty-state-desc">Register an OpenWrt router, switch, or access point to inspect NIC &amp; switch port wiring.</div>
         </div>
       `;
       chassisGrid.innerHTML = '';
@@ -198,73 +255,108 @@ export class SwitchPortDiagram {
 
   renderSvgWiringDiagram(svgWrap) {
     const gwHost = this.hosts.find((h) => h.role === 'gateway') || this.hosts[0];
-    const secondaryHosts = this.hosts.filter((h) => h.id !== gwHost.id);
+    const nonGwHosts = this.hosts.filter((h) => h.id !== gwHost.id);
 
-    const portBoxW = 74;
-    const portBoxH = 54;
-    const portGap = 10;
-    const chassisPadX = 18;
-    const chassisHeaderH = 44;
-    const chassisH = chassisHeaderH + portBoxH + 22;
+    // Compute layout metrics per host (supports both single-row routers/APs and 2-row 16/24/28/48-port switches)
+    const buildHostBoxSpec = (host) => {
+      const ports = this.normalizeHostPorts(host);
+      const isMultiRow = ports.length > 8;
+      const rows = isMultiRow ? 2 : 1;
+      const cols = Math.ceil(Math.max(1, ports.length) / rows);
+      const portBoxW = isMultiRow ? 58 : 74;
+      const portBoxH = isMultiRow ? 44 : 54;
+      const portGapX = isMultiRow ? 6 : 10;
+      const portGapY = 8;
+      const chassisPadX = 18;
+      const chassisHeaderH = 44;
+      const w = Math.max(250, chassisPadX * 2 + cols * portBoxW + Math.max(0, cols - 1) * portGapX);
+      const h = chassisHeaderH + rows * portBoxH + (rows - 1) * portGapY + 18;
+      const isCoreSwitch =
+        host.role === 'switch' ||
+        ports.length >= 8 ||
+        inferSwitchPortCapacity(host) >= 8;
+      return {
+        host,
+        ports,
+        isMultiRow,
+        rows,
+        cols,
+        portBoxW,
+        portBoxH,
+        portGapX,
+        portGapY,
+        chassisHeaderH,
+        w,
+        h,
+        isCoreSwitch,
+      };
+    };
 
-    const getChassisWidth = (portsCount) =>
-      Math.max(250, chassisPadX * 2 + Math.max(1, portsCount) * portBoxW + Math.max(0, portsCount - 1) * portGap);
+    const gwSpec = buildHostBoxSpec(gwHost);
+    const nonGwSpecs = nonGwHosts.map(buildHostBoxSpec);
 
-    const gwPorts = this.normalizeHostPorts(gwHost);
-    const gwW = getChassisWidth(gwPorts.length);
+    // Separate non-gateway hosts into Middle Tier (Core Switches) and Bottom Tier (Access Points / Mesh Nodes)
+    const switchSpecs = nonGwSpecs.filter((s) => s.isCoreSwitch);
+    const apSpecs = nonGwSpecs.filter((s) => !s.isCoreSwitch);
 
-    const secLayouts = secondaryHosts.map((h) => {
-      const ports = this.normalizeHostPorts(h);
-      const w = getChassisWidth(ports.length);
-      return { host: h, ports, w };
-    });
+    const tiers = [[gwSpec]];
+    if (switchSpecs.length > 0 && apSpecs.length > 0) {
+      tiers.push(switchSpecs);
+      tiers.push(apSpecs);
+    } else if (nonGwSpecs.length > 0) {
+      tiers.push(nonGwSpecs);
+    }
 
-    const secGap = 32;
-    const totalSecW =
-      secLayouts.reduce((acc, item) => acc + item.w, 0) + Math.max(0, secLayouts.length - 1) * secGap;
+    const hostGapX = 32;
+    const tierGapY = 86;
+    const maxTierW = tiers.reduce((maxW, tier) => {
+      const tW = tier.reduce((acc, s) => acc + s.w, 0) + Math.max(0, tier.length - 1) * hostGapX;
+      return Math.max(maxW, tW);
+    }, 0);
 
-    const svgW = Math.max(920, gwW + 80, totalSecW + 80);
-    const svgH = secondaryHosts.length > 0 ? 370 : 195;
+    const svgW = Math.max(920, maxTierW + 80);
     const centerX = svgW / 2;
 
-    // Position coordinates of every (hostId, iface/switchPort) jack center so we can draw exact patch cables
-    const portJackCoords = new Map(); // `${hostId}:${iface}` and `${hostId}:${switchPort}` -> { x, y, port, host }
+    // Position coordinates of every (hostId, iface/switchPort) jack so we can route exact patch cables
+    const portJackCoords = new Map();
 
-    const renderChassisSvg = (host, ports, x, y, w) => {
+    const renderChassisSvg = (spec, x, y, tierIdx) => {
+      const { host, ports, rows, cols, portBoxW, portBoxH, portGapX, portGapY, chassisHeaderH, w, h } = spec;
       const hostName = host.name || host.hostname || host.id;
       const nic = host.nicInfo || {};
+      const activeCount = ports.filter((p) => p.linkUp ?? p.status === 'up').length;
       const uplinkBadge =
         host.role === 'gateway'
-          ? `WAN NIC: ${nic.wanPortLabel || nic.localPortLabel || 'eth0'}`
-          : `On NIC: ${nic.localPortLabel || 'lan1'}${nic.upstreamHostName ? ` → ${nic.upstreamHostName} ${nic.upstreamPort || ''}` : ''}`;
+          ? `WAN NIC: ${nic.wanPortLabel || nic.localPortLabel || 'eth0'} • ${activeCount}/${ports.length} Ports Up`
+          : `On NIC: ${nic.localPortLabel || 'lan1'}${nic.upstreamHostName ? ` → ${nic.upstreamHostName} ${nic.upstreamPort || ''}` : ''} • ${activeCount}/${ports.length} Ports Up`;
 
-      const totalPortsW = ports.length * portBoxW + Math.max(0, ports.length - 1) * portGap;
+      const totalPortsW = cols * portBoxW + Math.max(0, cols - 1) * portGapX;
       const startPortX = x + (w - totalPortsW) / 2;
-      const portY = y + chassisHeaderH;
+      const startPortY = y + chassisHeaderH;
 
       let portsSvg = '';
       ports.forEach((p, idx) => {
-        const px = startPortX + idx * (portBoxW + portGap);
-        const py = portY;
+        const row = rows > 1 ? Math.floor(idx / cols) : 0;
+        const col = rows > 1 ? idx % cols : idx;
+        const px = startPortX + col * (portBoxW + portGapX);
+        const py = startPortY + row * (portBoxH + portGapY);
         const jackCenterX = px + portBoxW / 2;
-        const jackTopY = py;
-        const jackBottomY = py + portBoxH;
 
-        portJackCoords.set(`${host.id}:${p.iface}`, {
+        const coordEntry = {
           x: jackCenterX,
-          topY: jackTopY,
-          bottomY: jackBottomY,
+          topY: py,
+          bottomY: py + portBoxH,
+          chassisTopY: y,
+          chassisBottomY: y + h,
+          row,
+          rows,
+          tierIdx,
           port: p,
           host,
-        });
+        };
+        portJackCoords.set(`${host.id}:${p.iface}`, coordEntry);
         if (p.switchPort) {
-          portJackCoords.set(`${host.id}:${p.switchPort}`, {
-            x: jackCenterX,
-            topY: jackTopY,
-            bottomY: jackBottomY,
-            port: p,
-            host,
-          });
+          portJackCoords.set(`${host.id}:${p.switchPort}`, coordEntry);
         }
 
         const color = getPortSpeedColor(p);
@@ -273,10 +365,10 @@ export class SwitchPortDiagram {
         const isUp = p.linkUp ?? p.status === 'up';
         const devFirst = Array.isArray(p.connectedDevices) && p.connectedDevices[0] ? p.connectedDevices[0] : null;
         const devLabel = devFirst
-          ? truncateText(devFirst.hostname || devFirst.ip || devFirst.mac, 11)
+          ? truncateText(devFirst.hostname || devFirst.ip || devFirst.mac, spec.isMultiRow ? 8 : 11)
           : isUp
             ? roleMeta.label
-            : 'Empty';
+            : 'Down';
 
         const tooltip = `${hostName} • ${p.portLabel || p.iface} [${spdShort}]${
           Array.isArray(p.connectedDevices) && p.connectedDevices.length > 0
@@ -284,41 +376,59 @@ export class SwitchPortDiagram {
             : ''
         }`;
 
-        portsSvg += `
-          <g class="sw-svg-port" data-host-id="${escapeHtml(host.id)}" data-iface="${escapeHtml(p.iface)}" style="cursor: pointer;">
-            <title>${escapeHtml(tooltip)}</title>
-            <rect x="${px}" y="${py}" width="${portBoxW}" height="${portBoxH}" rx="6"
-                  fill="var(--color-surface)" stroke="${isUp ? color : 'var(--color-border)'}" stroke-width="${isUp ? '1.8' : '1'}" />
-            <!-- LED + Speed Row -->
-            <circle cx="${px + 10}" cy="${py + 11}" r="3.5" fill="${color}" />
-            <text x="${px + portBoxW - 6}" y="${py + 14}" font-size="9" font-weight="700" fill="${color}" text-anchor="end" font-family="var(--font-mono)">
-              ${escapeHtml(spdShort)}
-            </text>
-            <!-- Port Label & Kernel NIC -->
-            <text x="${px + portBoxW / 2}" y="${py + 29}" font-size="10.5" font-weight="700" fill="var(--color-text-primary)" text-anchor="middle">
-              ${escapeHtml(truncateText(p.switchPort || p.iface, 10))}
-            </text>
-            <text x="${px + portBoxW / 2}" y="${py + 40}" font-size="8.5" fill="var(--color-text-muted)" text-anchor="middle" font-family="var(--font-mono)">
-              ${escapeHtml(truncateText(p.iface, 11))}
-            </text>
-            <!-- Connected Device / Role Footer -->
-            <text x="${px + portBoxW / 2}" y="${py + 50}" font-size="8.5" font-weight="600" fill="${devFirst ? 'var(--color-primary)' : 'var(--color-text-secondary)'}" text-anchor="middle">
-              ${escapeHtml(devLabel)}
-            </text>
-          </g>
-        `;
+        if (spec.isMultiRow) {
+          // Compact 2-row hardware switch port jack (ideal for 16/24/28/48-port switches)
+          portsSvg += `
+            <g class="sw-svg-port" data-host-id="${escapeHtml(host.id)}" data-iface="${escapeHtml(p.iface)}" style="cursor: pointer;">
+              <title>${escapeHtml(tooltip)}</title>
+              <rect x="${px}" y="${py}" width="${portBoxW}" height="${portBoxH}" rx="5"
+                    fill="var(--color-surface)" stroke="${isUp ? color : 'var(--color-border)'}" stroke-width="${isUp ? '1.6' : '1'}" />
+              <circle cx="${px + 8}" cy="${py + 9}" r="3" fill="${color}" />
+              <text x="${px + portBoxW - 5}" y="${py + 12}" font-size="8" font-weight="700" fill="${color}" text-anchor="end" font-family="var(--font-mono)">
+                ${escapeHtml(spdShort)}
+              </text>
+              <text x="${px + portBoxW / 2}" y="${py + 25}" font-size="9.5" font-weight="700" fill="var(--color-text-primary)" text-anchor="middle">
+                ${escapeHtml(truncateText(p.switchPort || p.iface, 8))}
+              </text>
+              <text x="${px + portBoxW / 2}" y="${py + 37}" font-size="7.5" font-weight="600" fill="${devFirst ? 'var(--color-primary)' : 'var(--color-text-muted)'}" text-anchor="middle">
+                ${escapeHtml(devLabel)}
+              </text>
+            </g>
+          `;
+        } else {
+          portsSvg += `
+            <g class="sw-svg-port" data-host-id="${escapeHtml(host.id)}" data-iface="${escapeHtml(p.iface)}" style="cursor: pointer;">
+              <title>${escapeHtml(tooltip)}</title>
+              <rect x="${px}" y="${py}" width="${portBoxW}" height="${portBoxH}" rx="6"
+                    fill="var(--color-surface)" stroke="${isUp ? color : 'var(--color-border)'}" stroke-width="${isUp ? '1.8' : '1'}" />
+              <circle cx="${px + 10}" cy="${py + 11}" r="3.5" fill="${color}" />
+              <text x="${px + portBoxW - 6}" y="${py + 14}" font-size="9" font-weight="700" fill="${color}" text-anchor="end" font-family="var(--font-mono)">
+                ${escapeHtml(spdShort)}
+              </text>
+              <text x="${px + portBoxW / 2}" y="${py + 29}" font-size="10.5" font-weight="700" fill="var(--color-text-primary)" text-anchor="middle">
+                ${escapeHtml(truncateText(p.switchPort || p.iface, 10))}
+              </text>
+              <text x="${px + portBoxW / 2}" y="${py + 40}" font-size="8.5" fill="var(--color-text-muted)" text-anchor="middle" font-family="var(--font-mono)">
+                ${escapeHtml(truncateText(p.iface, 11))}
+              </text>
+              <text x="${px + portBoxW / 2}" y="${py + 50}" font-size="8.5" font-weight="600" fill="${devFirst ? 'var(--color-primary)' : 'var(--color-text-secondary)'}" text-anchor="middle">
+                ${escapeHtml(devLabel)}
+              </text>
+            </g>
+          `;
+        }
       });
 
       return `
         <g class="sw-svg-chassis" data-host-id="${escapeHtml(host.id)}" style="cursor: pointer;">
-          <rect x="${x}" y="${y}" width="${w}" height="${chassisH}" rx="10"
+          <rect x="${x}" y="${y}" width="${w}" height="${h}" rx="10"
                 fill="var(--color-surface-elevated)" stroke="var(--color-border)" stroke-width="1.5" />
           <circle cx="${x + 16}" cy="${y + 18}" r="4.5" fill="${host.status === 'online' ? 'var(--color-success)' : 'var(--color-danger)'}" />
           <text x="${x + 27}" y="${y + 21}" font-size="12.5" font-weight="700" fill="var(--color-text-primary)">
-            ${escapeHtml(truncateText(hostName, 26))}
+            ${escapeHtml(truncateText(hostName, 32))}
           </text>
           <text x="${x + 27}" y="${y + 35}" font-size="10" fill="var(--color-text-muted)" font-family="var(--font-mono)">
-            ${escapeHtml(host.ip || '')} • ${escapeHtml(truncateText(uplinkBadge, 44))}
+            ${escapeHtml(host.ip || '')} • ${escapeHtml(truncateText(uplinkBadge, 64))}
           </text>
           ${portsSvg}
         </g>
@@ -326,24 +436,37 @@ export class SwitchPortDiagram {
     };
 
     let chassisSvg = '';
-    const gwX = centerX - gwW / 2;
-    const gwY = 18;
-    chassisSvg += renderChassisSvg(gwHost, gwPorts, gwX, gwY, gwW);
-
-    let cursorX = centerX - totalSecW / 2;
-    const secY = 230;
-    secLayouts.forEach((item) => {
-      chassisSvg += renderChassisSvg(item.host, item.ports, cursorX, secY, item.w);
-      cursorX += item.w + secGap;
+    let currentY = 18;
+    tiers.forEach((tier, tierIdx) => {
+      const tierW = tier.reduce((acc, s) => acc + s.w, 0) + Math.max(0, tier.length - 1) * hostGapX;
+      let cursorX = centerX - tierW / 2;
+      let maxTierH = 0;
+      tier.forEach((spec) => {
+        chassisSvg += renderChassisSvg(spec, cursorX, currentY, tierIdx);
+        cursorX += spec.w + hostGapX;
+        if (spec.h > maxTierH) maxTierH = spec.h;
+      });
+      currentY += maxTierH + tierGapY;
     });
+
+    const svgH = Math.max(195, currentY - tierGapY + 22);
 
     // Render SVG Patch Cables between OpenWrt Hosts' NIC Ports
     let cablesSvg = '';
-    secondaryHosts.forEach((secHost) => {
+    const defaultSwitchHost = switchSpecs[0]?.host || null;
+    nonGwHosts.forEach((secHost) => {
       const nic = secHost.nicInfo || {};
-      const parentId = nic.upstreamHostId || gwHost.id;
+      let parentId = nic.upstreamHostId || gwHost.id;
+      // If an AP defaults to gateway because FDB hasn't resolved yet, but a Core Switch is present in Tier 2, connect via Core Switch
+      if (
+        defaultSwitchHost &&
+        secHost.id !== defaultSwitchHost.id &&
+        parentId === gwHost.id &&
+        !nic.upstreamIface
+      ) {
+        parentId = defaultSwitchHost.id;
+      }
 
-      // Locate source port jack on upstream host
       const srcCoord =
         (nic.upstreamIface && portJackCoords.get(`${parentId}:${nic.upstreamIface}`)) ||
         (nic.upstreamPort && portJackCoords.get(`${parentId}:${nic.upstreamPort}`)) ||
@@ -355,7 +478,6 @@ export class SwitchPortDiagram {
         ) ||
         Array.from(portJackCoords.values()).find((c) => c.host.id === parentId);
 
-      // Locate target port jack on downstream OpenWrt host
       const tgtCoord =
         (nic.localIface && portJackCoords.get(`${secHost.id}:${nic.localIface}`)) ||
         (nic.localPort && portJackCoords.get(`${secHost.id}:${nic.localPort}`)) ||
@@ -416,6 +538,7 @@ export class SwitchPortDiagram {
     chassisGrid.innerHTML = this.hosts
       .map((host) => {
         const ports = this.normalizeHostPorts(host);
+        const isMultiPortSwitch = ports.length >= 8;
         const activeCount = ports.filter((p) => p.linkUp ?? p.status === 'up').length;
         const nic = host.nicInfo || {};
         const nicBanner =
@@ -427,15 +550,59 @@ export class SwitchPortDiagram {
                   : ''
               }`;
 
+        // Render a visual 2-row hardware RJ45/SFP+ switch faceplate strip for 8/16/24/28/48-port switches
+        const faceplateCols = Math.ceil(ports.length / 2);
+        const faceplateHtml = isMultiPortSwitch
+          ? `
+            <div class="sw-faceplate-strip" style="background: var(--color-bg-primary); border: 1px solid var(--color-border-subtle); border-radius: var(--radius-sm); padding: 10px; overflow-x: auto;">
+              <div style="font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: var(--color-text-muted); margin-bottom: 6px; display: flex; justify-content: space-between;">
+                <span>Hardware Switch Faceplate (${ports.length} Ports)</span>
+                <span>${activeCount} Active / ${ports.length - activeCount} Down</span>
+              </div>
+              <div style="display: grid; grid-template-columns: repeat(${faceplateCols}, minmax(44px, 1fr)); gap: 5px;">
+                ${ports
+                  .map((p, idx) => {
+                    const isUp = p.linkUp ?? p.status === 'up';
+                    const spdColor = getPortSpeedColor(p);
+                    const spdShort = getPortSpeedShort(p);
+                    const isSfp = /^sfp/i.test(p.switchPort || '') || /^(sfp|te|xg|opt)/i.test(p.iface || '');
+                    const shortNum = p.portNumber ?? idx + 1;
+                    const devCount = Array.isArray(p.connectedDevices) ? p.connectedDevices.length : 0;
+                    const titleText = `${p.portLabel || p.iface} [${spdShort}]${
+                      devCount > 0 ? ' — ' + p.connectedDevices.map((d) => d.hostname || d.ip || d.mac).join(', ') : ''
+                    }`;
+                    return `
+                      <div title="${escapeHtml(titleText)}"
+                           style="background: var(--color-surface); border: 1.5px solid ${isUp ? spdColor : 'var(--color-border)'}; border-radius: ${isSfp ? '3px' : '5px'}; padding: 4px 3px; display: flex; flex-direction: column; align-items: center; gap: 2px; opacity: ${isUp ? '1' : '0.62'};">
+                        <div style="display: flex; align-items: center; justify-content: space-between; width: 100%; padding: 0 2px;">
+                          <span style="width: 5px; height: 5px; border-radius: 50%; background: ${spdColor};"></span>
+                          <span class="font-mono" style="font-size: 8.5px; font-weight: 700; color: ${spdColor};">${escapeHtml(spdShort)}</span>
+                        </div>
+                        <span class="font-mono" style="font-size: 10px; font-weight: 700; color: var(--color-text-primary);">
+                          ${isSfp ? `SFP${shortNum}` : shortNum}
+                        </span>
+                        <span style="font-size: 8px; color: ${devCount > 0 ? 'var(--color-primary)' : 'var(--color-text-muted)'}; font-weight: 600;">
+                          ${devCount > 0 ? `${devCount} dev` : isUp ? 'UP' : '—'}
+                        </span>
+                      </div>
+                    `;
+                  })
+                  .join('')}
+              </div>
+            </div>
+          `
+          : '';
+
         return `
           <div class="sw-host-chassis-card" data-host-id="${escapeHtml(host.id)}"
-               style="background: var(--color-surface-elevated); border: 1px solid var(--color-border); border-radius: var(--radius-md); padding: 12px; display: flex; flex-direction: column; gap: 10px;">
-            <div style="display: flex; align-items: flex-start; justify-content: space-between; gap: 8px;">
+               style="${isMultiPortSwitch ? 'grid-column: 1 / -1;' : ''} background: var(--color-surface-elevated); border: 1px solid var(--color-border); border-radius: var(--radius-md); padding: 12px; display: flex; flex-direction: column; gap: 10px;">
+            <div style="display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; flex-wrap: wrap;">
               <div>
-                <div style="display: flex; align-items: center; gap: 6px;">
+                <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
                   <span class="status-dot ${host.status === 'online' ? 'online' : 'offline'}"></span>
                   <span style="font-weight: 700; font-size: 13.5px;">${escapeHtml(host.name || host.hostname || host.id)}</span>
                   <span class="font-mono" style="font-size: 11px; color: var(--color-text-muted);">${escapeHtml(host.ip || '')}</span>
+                  ${host.model ? `<span style="font-size: 11px; color: var(--color-text-muted);">• ${escapeHtml(host.model)}</span>` : ''}
                 </div>
                 <div style="font-size: 11.5px; color: var(--color-text-secondary); margin-top: 3px;">
                   🔌 ${nicBanner}
@@ -446,8 +613,14 @@ export class SwitchPortDiagram {
               </span>
             </div>
 
-            <!-- Port Rows -->
-            <div style="display: flex; flex-direction: column; gap: 6px;">
+            ${faceplateHtml}
+
+            <!-- Port Rows / Multi-Column Port Matrix -->
+            <div style="${
+              isMultiPortSwitch
+                ? 'display: grid; grid-template-columns: repeat(auto-fill, minmax(225px, 1fr)); gap: 6px;'
+                : 'display: flex; flex-direction: column; gap: 6px;'
+            }">
               ${ports
                 .map((p) => {
                   const isUp = p.linkUp ?? p.status === 'up';

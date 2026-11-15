@@ -23,8 +23,10 @@ import {
 
 let server;
 let baseUrl;
+let savedHostsBeforeTest = null;
 
 test.before(async () => {
+  savedHostsBeforeTest = await db.getHosts();
   await db.saveHosts([]);
   await backupEngine.removeDemoBackups(['node-gw-01', 'node-ap-01', 'node-ap-02', 'node-ap-03']);
   server = await createServer();
@@ -40,7 +42,11 @@ test.before(async () => {
 test.after(async () => {
   hostManager.stopPolling();
   backupEngine.stopScheduler();
-  await db.saveHosts([]);
+  if (Array.isArray(savedHostsBeforeTest) && savedHostsBeforeTest.length > 0) {
+    await db.saveHosts(savedHostsBeforeTest);
+  } else {
+    await db.saveHosts([]);
+  }
   await backupEngine.removeDemoBackups(['node-gw-01', 'node-ap-01', 'node-ap-02', 'node-ap-03']);
   await new Promise((resolve) => server.close(resolve));
 });
@@ -1383,4 +1389,53 @@ test('Switch Port & FDB Resolution: parses DSA bridge ports and attributes wired
 
   await hostManager.deleteHost('gw-sw-test', true);
   await hostManager.deleteHost('ap-sw-test', true);
+});
+
+test('24-Port Core Switch: parses all 24 LAN + SFP+ ports on switch bridge / swconfig and strips switch.1', async () => {
+  // 1. Test 24-port DSA Realtek Core Switch (`switch` bridge with lan1..lan24 + sfp1..sfp2, plus br-lan enslaving switch.1)
+  const dsaLines = [
+    'HOSTIF|eth0|aa:bb:cc:00:24:00|',
+    'HOSTIF|switch.1|aa:bb:cc:00:24:00|192.168.1.2',
+    'DEFROUTE|192.168.1.1|switch.1|192.168.1.2',
+    // Virtual VLAN bridge port that previously caused only 1 port (`switch.1`) to appear when only `br-*` was scanned
+    'BRPORT|br-lan|switch.1|0x1|1000|full|up|1|aa:bb:cc:00:24:00',
+    // CPU master conduit eth0
+    'NICPORT|eth0|aa:bb:cc:00:24:00|10000|full|up|1|',
+  ];
+  for (let i = 1; i <= 24; i++) {
+    const isUp = i === 1 || i === 5 || i === 12 || i === 24;
+    dsaLines.push(
+      `BRPORT|switch|lan${i}|0x${i.toString(16)}|${isUp ? '1000' : ''}|full|${isUp ? 'up' : 'down'}|${isUp ? '1' : '0'}|aa:bb:cc:00:24:${i.toString(16).padStart(2, '0')}`
+    );
+  }
+  dsaLines.push('BRPORT|switch|sfp1|0x19|10000|full|up|1|aa:bb:cc:00:24:fa');
+  dsaLines.push('BRPORT|switch|sfp2|0x1a||full|down|0|aa:bb:cc:00:24:fb');
+  // FDB has both the hardware port (`lan5`) and the software bridge VLAN subinterface (`switch.1`)
+  dsaLines.push('FDB|de:ad:be:ef:00:05|lan5|switch|1');
+  dsaLines.push('FDB|de:ad:be:ef:00:05|switch.1|br-lan|1');
+
+  const dsaParsed = parseSwitchFdbSection(dsaLines.join('\n'));
+  assert.equal(dsaParsed.switchPorts.length, 26, 'Expected 24 copper LAN ports + 2 SFP+ cages (switch.1 and eth0 excluded)');
+  assert.equal(dsaParsed.switchPorts[0].switchPort, 'LAN 1');
+  assert.equal(dsaParsed.switchPorts[23].switchPort, 'LAN 24');
+  assert.equal(dsaParsed.switchPorts[24].switchPort, 'SFP+ 1');
+  assert.equal(dsaParsed.switchPorts[25].switchPort, 'SFP+ 2');
+  assert.ok(!dsaParsed.switchPorts.some((p) => p.iface === 'switch.1' || p.iface === 'eth0'));
+  // Ensure `switch.1` did NOT overwrite `lan5` in fdbByMac
+  assert.equal(dsaParsed.fdbByMac.get('de:ad:be:ef:00:05')?.iface, 'lan5');
+  assert.equal(dsaParsed.fdbByMac.get('de:ad:be:ef:00:05')?.switchPort, 'LAN 5');
+
+  // 2. Test 24-port swconfig switch where /sys/class/net only has eth0 and eth0.1
+  const swconfigLines = [
+    'BRPORT|br-lan|eth0.1|0x1|1000|full|up|1|aa:bb:cc:11:24:00',
+    'NICPORT|eth0|aa:bb:cc:11:24:00|1000|full|up|1|',
+  ];
+  for (let i = 1; i <= 24; i++) {
+    const st = i <= 4 ? 'up' : 'down';
+    swconfigLines.push(`SWPORT|switch0|${i}|${st}|${st === 'up' ? '1000baseT' : ''}|full-duplex`);
+  }
+  const swParsed = parseSwitchFdbSection(swconfigLines.join('\n'));
+  assert.equal(swParsed.switchPorts.length, 24, 'Expected all 24 swconfig ports instead of single eth0/eth0.1');
+  assert.equal(swParsed.switchPorts[0].switchPort, 'Port 1');
+  assert.equal(swParsed.switchPorts[23].switchPort, 'Port 24');
 });

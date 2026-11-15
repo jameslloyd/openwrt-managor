@@ -955,6 +955,21 @@ export class HostManager {
           if (matchedPeerEntry && matchedPeerEntry.iface) {
             const peerPortObj = peerPorts.find((p) => p.iface === matchedPeerEntry.iface);
             const formatted = peerPortObj || formatSwitchPortLabel(matchedPeerEntry.iface, matchedPeerEntry.speedMbps);
+            let otherManagedHostsOnPort = 0;
+            const seenOwnerIds = new Set();
+            for (const [oMac, oEntry] of Object.entries(peerFdb)) {
+              const oOwner = macToHostId.get(oMac);
+              if (
+                oOwner &&
+                oOwner !== peer.id &&
+                oOwner !== h.id &&
+                oEntry?.iface === matchedPeerEntry.iface &&
+                !seenOwnerIds.has(oOwner)
+              ) {
+                seenOwnerIds.add(oOwner);
+                otherManagedHostsOnPort++;
+              }
+            }
             upstreamCandidates.push({
               upstreamHostId: peer.id,
               upstreamHostName: peer.name || peer.hostname || peer.id,
@@ -963,6 +978,8 @@ export class HostManager {
               upstreamPortLabel: formatted?.portLabel || matchedPeerEntry.portLabel || matchedPeerEntry.iface,
               upstreamSpeedMbps: peerPortObj?.speedMbps || matchedPeerEntry.speedMbps || 1000,
               portMacCount: matchedPeerEntry.portMacCount || 1,
+              otherManagedHostsOnPort,
+              isSwitchPeer: peer.role === 'switch' || peerPorts.length >= 8,
               isGatewayPeer: peer.role === 'gateway',
             });
           }
@@ -970,8 +987,14 @@ export class HostManager {
 
         if (upstreamCandidates.length > 0) {
           upstreamCandidates.sort((a, b) => {
+            if (a.otherManagedHostsOnPort !== b.otherManagedHostsOnPort) {
+              return a.otherManagedHostsOnPort - b.otherManagedHostsOnPort;
+            }
             if ((a.portMacCount || 1) !== (b.portMacCount || 1)) {
               return (a.portMacCount || 1) - (b.portMacCount || 1);
+            }
+            if (a.isSwitchPeer !== b.isSwitchPeer) {
+              return a.isSwitchPeer ? -1 : 1;
             }
             if (a.isGatewayPeer !== b.isGatewayPeer) {
               return a.isGatewayPeer ? -1 : 1;
@@ -1033,8 +1056,11 @@ export class HostManager {
       // 2c. Check if `h`'s default route or management IP is on a specific physical NIC or active bridge port
       if (!localPortObj && h.role !== 'gateway') {
         const defDev = h.defaultRoute?.dev;
-        if (defDev && !/^br-/i.test(defDev)) {
-          localPortObj = myPorts.find((p) => p.iface === defDev) || formatSwitchPortLabel(defDev, 1000);
+        const matchingDefPort = defDev ? myPorts.find((p) => p.iface === defDev) : null;
+        if (matchingDefPort) {
+          localPortObj = matchingDefPort;
+        } else if (defDev && !/^(br-|br\d+|switch)/i.test(defDev) && !defDev.includes('.') && myPorts.length === 0) {
+          localPortObj = formatSwitchPortLabel(defDev, 1000);
         } else {
           const activePorts = myPorts.filter((p) => p.linkUp);
           // Prefer an active port that has no leaf clients pinned or highest connectedMacs count, or lan1/eth0
