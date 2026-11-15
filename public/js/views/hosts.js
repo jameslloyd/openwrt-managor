@@ -431,6 +431,7 @@ export function renderHosts(container) {
           model: host.model,
           firmware: host.firmware,
           updates: host.updates,
+          nicInfo: host.nicInfo || null,
           switchPorts: host.switchPorts || [],
           status: host.status,
           metrics: {
@@ -539,6 +540,16 @@ function renderHostRow(h) {
       </td>
       <td>
         <span class="font-mono">${escapeHtml(h.ip)}</span>
+        ${h.nicInfo ? `
+          <div style="font-size: 10.5px; color: var(--color-primary); margin-top: 2px;">
+            🔌 NIC: <span class="font-mono" style="font-weight: 600;">${escapeHtml(h.nicInfo.localPortLabel || h.nicInfo.localIface)}</span>
+          </div>
+          ${h.role !== 'gateway' && h.nicInfo.upstreamHostName ? `
+            <div style="font-size: 10px; color: var(--color-text-muted);">
+              ↳ via ${escapeHtml(h.nicInfo.upstreamHostName)}${h.nicInfo.upstreamPort ? ` (${escapeHtml(h.nicInfo.upstreamPort)})` : ''}
+            </div>
+          ` : ''}
+        ` : ''}
       </td>
       <td>
         <span style="text-transform: capitalize;">${escapeHtml(h.role || 'AP')}</span>

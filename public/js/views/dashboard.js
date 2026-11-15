@@ -193,6 +193,8 @@ export function renderDashboard(container) {
           model: host.model,
           firmware: host.firmware,
           updates: host.updates,
+          nicInfo: host.nicInfo || null,
+          switchPorts: host.switchPorts || [],
           status: host.status,
           metrics: {
             cpuUsagePct: host.cpuUsagePct ?? 0,
@@ -249,10 +251,16 @@ function renderHostCard(host) {
         </span>
       </div>
 
-      <div class="node-meta-row">
+      <div class="node-meta-row" style="flex-wrap: wrap;">
         <span>IP: ${escapeHtml(host.ip)}</span>
         <span>•</span>
         <span>Uptime: ${formatUptime(host.uptimeSec)}</span>
+        ${host.nicInfo ? `
+          <span>•</span>
+          <span style="color: var(--color-primary); font-weight: 600;">
+            🔌 NIC: ${escapeHtml(host.nicInfo.localPortLabel || host.nicInfo.localIface)}${host.role !== 'gateway' && host.nicInfo.upstreamPort ? ` → ${escapeHtml(host.nicInfo.upstreamPort)}` : ''}
+          </span>
+        ` : ''}
       </div>
 
       ${pkgCount > 0 || fwAvailable ? `

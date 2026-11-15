@@ -117,6 +117,7 @@ export function renderNodeDetails(node) {
   const metrics = node.metrics || {};
   const isGw = node.type === 'gateway';
   const matchedHost = (store.state.hosts || []).find((h) => h.id === node.id);
+  const nicInfo = node.nicInfo || matchedHost?.nicInfo || null;
   const switchPorts = Array.isArray(node.switchPorts) && node.switchPorts.length > 0
     ? node.switchPorts
     : (matchedHost?.switchPorts || []);
@@ -190,6 +191,15 @@ export function renderNodeDetails(node) {
             <div class="font-mono">${formatMac(node.mac) || 'N/A'}</div>
             ${node.mac ? `<div style="font-size: 11px; color: var(--color-text-muted);">${escapeHtml(resolveClientSideVendor(node.mac, node.model || node.label, node.vendor))}</div>` : ''}
           </div>
+          ${nicInfo ? `
+            <div style="grid-column: 1 / -1; background: var(--color-surface-elevated); padding: 8px 10px; border-radius: var(--radius-sm); border: 1px solid var(--color-border-subtle); margin-top: 2px;">
+              <div style="font-size: 11px; color: var(--color-text-muted);">${isGw ? 'Primary WAN / Uplink NIC Port' : 'Host Network NIC Port & Upstream Switch Port'}</div>
+              <div style="font-weight: 600; color: var(--color-primary); margin-top: 2px;">
+                🔌 ${escapeHtml(nicInfo.localPortLabel || nicInfo.localPort || nicInfo.localIface || 'eth0')}
+                ${!isGw && nicInfo.upstreamHostName ? ` <span style="color: var(--color-text-secondary); font-weight: 500;">⟷ ${escapeHtml(nicInfo.upstreamHostName)}${nicInfo.upstreamPortLabel ? ` (${escapeHtml(nicInfo.upstreamPortLabel)})` : ''}</span>` : ''}
+              </div>
+            </div>
+          ` : ''}
         </div>
       </div>
 

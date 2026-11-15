@@ -151,6 +151,15 @@ export class HostManager {
     if (typeof telemetry.cpuUsagePct === 'number') host.cpuUsagePct = telemetry.cpuUsagePct;
     if (typeof telemetry.memUsagePct === 'number') host.memUsagePct = telemetry.memUsagePct;
     if (telemetry.mac) host.mac = telemetry.mac;
+    if (Array.isArray(telemetry.allMacs) && telemetry.allMacs.length > 0) {
+      host.allMacs = telemetry.allMacs;
+    }
+    if (Array.isArray(telemetry.hostInterfaces)) {
+      host.hostInterfaces = telemetry.hostInterfaces;
+    }
+    if (telemetry.defaultRoute) {
+      host.defaultRoute = telemetry.defaultRoute;
+    }
     if (!host.vendor && (host.mac || host.model)) {
       host.vendor = lookupVendor(host.mac, host.model);
     }
@@ -221,7 +230,11 @@ export class HostManager {
       id: host.id,
       name: host.name || host.hostname || host.id,
       hostname: host.hostname || host.name || host.id,
+      ip: host.ip || prevCache?.ip || null,
       mac: host.mac ? String(host.mac).toLowerCase() : prevCache?.mac || null,
+      allMacs: Array.isArray(host.allMacs) ? host.allMacs : prevCache?.allMacs || (host.mac ? [String(host.mac).toLowerCase()] : []),
+      hostInterfaces: Array.isArray(host.hostInterfaces) ? host.hostInterfaces : prevCache?.hostInterfaces || [],
+      defaultRoute: host.defaultRoute || prevCache?.defaultRoute || null,
       role: host.role || 'ap',
       mapPosition: host.mapPosition || prevCache?.mapPosition || null,
       latitude: geo.latitude,
@@ -305,23 +318,86 @@ export class HostManager {
     }
   }
 
+  getManagedHostMacMap(hostsList = null) {
+    const macToHostId = new Map();
+    const macsByHostId = new Map();
+    const ipToMacFromArp = new Map();
+
+    for (const arpMap of this.arpByHost.values()) {
+      if (!arpMap || typeof arpMap !== 'object') continue;
+      for (const [mac, entry] of Object.entries(arpMap)) {
+        const ip = typeof entry === 'string' ? entry : entry?.ip;
+        if (ip && ip !== '0.0.0.0' && mac) {
+          ipToMacFromArp.set(ip, mac.toLowerCase());
+        }
+      }
+    }
+    for (const dhcpMap of this.dhcpByHost.values()) {
+      if (!dhcpMap || typeof dhcpMap !== 'object') continue;
+      for (const [mac, entry] of Object.entries(dhcpMap)) {
+        if (entry?.ip && entry.ip !== '0.0.0.0' && mac && !ipToMacFromArp.has(entry.ip)) {
+          ipToMacFromArp.set(entry.ip, mac.toLowerCase());
+        }
+      }
+    }
+
+    const iterableHosts = Array.isArray(hostsList) && hostsList.length > 0
+      ? hostsList
+      : Array.from(this.hostsCacheById.values());
+
+    for (const h of iterableHosts) {
+      if (!h || !h.id) continue;
+      const set = new Set();
+      const addMac = (m) => {
+        if (!m) return;
+        const clean = String(m).trim().toLowerCase();
+        if (/^([0-9a-f]{2}:){5}[0-9a-f]{2}$/.test(clean) && clean !== '00:00:00:00:00:00') {
+          set.add(clean);
+          macToHostId.set(clean, h.id);
+        }
+      };
+
+      addMac(h.mac);
+      const cached = this.hostsCacheById.get(h.id);
+      if (cached?.mac) addMac(cached.mac);
+      for (const m of h.allMacs || cached?.allMacs || []) addMac(m);
+      for (const p of h.switchPorts || this.switchPortsByHost.get(h.id) || []) addMac(p?.mac);
+      for (const r of h.radios || this.liveRadiosByHost.get(h.id) || []) addMac(r?.bssid);
+      if (h.ip && ipToMacFromArp.has(h.ip)) {
+        addMac(ipToMacFromArp.get(h.ip));
+      }
+      if (!h.mac && set.size > 0) {
+        h.mac = Array.from(set)[0];
+      }
+      macsByHostId.set(h.id, set);
+    }
+
+    return { macToHostId, macsByHostId };
+  }
+
   resolveBestSwitchPortForMac(macLower) {
     if (!macLower) return null;
-    const managedHostMacs = new Set();
-    for (const h of this.hostsCacheById.values()) {
-      if (h.mac) managedHostMacs.add(String(h.mac).toLowerCase());
-    }
+    const { macToHostId } = this.getManagedHostMacMap();
+    const targetOwnerHostId = macToHostId.get(macLower) || null;
 
     const candidates = [];
     for (const [hostId, fdbMap] of this.fdbByHost.entries()) {
+      if (targetOwnerHostId && hostId === targetOwnerHostId) continue;
       if (!fdbMap || typeof fdbMap !== 'object') continue;
       const entry = fdbMap[macLower];
       if (!entry || !entry.iface) continue;
 
-      // Check if this same switch port on this host also carries another managed OpenWrt host's MAC (trunk/uplink port)
+      // Check if this same switch port on this host also carries ANOTHER managed OpenWrt host's MAC (trunk/uplink port)
       let isTrunkToManagedHost = false;
       for (const [otherMac, otherEntry] of Object.entries(fdbMap)) {
-        if (otherMac !== macLower && otherEntry?.iface === entry.iface && managedHostMacs.has(otherMac)) {
+        const otherOwnerId = macToHostId.get(otherMac);
+        if (
+          otherMac !== macLower &&
+          otherEntry?.iface === entry.iface &&
+          otherOwnerId &&
+          otherOwnerId !== hostId &&
+          otherOwnerId !== targetOwnerHostId
+        ) {
           isTrunkToManagedHost = true;
           break;
         }
@@ -494,15 +570,15 @@ export class HostManager {
     }
 
     // Also include wired devices learned on physical switch ports (`fdbByHost`) that have a known IP in globalDhcp or globalArp (e.g. wired device plugged into a secondary AP)
-    const managedHostMacs = new Set();
-    for (const h of this.hostsCacheById.values()) {
-      if (h.mac) managedHostMacs.add(String(h.mac).toLowerCase());
+    const { macToHostId } = this.getManagedHostMacMap();
+    for (const hostMac of macToHostId.keys()) {
+      byMac.delete(hostMac);
     }
     for (const fdbMap of this.fdbByHost.values()) {
       if (!fdbMap || typeof fdbMap !== 'object') continue;
       for (const rawMac of Object.keys(fdbMap)) {
         const macLower = rawMac.toLowerCase();
-        if (byMac.has(macLower) || managedHostMacs.has(macLower)) continue;
+        if (byMac.has(macLower) || macToHostId.has(macLower)) continue;
         const dhcp = globalDhcp[macLower] || {};
         const arpIp = globalArp[macLower];
         const rdns = globalRdns[macLower] || {};
@@ -778,7 +854,11 @@ export class HostManager {
         id: h.id,
         name: h.name || h.hostname || h.id,
         hostname: h.hostname || h.name || h.id,
+        ip: h.ip || null,
         mac: h.mac ? String(h.mac).toLowerCase() : null,
+        allMacs: Array.isArray(h.allMacs) ? h.allMacs : h.mac ? [String(h.mac).toLowerCase()] : [],
+        hostInterfaces: Array.isArray(h.hostInterfaces) ? h.hostInterfaces : [],
+        defaultRoute: h.defaultRoute || null,
         role: h.role || 'ap',
         mapPosition: h.mapPosition || null,
         latitude: geo.latitude,
@@ -791,52 +871,278 @@ export class HostManager {
       });
     }
 
-    // Enrich switchPorts with attached client / OpenWrt host summaries
+    // Cross-correlate NIC ports and FDB tables across ALL OpenWrt hosts & clients
     const liveClients = this.getLiveClients();
-    for (const h of hosts) {
-      const rawPorts = this.switchPortsByHost.get(h.id) || h.switchPorts || [];
-      if (Array.isArray(rawPorts) && rawPorts.length > 0) {
-        h.switchPorts = rawPorts.map((p) => {
-          const attachedClients = liveClients
-            .filter(
-              (c) =>
-                c.connectionType === 'wired' &&
-                c.connectedTo?.hostId === h.id &&
-                (c.connectedTo?.iface === p.iface || c.connectedTo?.switchPort === p.switchPort)
-            )
-            .map((c) => ({
-              mac: c.mac,
-              ip: c.ip,
-              hostname: c.hostname,
-              type: 'client',
-            }));
-          const fdbMap = this.fdbByHost.get(h.id) || {};
-          const attachedHosts = hosts
-            .filter(
-              (other) =>
-                other.id !== h.id &&
-                other.mac &&
-                fdbMap[String(other.mac).toLowerCase()]?.iface === p.iface
-            )
-            .map((other) => ({
-              id: other.id,
-              mac: other.mac,
-              ip: other.ip,
-              hostname: other.name || other.hostname,
-              type: other.role || 'ap',
-            }));
-          return {
-            ...p,
-            connectedDevices: [...attachedHosts, ...attachedClients],
-          };
-        });
-      }
-    }
+    this.resolveFleetNicPorts(hosts, liveClients);
 
     if (sanitized) {
       return hosts.map((h) => sanitizeHost(h, this.getUpgradeJobForHost(h.id)));
     }
     return hosts;
+  }
+
+  /**
+   * Checks all OpenWrt hosts to determine:
+   * 1. Which local NIC port each OpenWrt host uses (`localIface` / `localPort`)
+   * 2. Which upstream OpenWrt host & NIC port each OpenWrt host is connected to (`upstreamHostId` / `upstreamPort`)
+   * 3. Reciprocal `connectedDevices` and `portRole` across every OpenWrt host's `switchPorts`
+   */
+  resolveFleetNicPorts(hosts, liveClients = []) {
+    if (!Array.isArray(hosts) || hosts.length === 0) return;
+    const { macToHostId, macsByHostId } = this.getManagedHostMacMap(hosts);
+    const gwHost = hosts.find((h) => h.role === 'gateway') || hosts[0];
+
+    // Step 1: Clone raw switchPorts for each host and attach wired clients
+    const portsByHostId = new Map();
+    for (const h of hosts) {
+      const rawPorts = this.switchPortsByHost.get(h.id) || h.switchPorts || [];
+      const clonedPorts = Array.isArray(rawPorts)
+        ? rawPorts.map((p) => {
+            const attachedClients = liveClients
+              .filter(
+                (c) =>
+                  c.connectionType === 'wired' &&
+                  c.connectedTo?.hostId === h.id &&
+                  (c.connectedTo?.iface === p.iface || c.connectedTo?.switchPort === p.switchPort)
+              )
+              .map((c) => ({
+                mac: c.mac,
+                ip: c.ip,
+                hostname: c.hostname,
+                vendor: c.vendor || null,
+                type: 'client',
+              }));
+            return {
+              ...p,
+              linkUp: Boolean(p.linkUp ?? p.status === 'up'),
+              status: (p.linkUp ?? p.status === 'up') ? 'up' : 'down',
+              connectedDevices: [...attachedClients],
+            };
+          })
+        : [];
+      portsByHostId.set(h.id, clonedPorts);
+    }
+
+    // Step 2: For each non-gateway (or secondary) OpenWrt host, check all other OpenWrt hosts' FDB tables to find its upstream host & NIC port, and check its own FDB/interfaces to find its local uplink NIC port
+    for (const h of hosts) {
+      const myMacs = macsByHostId.get(h.id) || new Set();
+      const myPorts = portsByHostId.get(h.id) || [];
+      const myFdb = this.fdbByHost.get(h.id) || {};
+
+      // Identify WAN port if present (especially for Gateway)
+      const wanPortObj =
+        myPorts.find((p) => p.portRole === 'wan' || /^wan/i.test(p.iface) || /^wan/i.test(p.switchPort || '')) ||
+        (h.role === 'gateway' && h.defaultRoute?.dev
+          ? myPorts.find((p) => p.iface === h.defaultRoute.dev) || formatSwitchPortLabel(h.defaultRoute.dev, h.wan?.speedMbps || 1000)
+          : null);
+
+      let bestUpstream = null;
+      if (h.id !== gwHost?.id || h.role !== 'gateway') {
+        const upstreamCandidates = [];
+        for (const peer of hosts) {
+          if (peer.id === h.id) continue;
+          const peerFdb = this.fdbByHost.get(peer.id) || {};
+          const peerPorts = portsByHostId.get(peer.id) || [];
+
+          let matchedPeerEntry = null;
+          for (const m of myMacs) {
+            if (peerFdb[m]) {
+              matchedPeerEntry = peerFdb[m];
+              break;
+            }
+          }
+
+          if (matchedPeerEntry && matchedPeerEntry.iface) {
+            const peerPortObj = peerPorts.find((p) => p.iface === matchedPeerEntry.iface);
+            const formatted = peerPortObj || formatSwitchPortLabel(matchedPeerEntry.iface, matchedPeerEntry.speedMbps);
+            upstreamCandidates.push({
+              upstreamHostId: peer.id,
+              upstreamHostName: peer.name || peer.hostname || peer.id,
+              upstreamIface: matchedPeerEntry.iface,
+              upstreamPort: formatted?.switchPort || matchedPeerEntry.switchPort || matchedPeerEntry.iface,
+              upstreamPortLabel: formatted?.portLabel || matchedPeerEntry.portLabel || matchedPeerEntry.iface,
+              upstreamSpeedMbps: peerPortObj?.speedMbps || matchedPeerEntry.speedMbps || 1000,
+              portMacCount: matchedPeerEntry.portMacCount || 1,
+              isGatewayPeer: peer.role === 'gateway',
+            });
+          }
+        }
+
+        if (upstreamCandidates.length > 0) {
+          upstreamCandidates.sort((a, b) => {
+            if ((a.portMacCount || 1) !== (b.portMacCount || 1)) {
+              return (a.portMacCount || 1) - (b.portMacCount || 1);
+            }
+            if (a.isGatewayPeer !== b.isGatewayPeer) {
+              return a.isGatewayPeer ? -1 : 1;
+            }
+            return 0;
+          });
+          bestUpstream = upstreamCandidates[0];
+        }
+      }
+
+      // Now find which local NIC port on `h` itself connects to `bestUpstream` (or to the gateway/network)
+      let localPortObj = null;
+      const targetParentId = bestUpstream?.upstreamHostId || (h.id !== gwHost?.id ? gwHost?.id : null);
+      const parentMacs = targetParentId ? macsByHostId.get(targetParentId) || new Set() : new Set();
+
+      // 2a. Check `h`'s own FDB for the parent OpenWrt host's MACs
+      for (const pm of parentMacs) {
+        if (myFdb[pm] && myFdb[pm].iface) {
+          const fEntry = myFdb[pm];
+          localPortObj = myPorts.find((p) => p.iface === fEntry.iface) || {
+            iface: fEntry.iface,
+            switchPort: fEntry.switchPort || formatSwitchPortLabel(fEntry.iface, fEntry.speedMbps)?.switchPort || fEntry.iface,
+            portLabel: fEntry.portLabel || formatSwitchPortLabel(fEntry.iface, fEntry.speedMbps)?.portLabel || fEntry.iface,
+            speedMbps: fEntry.speedMbps || 1000,
+          };
+          break;
+        }
+      }
+
+      // 2b. If not found in FDB for specific parent, check `h`'s FDB for ANY other managed OpenWrt host's MAC
+      if (!localPortObj) {
+        for (const [fMac, fEntry] of Object.entries(myFdb)) {
+          const ownerId = macToHostId.get(fMac);
+          if (ownerId && ownerId !== h.id && fEntry?.iface) {
+            localPortObj = myPorts.find((p) => p.iface === fEntry.iface) || {
+              iface: fEntry.iface,
+              switchPort: fEntry.switchPort || formatSwitchPortLabel(fEntry.iface, fEntry.speedMbps)?.switchPort || fEntry.iface,
+              portLabel: fEntry.portLabel || formatSwitchPortLabel(fEntry.iface, fEntry.speedMbps)?.portLabel || fEntry.iface,
+              speedMbps: fEntry.speedMbps || 1000,
+            };
+            if (!bestUpstream) {
+              const peerHost = hosts.find((ph) => ph.id === ownerId);
+              if (peerHost) {
+                bestUpstream = {
+                  upstreamHostId: peerHost.id,
+                  upstreamHostName: peerHost.name || peerHost.hostname || peerHost.id,
+                  upstreamIface: null,
+                  upstreamPort: null,
+                  upstreamPortLabel: null,
+                  upstreamSpeedMbps: localPortObj.speedMbps || 1000,
+                };
+              }
+            }
+            break;
+          }
+        }
+      }
+
+      // 2c. Check if `h`'s default route or management IP is on a specific physical NIC or active bridge port
+      if (!localPortObj && h.role !== 'gateway') {
+        const defDev = h.defaultRoute?.dev;
+        if (defDev && !/^br-/i.test(defDev)) {
+          localPortObj = myPorts.find((p) => p.iface === defDev) || formatSwitchPortLabel(defDev, 1000);
+        } else {
+          const activePorts = myPorts.filter((p) => p.linkUp);
+          // Prefer an active port that has no leaf clients pinned or highest connectedMacs count, or lan1/eth0
+          localPortObj =
+            activePorts.find((p) => p.connectedDevices.length === 0) ||
+            activePorts[0] ||
+            myPorts[0] ||
+            null;
+        }
+      } else if (!localPortObj && h.role === 'gateway') {
+        localPortObj = wanPortObj || myPorts.find((p) => p.linkUp) || myPorts[0] || null;
+      }
+
+      const negotiatedSpeed =
+        bestUpstream?.upstreamSpeedMbps ||
+        localPortObj?.speedMbps ||
+        wanPortObj?.speedMbps ||
+        h.wan?.speedMbps ||
+        1000;
+
+      h.nicInfo = {
+        localIface: localPortObj?.iface || (h.role === 'gateway' ? wanPortObj?.iface || 'eth0' : 'lan1'),
+        localPort: localPortObj?.switchPort || (h.role === 'gateway' ? wanPortObj?.switchPort || 'WAN' : 'LAN 1'),
+        localPortLabel:
+          localPortObj?.portLabel ||
+          (h.role === 'gateway' ? wanPortObj?.portLabel || 'WAN (eth0)' : 'LAN 1 (lan1)'),
+        localSpeedMbps: localPortObj?.speedMbps || negotiatedSpeed,
+        upstreamHostId: bestUpstream?.upstreamHostId || (h.id !== gwHost?.id ? gwHost?.id || null : null),
+        upstreamHostName:
+          bestUpstream?.upstreamHostName || (h.id !== gwHost?.id ? gwHost?.name || gwHost?.hostname || null : null),
+        upstreamIface: bestUpstream?.upstreamIface || null,
+        upstreamPort: bestUpstream?.upstreamPort || null,
+        upstreamPortLabel: bestUpstream?.upstreamPortLabel || null,
+        upstreamSpeedMbps: bestUpstream?.upstreamSpeedMbps || null,
+        wanIface: wanPortObj?.iface || (h.role === 'gateway' ? 'eth0' : null),
+        wanPort: wanPortObj?.switchPort || (h.role === 'gateway' ? 'WAN' : null),
+        wanPortLabel: wanPortObj?.portLabel || (h.role === 'gateway' ? 'WAN (eth0)' : null),
+        wanSpeedMbps: wanPortObj?.speedMbps || h.wan?.speedMbps || null,
+      };
+
+      // Step 3: Reciprocally link upstream & downstream OpenWrt hosts on their respective `switchPorts`
+      if (bestUpstream?.upstreamHostId && bestUpstream?.upstreamIface) {
+        const upPorts = portsByHostId.get(bestUpstream.upstreamHostId) || [];
+        const upPort = upPorts.find((p) => p.iface === bestUpstream.upstreamIface);
+        if (upPort) {
+          upPort.portRole = 'trunk';
+          if (!upPort.connectedDevices.some((d) => d.id === h.id)) {
+            upPort.connectedDevices.unshift({
+              id: h.id,
+              mac: h.mac || null,
+              ip: h.ip || null,
+              hostname: h.name || h.hostname || h.id,
+              type: h.role || 'ap',
+              remoteIface: h.nicInfo.localIface,
+              remotePort: h.nicInfo.localPort,
+              remotePortLabel: h.nicInfo.localPortLabel,
+            });
+          }
+        }
+      }
+
+      if (localPortObj && h.id !== gwHost?.id && h.nicInfo.upstreamHostId) {
+        const myPortInList = myPorts.find((p) => p.iface === localPortObj.iface);
+        const parentHost = hosts.find((ph) => ph.id === h.nicInfo.upstreamHostId);
+        if (myPortInList && parentHost) {
+          myPortInList.portRole = 'uplink';
+          if (!myPortInList.connectedDevices.some((d) => d.id === parentHost.id)) {
+            myPortInList.connectedDevices.unshift({
+              id: parentHost.id,
+              mac: parentHost.mac || null,
+              ip: parentHost.ip || null,
+              hostname: `${parentHost.name || parentHost.hostname} (Uplink)`,
+              type: parentHost.role || 'gateway',
+              remoteIface: h.nicInfo.upstreamIface,
+              remotePort: h.nicInfo.upstreamPort,
+              remotePortLabel: h.nicInfo.upstreamPortLabel,
+            });
+          }
+        }
+      }
+    }
+
+    // Step 4: Finalize portRole on every port of every host
+    for (const h of hosts) {
+      const myPorts = portsByHostId.get(h.id) || [];
+      for (const p of myPorts) {
+        if (!p.linkUp) {
+          p.portRole = p.portRole === 'wan' ? 'wan' : 'down';
+        } else if (p.portRole === 'wan') {
+          if (p.connectedDevices.length === 0 && h.wan?.ip) {
+            p.connectedDevices.push({
+              id: 'wan-internet',
+              ip: h.wan.gateway || h.wan.ip,
+              hostname: `WAN Uplink (${h.wan.ip})`,
+              type: 'wan',
+            });
+          }
+        } else if (p.portRole !== 'uplink' && p.portRole !== 'trunk') {
+          const hasAp = p.connectedDevices.some((d) => d.type === 'ap' || d.type === 'mesh' || d.type === 'switch');
+          const hasGw = p.connectedDevices.some((d) => d.type === 'gateway');
+          if (hasGw) p.portRole = 'uplink';
+          else if (hasAp) p.portRole = 'trunk';
+          else if (p.connectedDevices.length > 0) p.portRole = 'access';
+          else p.portRole = 'idle';
+        }
+      }
+      h.switchPorts = myPorts;
+    }
   }
 
   async getHost(id, { sanitized = true } = {}) {

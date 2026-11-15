@@ -1352,11 +1352,34 @@ test('Switch Port & FDB Resolution: parses DSA bridge ports and attributes wired
 
   const gwLan1 = enrichedGw.switchPorts.find((p) => p.iface === 'lan1');
   const gwLan2 = enrichedGw.switchPorts.find((p) => p.iface === 'lan2');
+  const apLan1 = enrichedAp.switchPorts.find((p) => p.iface === 'lan1');
   const apLan4 = enrichedAp.switchPorts.find((p) => p.iface === 'lan4');
 
-  assert.ok(gwLan1.connectedDevices.some((d) => d.hostname === 'Office AP' && d.type === 'ap'));
+  assert.equal(gwLan1.portRole, 'trunk');
+  assert.ok(gwLan1.connectedDevices.some((d) => d.hostname === 'Office AP' && d.type === 'ap' && d.remoteIface === 'lan1'));
+  assert.equal(gwLan2.portRole, 'access');
   assert.ok(gwLan2.connectedDevices.some((d) => d.hostname === 'Proxmox-VE'));
+  assert.equal(apLan1.portRole, 'uplink');
+  assert.ok(apLan1.connectedDevices.some((d) => d.id === 'gw-sw-test' && d.remoteIface === 'lan1'));
+  assert.equal(apLan4.portRole, 'access');
   assert.ok(apLan4.connectedDevices.some((d) => d.hostname === 'Synology-NAS'));
+
+  // Verify cross-host nicInfo on Office AP
+  assert.equal(enrichedAp.nicInfo.localIface, 'lan1');
+  assert.equal(enrichedAp.nicInfo.localPort, 'LAN 1');
+  assert.equal(enrichedAp.nicInfo.upstreamHostId, 'gw-sw-test');
+  assert.equal(enrichedAp.nicInfo.upstreamIface, 'lan1');
+  assert.equal(enrichedAp.nicInfo.upstreamPort, 'LAN 1');
+
+  // Verify GET /api/topology includes nicInfo on host nodes and sourcePort + targetPort on inter-host links
+  const topoRes = await fetch(`${baseUrl}/api/topology`);
+  const topoData = await topoRes.json();
+  const gwToApLink = topoData.links.find((l) => l.source === 'gw-sw-test' && l.target === 'ap-sw-test');
+  assert.ok(gwToApLink);
+  assert.equal(gwToApLink.sourcePort, 'LAN 1');
+  assert.equal(gwToApLink.sourceIface, 'lan1');
+  assert.equal(gwToApLink.targetPort, 'LAN 1');
+  assert.equal(gwToApLink.targetIface, 'lan1');
 
   await hostManager.deleteHost('gw-sw-test', true);
   await hostManager.deleteHost('ap-sw-test', true);

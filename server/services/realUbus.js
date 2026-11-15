@@ -966,7 +966,7 @@ export async function pollRealHost(hostConfig, prevSample = null) {
     'echo "===ARP==="',
     'cat /proc/net/arp 2>/dev/null; echo "---IPNEIGH---"; ip -4 neigh show 2>/dev/null',
     'echo "===SWITCH_FDB==="',
-    'for p in /sys/class/net/br-*/brif/*; do [ -e "$p" ] || continue; br=$(basename $(dirname $(dirname "$p"))); ifn=$(basename "$p"); pno=$(cat "$p/port_no" 2>/dev/null); spd=$(cat "/sys/class/net/$ifn/speed" 2>/dev/null); dup=$(cat "/sys/class/net/$ifn/duplex" 2>/dev/null); oper=$(cat "/sys/class/net/$ifn/operstate" 2>/dev/null); carr=$(cat "/sys/class/net/$ifn/carrier" 2>/dev/null); echo "BRPORT|$br|$ifn|$pno|$spd|$dup|$oper|$carr"; done; if command -v bridge >/dev/null 2>&1; then bridge fdb show 2>/dev/null | awk \'!/permanent|self/{mac=tolower($1); dev=""; br=""; vlan=""; for(i=2;i<=NF;i++){if($i=="dev") dev=$(i+1); if($i=="master") br=$(i+1); if($i=="vlan") vlan=$(i+1);} if(mac ~ /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/ && dev!="") print "FDB|" mac "|" dev "|" br "|" vlan}\'; fi; for b in /sys/class/net/br-*; do [ -d "$b" ] || continue; br=$(basename "$b"); brctl showmacs "$br" 2>/dev/null | awk -v br="$br" \'NR>1 && $3=="no"{print "BRMAC|" br "|" $1 "|" tolower($2)}\'; done',
+    'for p in /sys/class/net/br-*/brif/*; do [ -e "$p" ] || continue; br=$(basename $(dirname $(dirname "$p"))); ifn=$(basename "$p"); pno=$(cat "$p/port_no" 2>/dev/null); spd=$(cat "/sys/class/net/$ifn/speed" 2>/dev/null); dup=$(cat "/sys/class/net/$ifn/duplex" 2>/dev/null); oper=$(cat "/sys/class/net/$ifn/operstate" 2>/dev/null); carr=$(cat "/sys/class/net/$ifn/carrier" 2>/dev/null); ifmac=$(cat "/sys/class/net/$ifn/address" 2>/dev/null); echo "BRPORT|$br|$ifn|$pno|$spd|$dup|$oper|$carr|$ifmac"; done; for d in /sys/class/net/*; do [ -e "$d" ] || continue; ifn=$(basename "$d"); case "$ifn" in lo|br-*|wlan*|phy*|ra*|rax*|ath*|wds*|mesh*|wg*|tun*|tap*|docker*|veth*|sit*|gre*|ip6*|ifb*|teql*|erspan*|ip_vti*|ip6_vti*|ip6tnl*) continue ;; esac; if [ -e "$d/device" ] || [ -e "$d/phys_port_name" ] || [ -e "$d/phys_switch_id" ] || [ -e "$d/brport" ] || echo "$ifn" | grep -Eq "^(eth|lan|wan|sfp|sw[0-9]*p|port|enp|eno|ens)[0-9]*"; then ifmac=$(cat "$d/address" 2>/dev/null); spd=$(cat "$d/speed" 2>/dev/null); dup=$(cat "$d/duplex" 2>/dev/null); oper=$(cat "$d/operstate" 2>/dev/null); carr=$(cat "$d/carrier" 2>/dev/null); br=""; [ -e "$d/brport/bridge" ] && br=$(basename $(readlink "$d/brport/bridge" 2>/dev/null) 2>/dev/null); echo "NICPORT|$ifn|$ifmac|$spd|$dup|$oper|$carr|$br"; fi; done; for d in /sys/class/net/*; do [ -e "$d/address" ] || continue; ifn=$(basename "$d"); [ "$ifn" = "lo" ] && continue; m=$(cat "$d/address" 2>/dev/null); ip4=$(ip -4 -o addr show dev "$ifn" 2>/dev/null | awk \'{print $4}\' | cut -d/ -f1 | head -n1); echo "HOSTIF|$ifn|$m|$ip4"; done; ip -4 route show default 2>/dev/null | awk \'/default/{gw=""; dev=""; src=""; for(i=1;i<=NF;i++){if($i=="via") gw=$(i+1); if($i=="dev") dev=$(i+1); if($i=="src") src=$(i+1);} print "DEFROUTE|" gw "|" dev "|" src; exit}\'; if command -v bridge >/dev/null 2>&1; then bridge fdb show 2>/dev/null | awk \'!/permanent|self/{mac=tolower($1); dev=""; br=""; vlan=""; for(i=2;i<=NF;i++){if($i=="dev") dev=$(i+1); if($i=="master") br=$(i+1); if($i=="vlan") vlan=$(i+1);} if(mac ~ /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/ && dev!="") print "FDB|" mac "|" dev "|" br "|" vlan}\'; fi; for b in /sys/class/net/br-*; do [ -d "$b" ] || continue; br=$(basename "$b"); brctl showmacs "$br" 2>/dev/null | awk -v br="$br" \'NR>1 && $3=="no"{print "BRMAC|" br "|" $1 "|" tolower($2)}\'; done; if command -v swconfig >/dev/null 2>&1; then for sw in $(swconfig list 2>/dev/null | awk \'{print $2}\' | tr -d ":"); do swconfig dev "$sw" show 2>/dev/null | awk -v sw="$sw" \'/link: port:/{p=""; st="down"; spd=""; dup=""; for(i=1;i<=NF;i++){if($i ~ /^port:/) p=substr($i,6); if($i ~ /^link:/) st=substr($i,6); if($i ~ /^speed:/) spd=substr($i,7); if($i ~ /duplex/) dup=$i;} if(p!="") print "SWPORT|" sw "|" p "|" st "|" spd "|" dup}\'; done; fi',
     'echo "===RDNS==="',
     'gw=$(ip route show default 2>/dev/null | awk \'/default/{print $3; exit}\'); [ -z "$gw" ] && gw=$(uci -q get network.lan.gateway 2>/dev/null); for smac in $(iw dev 2>/dev/null | awk \'$1=="Interface"{print $2}\' | while read iface; do iw dev "$iface" station dump 2>/dev/null | awk \'/^Station/{print tolower($2)}\'; done); do sip=$(awk \'tolower($4)=="\'$smac\'" && $3!="0x0"{print $1; exit}\' /proc/net/arp 2>/dev/null); if [ -n "$sip" ]; then rname=$(nslookup "$sip" ${gw:+"$gw"} 2>/dev/null | awk \'/name =/{print $NF; exit} /^Address 1:/ && NF>=4{print $4; exit}\'); echo "$smac $sip $rname"; fi; done',
     'echo "===OPKG_UPGRADABLE==="',
@@ -1111,13 +1111,19 @@ export function formatSwitchPortLabel(iface, speedMbps = null) {
   };
 }
 
-export function parseSwitchFdbSection(switchFdbTxt, iwInterfaces = new Map()) {
+export function parseSwitchFdbSection(switchFdbTxt, iwInterfaces = new Map(), options = {}) {
+  const { wanDev = null, netCounters = {}, prevNetCounters = null, dtSec = 10 } = options;
   const switchPortsByIface = new Map();
+  const rawNicPorts = [];
+  const swconfigPorts = [];
   const portNoToIfaceByBridge = new Map();
   const fdbByMac = new Map();
+  const hostInterfaces = [];
+  const allHostMacsSet = new Set();
+  let defaultRoute = null;
 
   if (!switchFdbTxt) {
-    return { switchPorts: [], fdbByMac };
+    return { switchPorts: [], fdbByMac, hostInterfaces, allHostMacs: [], defaultRoute };
   }
 
   const normalizePortNo = (val) => {
@@ -1127,15 +1133,50 @@ export function parseSwitchFdbSection(switchFdbTxt, iwInterfaces = new Map()) {
     return Number.isFinite(n) ? n : null;
   };
 
+  const normalizeMac = (m) => {
+    if (!m) return null;
+    const clean = String(m).trim().toLowerCase();
+    if (/^([0-9a-f]{2}:){5}[0-9a-f]{2}$/.test(clean) && clean !== '00:00:00:00:00:00') {
+      return clean;
+    }
+    return null;
+  };
+
   for (const rawLine of String(switchFdbTxt).split('\n')) {
     const line = rawLine.trim();
     if (!line) continue;
 
+    if (line.startsWith('HOSTIF|')) {
+      const [, ifname, rawMac, ipv4] = line.split('|');
+      const mac = normalizeMac(rawMac);
+      if (mac) allHostMacsSet.add(mac);
+      if (ifname) {
+        hostInterfaces.push({
+          iface: ifname,
+          mac: mac || null,
+          ipv4: ipv4 || null,
+        });
+      }
+      continue;
+    }
+
+    if (line.startsWith('DEFROUTE|')) {
+      const [, gwIp, dev, srcIp] = line.split('|');
+      defaultRoute = {
+        gatewayIp: gwIp || null,
+        dev: dev || null,
+        srcIp: srcIp || null,
+      };
+      continue;
+    }
+
     if (line.startsWith('BRPORT|')) {
-      const [, bridge, ifname, rawPortNo, rawSpeed, rawDuplex, rawOper, rawCarrier] = line.split('|');
+      const [, bridge, ifname, rawPortNo, rawSpeed, rawDuplex, rawOper, rawCarrier, rawIfMac] = line.split('|');
       if (!ifname || iwInterfaces.has(ifname) || /^(wlan|phy|ra|rax|ath|wds|mesh)/i.test(ifname)) {
         continue;
       }
+      const ifMac = normalizeMac(rawIfMac);
+      if (ifMac) allHostMacsSet.add(ifMac);
       const portNo = normalizePortNo(rawPortNo);
       const speedNum = parseInt(rawSpeed, 10);
       const speedMbps = Number.isFinite(speedNum) && speedNum > 0 ? speedNum : null;
@@ -1152,6 +1193,8 @@ export function parseSwitchFdbSection(switchFdbTxt, iwInterfaces = new Map()) {
         switchPort: formatted.switchPort,
         portNumber: formatted.portNumber ?? portNo,
         portLabel: formatted.portLabel,
+        portRole: /^wan/i.test(ifname) || ifname === wanDev ? 'wan' : 'lan',
+        mac: ifMac || null,
         bridge: bridge || 'br-lan',
         portNo,
         speedMbps: speedMbps || 1000,
@@ -1164,6 +1207,37 @@ export function parseSwitchFdbSection(switchFdbTxt, iwInterfaces = new Map()) {
       if (bridge && portNo !== null) {
         portNoToIfaceByBridge.set(`${bridge}:${portNo}`, ifname);
       }
+      continue;
+    }
+
+    if (line.startsWith('NICPORT|')) {
+      const [, ifname, rawIfMac, rawSpeed, rawDuplex, rawOper, rawCarrier, bridge] = line.split('|');
+      if (!ifname || iwInterfaces.has(ifname) || /^(wlan|phy|ra|rax|ath|wds|mesh|lo|br-)/i.test(ifname)) {
+        continue;
+      }
+      const ifMac = normalizeMac(rawIfMac);
+      if (ifMac) allHostMacsSet.add(ifMac);
+      rawNicPorts.push({
+        ifname,
+        ifMac,
+        rawSpeed,
+        rawDuplex,
+        rawOper,
+        rawCarrier,
+        bridge: bridge || null,
+      });
+      continue;
+    }
+
+    if (line.startsWith('SWPORT|')) {
+      const [, swDev, rawPortNum, rawLinkStatus, rawSpeed, rawDuplex] = line.split('|');
+      swconfigPorts.push({
+        swDev: swDev || 'switch0',
+        portNumber: parseInt(rawPortNum, 10),
+        linkStatus: rawLinkStatus || 'down',
+        rawSpeed: rawSpeed || '',
+        rawDuplex: rawDuplex || 'full',
+      });
       continue;
     }
 
@@ -1226,6 +1300,98 @@ export function parseSwitchFdbSection(switchFdbTxt, iwInterfaces = new Map()) {
     }
   }
 
+  // Merge standalone / routed NIC ports (`NICPORT`) not already in `switchPortsByIface`
+  const hasDsaLanPorts = Array.from(switchPortsByIface.keys()).some((k) => /^(lan|sw\d*p|port)\d+/i.test(k));
+  for (const nic of rawNicPorts) {
+    if (switchPortsByIface.has(nic.ifname)) {
+      const existing = switchPortsByIface.get(nic.ifname);
+      if (!existing.mac && nic.ifMac) existing.mac = nic.ifMac;
+      continue;
+    }
+    const isWanNic = nic.ifname === wanDev || /^wan\d*$/i.test(nic.ifname) || (defaultRoute?.dev === nic.ifname && !nic.bridge);
+    const hasIp = hostInterfaces.some((hi) => hi.iface === nic.ifname && hi.ipv4);
+    // Skip internal DSA CPU conduit interfaces (e.g., unbridged eth0/eth1 with no IP and not WAN when DSA lan1..lanN ports exist)
+    if (hasDsaLanPorts && /^eth\d+$/i.test(nic.ifname) && !isWanNic && !hasIp && !nic.bridge) {
+      continue;
+    }
+    const speedNum = parseInt(nic.rawSpeed, 10);
+    const speedMbps = Number.isFinite(speedNum) && speedNum > 0 ? speedNum : null;
+    const formatted = isWanNic && !/^wan/i.test(nic.ifname)
+      ? {
+          iface: nic.ifname,
+          switchPort: 'WAN',
+          portNumber: 0,
+          portLabel: `WAN (${nic.ifname})`,
+          speedMbps: speedMbps || 1000,
+        }
+      : formatSwitchPortLabel(nic.ifname, speedMbps);
+    if (!formatted) continue;
+
+    const isUp =
+      nic.rawCarrier === '1' ||
+      nic.rawOper === 'up' ||
+      (nic.rawOper === 'unknown' && speedMbps !== null && speedMbps > 0);
+
+    switchPortsByIface.set(nic.ifname, {
+      iface: nic.ifname,
+      switchPort: formatted.switchPort,
+      portNumber: formatted.portNumber,
+      portLabel: formatted.portLabel,
+      portRole: isWanNic ? 'wan' : nic.bridge ? 'lan' : 'routed',
+      mac: nic.ifMac || null,
+      bridge: nic.bridge || null,
+      portNo: null,
+      speedMbps: speedMbps || formatted.speedMbps || 1000,
+      duplex: nic.rawDuplex && nic.rawDuplex !== 'unknown' ? nic.rawDuplex : 'full',
+      status: isUp ? 'up' : 'down',
+      linkUp: Boolean(isUp),
+      connectedMacs: [],
+    });
+  }
+
+  // Fallback for legacy swconfig switches if no DSA/bridge ports were found
+  if (switchPortsByIface.size === 0 && swconfigPorts.length > 0) {
+    for (const swp of swconfigPorts) {
+      if (!Number.isFinite(swp.portNumber)) continue;
+      const ifname = `port${swp.portNumber}`;
+      const spdMatch = String(swp.rawSpeed).match(/(\d+)/);
+      const speedMbps = spdMatch ? Number(spdMatch[1]) : 1000;
+      const isUp = swp.linkStatus === 'up';
+      switchPortsByIface.set(ifname, {
+        iface: ifname,
+        switchPort: `Port ${swp.portNumber}`,
+        portNumber: swp.portNumber,
+        portLabel: `Port ${swp.portNumber} (${swp.swDev})`,
+        portRole: 'lan',
+        mac: null,
+        bridge: 'br-lan',
+        portNo: swp.portNumber,
+        speedMbps,
+        duplex: String(swp.rawDuplex).includes('half') ? 'half' : 'full',
+        status: isUp ? 'up' : 'down',
+        linkUp: Boolean(isUp),
+        connectedMacs: [],
+      });
+    }
+  }
+
+  // Enrich switchPorts with per-NIC byte & rate counters from /proc/net/dev
+  for (const portObj of switchPortsByIface.values()) {
+    const curr = netCounters[portObj.iface];
+    if (curr) {
+      portObj.rxBytes = curr.rxBytes || 0;
+      portObj.txBytes = curr.txBytes || 0;
+      const prev = prevNetCounters ? prevNetCounters[portObj.iface] : null;
+      if (prev && dtSec > 0) {
+        portObj.rxRateBps = curr.rxBytes >= prev.rxBytes ? Math.round(((curr.rxBytes - prev.rxBytes) * 8) / dtSec) : 0;
+        portObj.txRateBps = curr.txBytes >= prev.txBytes ? Math.round(((curr.txBytes - prev.txBytes) * 8) / dtSec) : 0;
+      } else {
+        portObj.rxRateBps = 0;
+        portObj.txRateBps = 0;
+      }
+    }
+  }
+
   // Annotate each fdb entry with how many total MACs were learned on that same switch port (helps distinguish leaf access ports vs uplink trunk ports)
   for (const entry of fdbByMac.values()) {
     const portObj = switchPortsByIface.get(entry.iface);
@@ -1233,13 +1399,21 @@ export function parseSwitchFdbSection(switchFdbTxt, iwInterfaces = new Map()) {
   }
 
   const switchPorts = Array.from(switchPortsByIface.values()).sort((a, b) => {
+    if (a.portRole === 'wan' && b.portRole !== 'wan') return -1;
+    if (b.portRole === 'wan' && a.portRole !== 'wan') return 1;
     if (a.portNumber !== null && b.portNumber !== null && a.portNumber !== b.portNumber) {
       return a.portNumber - b.portNumber;
     }
     return a.iface.localeCompare(b.iface);
   });
 
-  return { switchPorts, fdbByMac };
+  return {
+    switchPorts,
+    fdbByMac,
+    hostInterfaces,
+    allHostMacs: Array.from(allHostMacsSet),
+    defaultRoute,
+  };
 }
 
 export function parseSshTelemetryOutput(hostConfig, stdout, prevSample = null) {
@@ -1727,14 +1901,56 @@ export function parseSshTelemetryOutput(hostConfig, stdout, prevSample = null) {
   flushStation();
 
   // 9b. Parse physical switch ports & bridge FDB (`===SWITCH_FDB===`)
-  const { switchPorts, fdbByMac } = parseSwitchFdbSection(switchFdbTxt, iwInterfaces);
+  const sampleDtSec = prevSample?.timestamp ? Math.max(1, (nowMs - prevSample.timestamp) / 1000) : 10;
+  const { switchPorts, fdbByMac, hostInterfaces, allHostMacs, defaultRoute } = parseSwitchFdbSection(
+    switchFdbTxt,
+    iwInterfaces,
+    {
+      wanDev,
+      netCounters,
+      prevNetCounters: prevSample?.netCounters || null,
+      dtSec: sampleDtSec,
+    }
+  );
+
+  // Also map ARP / neighbor entries learned on standalone physical NICs (not `br-*` or wireless) into `fdbByMac`
+  const wifiMacs = new Set(clients.map((c) => c.mac));
+  for (const [aMac, arpEntry] of arpByMac.entries()) {
+    if (fdbByMac.has(aMac) || wifiMacs.has(aMac)) continue;
+    const dev = arpEntry?.device;
+    if (!dev || /^br-/i.test(dev) || iwInterfaces.has(dev) || /^(wlan|phy|ra|rax|ath|wds|mesh|lo)/i.test(dev)) {
+      continue;
+    }
+    const matchingPort = switchPorts.find((p) => p.iface === dev);
+    const formatted = matchingPort || formatSwitchPortLabel(dev);
+    if (!formatted) continue;
+    fdbByMac.set(aMac, {
+      iface: dev,
+      switchPort: formatted.switchPort,
+      portNumber: formatted.portNumber ?? null,
+      portLabel: formatted.portLabel,
+      bridge: matchingPort?.bridge || null,
+      speedMbps: matchingPort?.speedMbps || formatted.speedMbps || 1000,
+      vlan: 1,
+      portMacCount: matchingPort ? Math.max(1, matchingPort.connectedMacs?.length || 1) : 1,
+    });
+    if (matchingPort && Array.isArray(matchingPort.connectedMacs) && !matchingPort.connectedMacs.includes(aMac)) {
+      matchingPort.connectedMacs.push(aMac);
+    }
+  }
+
+  const allMacsSet = new Set(allHostMacs || []);
+  if (mac) allMacsSet.add(mac.toLowerCase());
+  for (const ifaceInfo of iwInterfaces.values()) {
+    if (ifaceInfo.bssid) allMacsSet.add(ifaceInfo.bssid.toLowerCase());
+  }
+  const allMacs = Array.from(allMacsSet);
 
   // If this host has DHCP leases (e.g. gateway) and wired clients in ARP/DHCP not seen in WiFi stations
-  const wifiMacs = new Set(clients.map((c) => c.mac));
   if (dhcpByMac.size > 0) {
     for (const [dMac, dhcp] of dhcpByMac.entries()) {
       if (wifiMacs.has(dMac)) continue;
-      if (mac && dMac === mac) continue;
+      if (allMacsSet.has(dMac)) continue;
       const arp = arpByMac.get(dMac);
       if (arp && arp.flags === '0x0') continue; // incomplete ARP entry
       const fdb = fdbByMac.get(dMac);
@@ -1921,6 +2137,9 @@ export function parseSshTelemetryOutput(hostConfig, stdout, prevSample = null) {
     cpuUsagePct,
     memUsagePct,
     mac,
+    allMacs,
+    hostInterfaces,
+    defaultRoute,
     rxRateBps,
     txRateBps,
     wan: wanInfo,

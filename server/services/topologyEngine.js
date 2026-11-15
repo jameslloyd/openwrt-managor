@@ -31,6 +31,7 @@ export class TopologyEngine {
         mac: h.mac || null,
         model: h.model,
         status: h.status || 'online',
+        nicInfo: h.nicInfo || null,
         switchPorts: Array.isArray(h.switchPorts) ? h.switchPorts : [],
         metrics: {
           cpuUsagePct: h.cpuUsagePct ?? 0,
@@ -74,7 +75,10 @@ export class TopologyEngine {
         source: 'wan-internet',
         target: gwHost.id,
         medium: 'ethernet',
-        speedMbps: gwHost?.wan?.speedMbps || 1000,
+        speedMbps: gwHost?.wan?.speedMbps || gwHost?.nicInfo?.wanSpeedMbps || 1000,
+        sourcePort: 'ISP',
+        targetPort: gwHost?.nicInfo?.wanPort || 'WAN',
+        targetIface: gwHost?.nicInfo?.wanIface || 'eth0',
         currentRxBps: gwHost?.rxRateBps || 0,
         currentTxBps: gwHost?.txRateBps || 0,
         status: gwHost.status || 'online',
@@ -84,15 +88,20 @@ export class TopologyEngine {
     const gwFdb = hostManager.fdbByHost.get(gwHost.id) || {};
     for (const h of dbHosts) {
       if (h.id !== gwHost.id) {
-        const uplinkFdb = h.mac ? gwFdb[String(h.mac).toLowerCase()] : null;
+        const nic = h.nicInfo || {};
+        const parentHostId = nic.upstreamHostId || gwHost.id;
+        const parentFdb = hostManager.fdbByHost.get(parentHostId) || gwFdb;
+        const uplinkFdb = h.mac ? parentFdb[String(h.mac).toLowerCase()] : null;
         links.push({
-          id: `link-${gwHost.id}-${h.id}`,
-          source: gwHost.id,
+          id: `link-${parentHostId}-${h.id}`,
+          source: parentHostId,
           target: h.id,
           medium: h.role === 'mesh' ? 'wifi_mesh' : 'ethernet',
-          speedMbps: uplinkFdb?.speedMbps || 1000,
-          sourcePort: uplinkFdb?.switchPort || null,
-          sourceIface: uplinkFdb?.iface || null,
+          speedMbps: nic.upstreamSpeedMbps || uplinkFdb?.speedMbps || nic.localSpeedMbps || 1000,
+          sourcePort: nic.upstreamPort || uplinkFdb?.switchPort || null,
+          sourceIface: nic.upstreamIface || uplinkFdb?.iface || null,
+          targetPort: nic.localPort || null,
+          targetIface: nic.localIface || null,
           currentRxBps: h.rxRateBps || 0,
           currentTxBps: h.txRateBps || 0,
           status: h.status || 'online',

@@ -431,8 +431,15 @@ export class TopologyGraph {
       const midX = (srcPos.x + tgtPos.x) / 2;
       const pathD = `M ${srcPos.x} ${srcPos.y} C ${srcPos.x} ${midY}, ${tgtPos.x} ${midY}, ${tgtPos.x} ${tgtPos.y}`;
       const speedText = link.speedMbps >= 1000 ? `${link.speedMbps / 1000}G` : `${link.speedMbps}M`;
-      const pillLabel = link.sourcePort ? `${link.sourcePort} • ${speedText}` : speedText;
-      const pillWidth = link.sourcePort ? Math.max(66, pillLabel.length * 6.2) : 36;
+      let pillLabel = speedText;
+      if (link.sourcePort && link.targetPort && link.source !== 'wan-internet') {
+        pillLabel = `${link.sourcePort} ⟷ ${link.targetPort} • ${speedText}`;
+      } else if (link.sourcePort && link.source !== 'wan-internet') {
+        pillLabel = `${link.sourcePort} • ${speedText}`;
+      } else if (link.targetPort && link.source === 'wan-internet') {
+        pillLabel = `${link.targetPort} • ${speedText}`;
+      }
+      const pillWidth = pillLabel !== speedText ? Math.max(68, pillLabel.length * 6.0) : 36;
 
       linksSvg += `
         <g class="topo-link-group">
@@ -478,9 +485,12 @@ export class TopologyGraph {
         const isSelected = this.selectedNodeId === n.id;
         const w = 176;
         const h = 60;
-        const fullTitle = `${n.label || n.id} (${n.ip || (isWan ? 'Public IP' : '')})`;
+        const nicBadge = !isWan && n.nicInfo?.localIface
+          ? ` • ${n.nicInfo.localIface}`
+          : '';
+        const fullTitle = `${n.label || n.id} (${n.ip || (isWan ? 'Public IP' : '')}${n.nicInfo?.localPortLabel ? ` • NIC: ${n.nicInfo.localPortLabel}` : ''})`;
         const titleText = truncateLabel(n.label || n.id, 19);
-        const subText = truncateLabel(n.ip || (isWan ? 'Public IP' : ''), 22);
+        const subText = truncateLabel(`${n.ip || (isWan ? 'Public IP' : '')}${nicBadge}`, 22);
 
         nodesSvg += `
           <g class="topo-node ${isSelected ? 'selected' : ''}"
