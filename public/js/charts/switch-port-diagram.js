@@ -14,6 +14,31 @@ function truncateText(str, maxLen = 18) {
   return s.slice(0, maxLen - 1) + '…';
 }
 
+function formatSpeedShort(mbps) {
+  const spd = Number(mbps) || 0;
+  if (spd >= 1000) return `${spd / 1000}G`;
+  if (spd > 0) return `${spd}M`;
+  return '';
+}
+
+function getPortMaxSpeedMbps(port) {
+  const explicitMax = Number(port?.maxSpeedMbps) || 0;
+  const curSpd = Number(port?.speedMbps) || 0;
+  if (explicitMax > 0) return Math.max(explicitMax, curSpd);
+  const iface = String(port?.iface || port?.switchPort || '');
+  if (/^(sfp|te|ten|xg|opt|qsfp)/i.test(iface)) return Math.max(curSpd, 10000);
+  if (/^(fa|fe)\d+/i.test(iface)) return Math.max(curSpd, 100);
+  return Math.max(curSpd, 1000);
+}
+
+function isPortSpeedSuboptimal(port) {
+  const isUp = port.linkUp ?? port.status === 'up';
+  if (!isUp) return false;
+  const cur = Number(port.speedMbps) || 0;
+  const max = getPortMaxSpeedMbps(port);
+  return cur > 0 && max > 0 && cur < max;
+}
+
 function getPortSpeedColor(port) {
   const isUp = port.linkUp ?? port.status === 'up';
   if (!isUp) return 'var(--color-text-muted)';
@@ -26,12 +51,28 @@ function getPortSpeedColor(port) {
 
 function getPortSpeedShort(port) {
   const isUp = port.linkUp ?? port.status === 'up';
+  const cur = Number(port.speedMbps) || 0;
+  const max = getPortMaxSpeedMbps(port);
   if (!isUp) return 'DOWN';
-  const spd = Number(port.speedMbps) || 0;
-  if (spd >= 10000) return `${spd / 1000}G`;
-  if (spd >= 1000) return `${spd / 1000}G`;
-  if (spd > 0) return `${spd}M`;
-  return 'UP';
+  if (cur > 0 && max > 0 && cur !== max) {
+    return `${formatSpeedShort(cur)}/${formatSpeedShort(max)}`;
+  }
+  return formatSpeedShort(cur) || 'UP';
+}
+
+function getPortSpeedDetail(port) {
+  const isUp = port.linkUp ?? port.status === 'up';
+  const cur = Number(port.speedMbps) || 0;
+  const max = getPortMaxSpeedMbps(port);
+  if (!isUp) {
+    return max > 0 ? `DOWN (Capable: ${formatSpeedShort(max)})` : 'DOWN';
+  }
+  const curLabel = formatSpeedShort(cur) || 'UP';
+  const dupLabel = port.duplex ? ` • ${String(port.duplex).toUpperCase()}` : '';
+  if (cur > 0 && max > 0 && cur !== max) {
+    return `${curLabel}${dupLabel} (Capable: ${formatSpeedShort(max)})`;
+  }
+  return `${curLabel}${dupLabel}`;
 }
 
 function getPortRoleMeta(port) {
@@ -370,7 +411,8 @@ export class SwitchPortDiagram {
             ? roleMeta.label
             : 'Down';
 
-        const tooltip = `${hostName} • ${p.portLabel || p.iface} [${spdShort}]${
+        const spdDetail = getPortSpeedDetail(p);
+        const tooltip = `${hostName} • ${p.portLabel || p.iface} [${spdDetail}]${
           Array.isArray(p.connectedDevices) && p.connectedDevices.length > 0
             ? ' — Attached: ' + p.connectedDevices.map((d) => d.hostname || d.ip || d.mac).join(', ')
             : ''
@@ -493,8 +535,17 @@ export class SwitchPortDiagram {
       const midX = (x1 + x2) / 2;
 
       const spd = nic.upstreamSpeedMbps || nic.localSpeedMbps || srcCoord.port?.speedMbps || 1000;
-      const spdLabel = spd >= 1000 ? `${spd / 1000}G` : `${spd}M`;
-      const strokeColor = spd >= 10000 ? '#a855f7' : spd >= 2500 ? '#06b6d4' : 'var(--color-success)';
+      const maxCap = Math.max(
+        nic.upstreamMaxSpeedMbps || 0,
+        nic.localMaxSpeedMbps || 0,
+        srcCoord.port ? getPortMaxSpeedMbps(srcCoord.port) : 0,
+        tgtCoord.port ? getPortMaxSpeedMbps(tgtCoord.port) : 0
+      );
+      const spdLabel =
+        maxCap > spd
+          ? `${formatSpeedShort(spd)} / ${formatSpeedShort(maxCap)} max`
+          : formatSpeedShort(spd) || '1G';
+      const strokeColor = spd >= 10000 ? '#a855f7' : spd >= 2500 ? '#06b6d4' : spd >= 1000 ? 'var(--color-success)' : 'var(--color-warning)';
       const isMesh = secHost.role === 'mesh' || nic.upstreamIface === 'mesh0';
 
       const srcPortText = srcCoord.port?.iface || nic.upstreamPort || 'LAN';
@@ -565,10 +616,11 @@ export class SwitchPortDiagram {
                     const isUp = p.linkUp ?? p.status === 'up';
                     const spdColor = getPortSpeedColor(p);
                     const spdShort = getPortSpeedShort(p);
+                    const spdDetail = getPortSpeedDetail(p);
                     const isSfp = /^sfp/i.test(p.switchPort || '') || /^(sfp|te|xg|opt)/i.test(p.iface || '');
                     const shortNum = p.portNumber ?? idx + 1;
                     const devCount = Array.isArray(p.connectedDevices) ? p.connectedDevices.length : 0;
-                    const titleText = `${p.portLabel || p.iface} [${spdShort}]${
+                    const titleText = `${p.portLabel || p.iface} [${spdDetail}]${
                       devCount > 0 ? ' — ' + p.connectedDevices.map((d) => d.hostname || d.ip || d.mac).join(', ') : ''
                     }`;
                     return `
@@ -625,13 +677,17 @@ export class SwitchPortDiagram {
                 .map((p) => {
                   const isUp = p.linkUp ?? p.status === 'up';
                   const spdColor = getPortSpeedColor(p);
-                  const spdShort = getPortSpeedShort(p);
+                  const curSpd = Number(p.speedMbps) || 0;
+                  const maxSpd = getPortMaxSpeedMbps(p);
+                  const curLabel = isUp ? formatSpeedShort(curSpd) || 'UP' : 'DOWN';
+                  const maxLabel = formatSpeedShort(maxSpd);
+                  const isSuboptimal = isPortSpeedSuboptimal(p);
                   const roleMeta = getPortRoleMeta(p);
                   const devices = Array.isArray(p.connectedDevices) ? p.connectedDevices : [];
 
                   return `
                     <div style="background: var(--color-surface); border: 1px solid var(--color-border-subtle); border-left: 3px solid ${spdColor}; border-radius: 6px; padding: 7px 10px; display: flex; flex-direction: column; gap: 4px;">
-                      <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+                      <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap;">
                         <div style="display: inline-flex; align-items: center; gap: 6px;">
                           <span style="font-weight: 700; font-size: 12px;">${escapeHtml(p.switchPort || p.iface)}</span>
                           <span class="font-mono" style="font-size: 11px; color: var(--color-text-muted);">(${escapeHtml(p.iface)})</span>
@@ -639,9 +695,20 @@ export class SwitchPortDiagram {
                             ${escapeHtml(roleMeta.label)}
                           </span>
                         </div>
-                        <span class="font-mono" style="font-size: 11px; font-weight: 700; color: ${spdColor};">
-                          ${escapeHtml(spdShort)}${isUp && p.duplex ? ` • ${escapeHtml(String(p.duplex).toUpperCase())}` : ''}
-                        </span>
+                        <div style="display: inline-flex; align-items: center; gap: 5px;">
+                          <span class="font-mono" style="font-size: 11px; font-weight: 700; color: ${spdColor};">
+                            ${escapeHtml(curLabel)}${isUp && p.duplex ? ` • ${escapeHtml(String(p.duplex).toUpperCase())}` : ''}
+                          </span>
+                          ${
+                            isSuboptimal
+                              ? `<span class="font-mono" title="Port hardware is capable of ${escapeHtml(maxLabel)} (${maxSpd} Mbps), currently negotiated at ${escapeHtml(curLabel)} (${curSpd} Mbps)" style="font-size: 9.5px; font-weight: 700; padding: 1px 5px; border-radius: 4px; background: rgba(245, 158, 11, 0.16); color: var(--color-warning); border: 1px solid rgba(245, 158, 11, 0.35);">
+                                  Capable: ${escapeHtml(maxLabel)}
+                                </span>`
+                              : !isUp && maxLabel
+                                ? `<span class="font-mono" style="font-size: 9.5px; color: var(--color-text-muted);">(${escapeHtml(maxLabel)} max)</span>`
+                                : ''
+                          }
+                        </div>
                       </div>
                       ${
                         devices.length > 0

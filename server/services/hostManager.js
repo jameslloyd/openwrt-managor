@@ -404,14 +404,16 @@ export class HostManager {
       }
 
       const hostMeta = this.hostsCacheById.get(hostId);
+      const fmt = formatSwitchPortLabel(entry.iface, entry.speedMbps, entry.maxSpeedMbps);
       candidates.push({
         hostId,
         hostName: hostMeta?.name || hostMeta?.hostname || hostId,
         iface: entry.iface,
-        switchPort: entry.switchPort || formatSwitchPortLabel(entry.iface, entry.speedMbps)?.switchPort || entry.iface,
-        portLabel: entry.portLabel || formatSwitchPortLabel(entry.iface, entry.speedMbps)?.portLabel || entry.iface,
+        switchPort: entry.switchPort || fmt?.switchPort || entry.iface,
+        portLabel: entry.portLabel || fmt?.portLabel || entry.iface,
         portNumber: entry.portNumber ?? null,
         speedMbps: entry.speedMbps || 1000,
+        maxSpeedMbps: entry.maxSpeedMbps || fmt?.maxSpeedMbps || entry.speedMbps || 1000,
         vlan: entry.vlan || 1,
         portMacCount: entry.portMacCount || 1,
         isTrunkToManagedHost,
@@ -519,6 +521,7 @@ export class HostManager {
                 portLabel: bestPort.portLabel,
                 portNumber: bestPort.portNumber,
                 speedMbps: bestPort.speedMbps,
+                maxSpeedMbps: bestPort.maxSpeedMbps || bestPort.speedMbps || 1000,
               };
               speedMbps = bestPort.speedMbps || speedMbps;
             } else if (connectedTo && connectedTo.iface && !connectedTo.switchPort) {
@@ -527,6 +530,7 @@ export class HostManager {
                 connectedTo.switchPort = formatted.switchPort;
                 connectedTo.portLabel = formatted.portLabel;
                 connectedTo.portNumber = formatted.portNumber;
+                connectedTo.maxSpeedMbps = formatted.maxSpeedMbps || speedMbps || 1000;
               }
             }
           }
@@ -608,6 +612,7 @@ export class HostManager {
             portLabel: bestPort.portLabel,
             portNumber: bestPort.portNumber,
             speedMbps: bestPort.speedMbps,
+            maxSpeedMbps: bestPort.maxSpeedMbps || bestPort.speedMbps || 1000,
           },
           vlan: bestPort.vlan || 1,
           isGuest: false,
@@ -912,8 +917,10 @@ export class HostManager {
                 vendor: c.vendor || null,
                 type: 'client',
               }));
+            const fmt = formatSwitchPortLabel(p.iface, p.speedMbps, p.maxSpeedMbps);
             return {
               ...p,
+              maxSpeedMbps: Math.max(p.maxSpeedMbps || 0, fmt?.maxSpeedMbps || 1000, p.speedMbps || 0),
               linkUp: Boolean(p.linkUp ?? p.status === 'up'),
               status: (p.linkUp ?? p.status === 'up') ? 'up' : 'down',
               connectedDevices: [...attachedClients],
@@ -977,6 +984,12 @@ export class HostManager {
               upstreamPort: formatted?.switchPort || matchedPeerEntry.switchPort || matchedPeerEntry.iface,
               upstreamPortLabel: formatted?.portLabel || matchedPeerEntry.portLabel || matchedPeerEntry.iface,
               upstreamSpeedMbps: peerPortObj?.speedMbps || matchedPeerEntry.speedMbps || 1000,
+              upstreamMaxSpeedMbps:
+                peerPortObj?.maxSpeedMbps ||
+                matchedPeerEntry.maxSpeedMbps ||
+                formatted?.maxSpeedMbps ||
+                peerPortObj?.speedMbps ||
+                1000,
               portMacCount: matchedPeerEntry.portMacCount || 1,
               otherManagedHostsOnPort,
               isSwitchPeer: peer.role === 'switch' || peerPorts.length >= 8,
@@ -1088,6 +1101,11 @@ export class HostManager {
           localPortObj?.portLabel ||
           (h.role === 'gateway' ? wanPortObj?.portLabel || 'WAN (eth0)' : 'LAN 1 (lan1)'),
         localSpeedMbps: localPortObj?.speedMbps || negotiatedSpeed,
+        localMaxSpeedMbps: Math.max(
+          localPortObj?.maxSpeedMbps || 0,
+          localPortObj?.speedMbps || 0,
+          negotiatedSpeed || 1000
+        ),
         upstreamHostId: bestUpstream?.upstreamHostId || (h.id !== gwHost?.id ? gwHost?.id || null : null),
         upstreamHostName:
           bestUpstream?.upstreamHostName || (h.id !== gwHost?.id ? gwHost?.name || gwHost?.hostname || null : null),
@@ -1095,10 +1113,12 @@ export class HostManager {
         upstreamPort: bestUpstream?.upstreamPort || null,
         upstreamPortLabel: bestUpstream?.upstreamPortLabel || null,
         upstreamSpeedMbps: bestUpstream?.upstreamSpeedMbps || null,
+        upstreamMaxSpeedMbps: bestUpstream?.upstreamMaxSpeedMbps || bestUpstream?.upstreamSpeedMbps || null,
         wanIface: wanPortObj?.iface || (h.role === 'gateway' ? 'eth0' : null),
         wanPort: wanPortObj?.switchPort || (h.role === 'gateway' ? 'WAN' : null),
         wanPortLabel: wanPortObj?.portLabel || (h.role === 'gateway' ? 'WAN (eth0)' : null),
         wanSpeedMbps: wanPortObj?.speedMbps || h.wan?.speedMbps || null,
+        wanMaxSpeedMbps: wanPortObj?.maxSpeedMbps || wanPortObj?.speedMbps || h.wan?.speedMbps || null,
       };
 
       // Step 3: Reciprocally link upstream & downstream OpenWrt hosts on their respective `switchPorts`

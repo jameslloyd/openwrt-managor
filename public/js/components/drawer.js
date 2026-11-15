@@ -130,20 +130,28 @@ export function renderNodeDetails(node) {
         <div style="display: flex; flex-direction: column; gap: 6px;">
           ${switchPorts.map((p) => {
             const isPortUp = p.linkUp ?? p.status === 'up';
+            const curSpd = Number(p.speedMbps) || 0;
+            const rawMax = Number(p.maxSpeedMbps) || 0;
+            const baseIfn = String(p.iface || '').split('.')[0];
+            const maxSpd = rawMax > 0
+              ? Math.max(rawMax, curSpd)
+              : (/^(?:sfp|te|ten|xg|opt|qsfp)/i.test(baseIfn) ? Math.max(curSpd, 10000) : Math.max(curSpd, 1000));
+            const maxStr = maxSpd >= 1000 ? `${maxSpd / 1000} Gbps` : `${maxSpd} Mbps`;
+            const isSuboptimal = isPortUp && curSpd > 0 && maxSpd > curSpd;
             const speedStr = isPortUp
-              ? (p.speedMbps >= 1000 ? `${p.speedMbps / 1000} Gbps` : p.speedMbps > 0 ? `${p.speedMbps} Mbps` : 'Link Up')
-              : 'No Carrier';
+              ? (curSpd >= 1000 ? `${curSpd / 1000} Gbps` : curSpd > 0 ? `${curSpd} Mbps` : 'Link Up')
+              : `No Carrier (${maxStr} max)`;
             const devices = Array.isArray(p.connectedDevices) ? p.connectedDevices : [];
             return `
-              <div style="background: var(--color-surface-elevated); padding: 9px 11px; border-radius: var(--radius-md); border: 1px solid var(--color-border-subtle); display: flex; flex-direction: column; gap: 4px;">
-                <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+              <div style="background: var(--color-surface-elevated); padding: 9px 11px; border-radius: var(--radius-md); border: 1px solid ${isSuboptimal ? 'var(--color-warning)' : 'var(--color-border-subtle)'}; display: flex; flex-direction: column; gap: 4px;">
+                <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap;">
                   <div style="display: inline-flex; align-items: center; gap: 6px;">
                     <span class="status-dot ${isPortUp ? 'online' : 'offline'}"></span>
                     <span style="font-weight: 700; font-size: 12.5px;">${escapeHtml(p.switchPort || p.portLabel || p.iface)}</span>
                     <span class="font-mono" style="font-size: 11px; color: var(--color-text-muted);">(${escapeHtml(p.iface)})</span>
                   </div>
-                  <span class="font-mono" style="font-size: 11px; font-weight: 600; color: ${isPortUp ? 'var(--color-primary)' : 'var(--color-text-muted)'};">
-                    ${escapeHtml(speedStr)}${isPortUp && p.duplex ? ` • ${escapeHtml(String(p.duplex).toUpperCase())}` : ''}
+                  <span class="font-mono" style="font-size: 11px; font-weight: 600; color: ${isSuboptimal ? 'var(--color-warning)' : isPortUp ? 'var(--color-primary)' : 'var(--color-text-muted)'};">
+                    ${escapeHtml(speedStr)}${isPortUp && p.duplex ? ` • ${escapeHtml(String(p.duplex).toUpperCase())}` : ''}${isSuboptimal ? ` • Capable: ${escapeHtml(maxStr)}` : ''}
                   </span>
                 </div>
                 ${devices.length > 0 ? `

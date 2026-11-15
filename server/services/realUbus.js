@@ -970,6 +970,8 @@ export async function pollRealHost(hostConfig, prevSample = null) {
     'for d in /sys/class/net/*; do [ -e "$d" ] || continue; ifn=$(basename "$d"); [ -d "$d/bridge" ] || [ -d "$d/brif" ] || [ -d "$d/wireless" ] || [ -d "$d/phy80211" ] && continue; case "$ifn" in lo|br-*|br[0-9]*|switch|switch.*|*.*|wlan*|phy*|ra*|rax*|ath*|wds*|mesh*|mon*|wg*|tun*|tap*|docker*|veth*|sit*|gre*|ip6*|ifb*|teql*|erspan*|ip_vti*|ip6_vti*|ip6tnl*|pppoe*|ppp*|bat*|tailscale*|zt*|miireg*|dummy*|bond*) continue ;; esac; ifmac=$(cat "$d/address" 2>/dev/null); spd=$(cat "$d/speed" 2>/dev/null); dup=$(cat "$d/duplex" 2>/dev/null); oper=$(cat "$d/operstate" 2>/dev/null); carr=$(cat "$d/carrier" 2>/dev/null); br=""; [ -e "$d/brport/bridge" ] && br=$(basename $(readlink "$d/brport/bridge" 2>/dev/null) 2>/dev/null); echo "NICPORT|$ifn|$ifmac|$spd|$dup|$oper|$carr|$br"; done',
     'uci show network 2>/dev/null | grep -E "\\.(ports|device|ifname)=" | sed "s/^/UCINET|/"',
     'if command -v jsonfilter >/dev/null 2>&1 && [ -f /etc/board.json ]; then jsonfilter -i /etc/board.json -e "@.network.*.ports[*]" -e "@.network.*.device" 2>/dev/null | sed "s/^/BOARDPORT|/"; fi',
+    'ubus call network.device status 2>/dev/null | awk \'/^\\t"[^"]+": \\{/{gsub(/[\\t": {]/,"",$0); cur=$0; m=0; spd=""} cur!="" && /"speed":/{gsub(/[^0-9]/,"",$2); spd=$2} cur!="" && /"[0-9]+base/{s=$0; gsub(/[^0-9]/,"",s); n=s+0; if(n>m)m=n} /^\\t\\}/{if(cur!="" && (m>0 || spd!="")) print "PORTCAP|" cur "|" m "|" spd; cur=""}\'',
+    'if command -v ethtool >/dev/null 2>&1; then for d in /sys/class/net/*; do [ -e "$d" ] || continue; ifn=$(basename "$d"); [ -d "$d/bridge" ] || [ -d "$d/brif" ] || [ -d "$d/wireless" ] || [ -d "$d/phy80211" ] && continue; case "$ifn" in lo|br-*|br[0-9]*|switch|switch.*|*.*|wlan*|phy*|ra*|rax*|ath*|wds*|mesh*|mon*|wg*|tun*|tap*|docker*|veth*|sit*|gre*|ip6*|ifb*|teql*|erspan*|ip_vti*|ip6_vti*|ip6tnl*|pppoe*|ppp*|bat*|tailscale*|zt*|miireg*|dummy*|bond*) continue ;; esac; m=$(ethtool "$ifn" 2>/dev/null | awk \'/Supported link modes:/,/Supported pause frame|Supports auto-negotiation/{while(match($0,/[0-9]+base/)){n=substr($0,RSTART,RLENGTH-4)+0; if(n>mx)mx=n; $0=substr($0,RSTART+RLENGTH)}} END{if(mx>0)print mx}\'); [ -n "$m" ] && echo "PORTCAP|$ifn|$m|"; done; fi',
     'for d in /sys/class/net/*; do [ -e "$d/address" ] || continue; ifn=$(basename "$d"); [ "$ifn" = "lo" ] && continue; m=$(cat "$d/address" 2>/dev/null); ip4=$(ip -4 -o addr show dev "$ifn" 2>/dev/null | awk \'{print $4}\' | cut -d/ -f1 | head -n1); echo "HOSTIF|$ifn|$m|$ip4"; done',
     'ip -4 route show default 2>/dev/null | awk \'/default/{gw=""; dev=""; src=""; for(i=1;i<=NF;i++){if($i=="via") gw=$(i+1); if($i=="dev") dev=$(i+1); if($i=="src") src=$(i+1);} print "DEFROUTE|" gw "|" dev "|" src; exit}\'',
     'if command -v bridge >/dev/null 2>&1; then bridge fdb show 2>/dev/null | awk \'!/permanent|self/{mac=tolower($1); dev=""; br=""; vlan=""; for(i=2;i<=NF;i++){if($i=="dev") dev=$(i+1); if($i=="master") br=$(i+1); if($i=="vlan") vlan=$(i+1);} if(mac ~ /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/ && dev!="") print "FDB|" mac "|" dev "|" br "|" vlan}\'; fi',
@@ -1058,7 +1060,7 @@ export async function pollRealHost(hostConfig, prevSample = null) {
   }
 }
 
-export function formatSwitchPortLabel(iface, speedMbps = null) {
+export function formatSwitchPortLabel(iface, speedMbps = null, maxSpeedMbps = null) {
   if (!iface || typeof iface !== 'string') return null;
   const raw = iface.trim();
   if (!raw || raw === 'lo') return null;
@@ -1068,6 +1070,8 @@ export function formatSwitchPortLabel(iface, speedMbps = null) {
   const base = raw.split('.')[0];
   const vlanPart = raw.includes('.') ? raw.split('.')[1] : null;
   const vlanSuffix = vlanPart && vlanPart !== '1' ? ` (VLAN ${vlanPart})` : '';
+  const validSpd = speedMbps && speedMbps > 0 ? speedMbps : null;
+  const validMax = maxSpeedMbps && maxSpeedMbps > 0 ? maxSpeedMbps : null;
 
   const lanMatch = base.match(/^lan(\d+)$/i);
   if (lanMatch) {
@@ -1076,7 +1080,8 @@ export function formatSwitchPortLabel(iface, speedMbps = null) {
       switchPort: `LAN ${lanMatch[1]}`,
       portNumber: Number(lanMatch[1]),
       portLabel: `LAN ${lanMatch[1]} (${raw})${vlanSuffix}`,
-      speedMbps: speedMbps && speedMbps > 0 ? speedMbps : null,
+      speedMbps: validSpd,
+      maxSpeedMbps: Math.max(validMax || 0, validSpd || 0, 1000),
     };
   }
 
@@ -1088,7 +1093,8 @@ export function formatSwitchPortLabel(iface, speedMbps = null) {
       switchPort: `SFP+ ${num}`,
       portNumber: Number(num) || 1,
       portLabel: `SFP+ ${num} (${raw})${vlanSuffix}`,
-      speedMbps: speedMbps && speedMbps > 0 ? speedMbps : 10000,
+      speedMbps: validSpd || 10000,
+      maxSpeedMbps: Math.max(validMax || 0, validSpd || 0, 10000),
     };
   }
 
@@ -1100,31 +1106,37 @@ export function formatSwitchPortLabel(iface, speedMbps = null) {
       switchPort: `WAN${num}`,
       portNumber: Number(wanMatch[1]) || 0,
       portLabel: `WAN${num} (${raw})${vlanSuffix}`,
-      speedMbps: speedMbps && speedMbps > 0 ? speedMbps : null,
+      speedMbps: validSpd,
+      maxSpeedMbps: Math.max(validMax || 0, validSpd || 0, 1000),
     };
   }
 
   const ethMatch = base.match(/^eth(\d+)$/i);
   if (ethMatch) {
     const num = Number(ethMatch[1]);
-    const label = speedMbps >= 10000 ? `10G Port ${num}` : `LAN ${num}`;
+    const cap = Math.max(validMax || 0, validSpd || 0, 1000);
+    const label = cap >= 10000 || (validSpd && validSpd >= 10000) ? `10G Port ${num}` : `LAN ${num}`;
     return {
       iface: raw,
       switchPort: label,
       portNumber: num,
       portLabel: `${label} (${raw})${vlanSuffix}`,
-      speedMbps: speedMbps && speedMbps > 0 ? speedMbps : null,
+      speedMbps: validSpd,
+      maxSpeedMbps: cap,
     };
   }
 
-  const portMatch = base.match(/^(?:sw\d*p|port|p|ge|gi|fa|fe|g)(\d+)$/i);
+  const portMatch = base.match(/^(sw\d*p|port|p|ge|gi|fa|fe|g)(\d+)$/i);
   if (portMatch) {
+    const prefix = portMatch[1].toLowerCase();
+    const isFastEthOnly = prefix === 'fa' || prefix === 'fe';
     return {
       iface: raw,
-      switchPort: `Port ${portMatch[1]}`,
-      portNumber: Number(portMatch[1]),
-      portLabel: `Port ${portMatch[1]} (${raw})${vlanSuffix}`,
-      speedMbps: speedMbps && speedMbps > 0 ? speedMbps : null,
+      switchPort: `Port ${portMatch[2]}`,
+      portNumber: Number(portMatch[2]),
+      portLabel: `Port ${portMatch[2]} (${raw})${vlanSuffix}`,
+      speedMbps: validSpd,
+      maxSpeedMbps: Math.max(validMax || 0, validSpd || 0, isFastEthOnly ? 100 : 1000),
     };
   }
 
@@ -1134,7 +1146,8 @@ export function formatSwitchPortLabel(iface, speedMbps = null) {
       switchPort: base === 'br-lan' ? 'LAN Bridge' : base,
       portNumber: null,
       portLabel: `${base === 'br-lan' ? 'LAN Bridge' : base} (${raw})`,
-      speedMbps: speedMbps && speedMbps > 0 ? speedMbps : null,
+      speedMbps: validSpd,
+      maxSpeedMbps: Math.max(validMax || 0, validSpd || 0, 1000),
     };
   }
 
@@ -1144,7 +1157,8 @@ export function formatSwitchPortLabel(iface, speedMbps = null) {
     switchPort: raw.toUpperCase(),
     portNumber: trailingNumMatch ? Number(trailingNumMatch[1]) : null,
     portLabel: `${raw}${vlanSuffix}`,
-    speedMbps: speedMbps && speedMbps > 0 ? speedMbps : null,
+    speedMbps: validSpd,
+    maxSpeedMbps: Math.max(validMax || 0, validSpd || 0, 1000),
   };
 }
 
@@ -1154,6 +1168,7 @@ export function parseSwitchFdbSection(switchFdbTxt, iwInterfaces = new Map(), op
   const rawNicPorts = [];
   const swconfigPorts = [];
   const uciConfiguredPorts = new Set();
+  const portCapByIface = new Map();
   const portNoToIfaceByBridge = new Map();
   const fdbByMac = new Map();
   const hostInterfaces = [];
@@ -1306,6 +1321,23 @@ export function parseSwitchFdbSection(switchFdbTxt, iwInterfaces = new Map(), op
         ) {
           uciConfiguredPorts.add(cleanPort);
         }
+      }
+      continue;
+    }
+
+    if (line.startsWith('PORTCAP|')) {
+      const [, ifname, rawMaxSpd, rawCurSpd] = line.split('|');
+      if (ifname) {
+        const maxNum = parseInt(rawMaxSpd, 10);
+        const curNum = parseInt(rawCurSpd, 10);
+        const existing = portCapByIface.get(ifname) || { maxSpeedMbps: null, curSpeedMbps: null };
+        if (Number.isFinite(maxNum) && maxNum > 0 && (!existing.maxSpeedMbps || maxNum > existing.maxSpeedMbps)) {
+          existing.maxSpeedMbps = maxNum;
+        }
+        if (Number.isFinite(curNum) && curNum > 0) {
+          existing.curSpeedMbps = curNum;
+        }
+        portCapByIface.set(ifname, existing);
       }
       continue;
     }
@@ -1495,8 +1527,20 @@ export function parseSwitchFdbSection(switchFdbTxt, iwInterfaces = new Map(), op
     }
   }
 
-  // Enrich switchPorts with per-NIC byte & rate counters from /proc/net/dev
+  // Enrich switchPorts with hardware capability (`maxSpeedMbps`) and per-NIC byte & rate counters from /proc/net/dev
   for (const portObj of switchPortsByIface.values()) {
+    const cap = portCapByIface.get(portObj.iface);
+    const fmt = formatSwitchPortLabel(portObj.iface, portObj.speedMbps, cap?.maxSpeedMbps);
+    if (cap?.curSpeedMbps && (!portObj.speedMbps || portObj.speedMbps === 1000)) {
+      portObj.speedMbps = cap.curSpeedMbps;
+    }
+    portObj.maxSpeedMbps = Math.max(
+      cap?.maxSpeedMbps || 0,
+      portObj.maxSpeedMbps || 0,
+      fmt?.maxSpeedMbps || 1000,
+      portObj.speedMbps || 0
+    );
+
     const curr = netCounters[portObj.iface];
     if (curr) {
       portObj.rxBytes = curr.rxBytes || 0;
@@ -1520,10 +1564,18 @@ export function parseSwitchFdbSection(switchFdbTxt, iwInterfaces = new Map(), op
     }
   }
 
-  // Annotate each fdb entry with how many total MACs were learned on that same switch port (helps distinguish leaf access ports vs uplink trunk ports)
+  // Annotate each fdb entry with how many total MACs were learned on that same switch port and its hardware maxSpeedMbps
   for (const entry of fdbByMac.values()) {
     const portObj = switchPortsByIface.get(entry.iface);
     entry.portMacCount = portObj ? portObj.connectedMacs.length : 1;
+    if (portObj) {
+      entry.speedMbps = portObj.speedMbps || entry.speedMbps || 1000;
+      entry.maxSpeedMbps = portObj.maxSpeedMbps || entry.speedMbps || 1000;
+    } else {
+      const cap = portCapByIface.get(entry.iface);
+      const fmt = formatSwitchPortLabel(entry.iface, entry.speedMbps, cap?.maxSpeedMbps);
+      entry.maxSpeedMbps = Math.max(cap?.maxSpeedMbps || 0, fmt?.maxSpeedMbps || 1000, entry.speedMbps || 0);
+    }
   }
 
   const switchPorts = Array.from(switchPortsByIface.values()).sort((a, b) => {

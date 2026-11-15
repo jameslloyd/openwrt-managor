@@ -275,20 +275,34 @@ export function formatRssi(signalDbm) {
 export function formatSwitchPort(connectedTo, fallbackSpeedMbps = null) {
   const conn = connectedTo && typeof connectedTo === 'object' ? connectedTo : {};
   const rawIface = String(conn.iface || '').trim();
+  const baseIface = rawIface.split('.')[0];
   const speed = Number(conn.speedMbps || fallbackSpeedMbps) || 1000;
-  const speedText = speed >= 1000 ? `${speed / 1000} Gbps` : `${speed} Mbps`;
+  let maxSpeed = Number(conn.maxSpeedMbps) || 0;
+  if (!maxSpeed) {
+    if (/^(?:sfp|te|ten|xg|opt|qsfp)/i.test(baseIface)) maxSpeed = Math.max(speed, 10000);
+    else if (/^(?:fa|fe)/i.test(baseIface)) maxSpeed = Math.max(speed, 100);
+    else maxSpeed = Math.max(speed, 1000);
+  } else {
+    maxSpeed = Math.max(maxSpeed, speed);
+  }
+  const isSuboptimal = speed > 0 && maxSpeed > speed;
+  const curText = speed >= 1000 ? `${speed / 1000} Gbps` : `${speed} Mbps`;
+  const maxText = maxSpeed >= 1000 ? `${maxSpeed / 1000} Gbps` : `${maxSpeed} Mbps`;
   const shortSpeed = speed >= 1000 ? `${speed / 1000}G` : `${speed}M`;
+  const shortMaxSpeed = maxSpeed >= 1000 ? `${maxSpeed / 1000}G` : `${maxSpeed}M`;
+  const speedText = isSuboptimal ? `${curText} (Capable: ${maxText})` : curText;
+  const speedLabel = speedText;
 
   let portBadge = conn.switchPort || '';
   if (!portBadge && rawIface) {
-    const base = rawIface.split('.')[0];
+    const base = baseIface;
     const lanM = base.match(/^lan(\d+)$/i);
     const sfpM = base.match(/^sfp\+?(\d*)$/i);
     const ethM = base.match(/^eth(\d+)$/i);
     const portM = base.match(/^(?:sw\d*p|port)(\d+)$/i);
     if (lanM) portBadge = `LAN ${lanM[1]}`;
     else if (sfpM) portBadge = `SFP+ ${sfpM[1] || '1'}`;
-    else if (ethM) portBadge = speed >= 10000 ? `10G Port ${ethM[1]}` : `LAN ${ethM[1]}`;
+    else if (ethM) portBadge = Math.max(speed, maxSpeed) >= 10000 ? `10G Port ${ethM[1]}` : `LAN ${ethM[1]}`;
     else if (portM) portBadge = `Port ${portM[1]}`;
     else if (base === 'br-lan') portBadge = 'LAN Bridge';
     else portBadge = rawIface.toUpperCase();
@@ -304,7 +318,13 @@ export function formatSwitchPort(connectedTo, fallbackSpeedMbps = null) {
     iface: rawIface || 'eth',
     fullLabel,
     speedMbps: speed,
+    maxSpeedMbps: maxSpeed,
+    isSuboptimal,
+    curSpeedText: curText,
+    maxSpeedText: maxText,
     speedText,
-    shortSpeed,
+    speedLabel,
+    shortSpeed: isSuboptimal ? `${shortSpeed}/${shortMaxSpeed}` : shortSpeed,
+    shortMaxSpeed,
   };
 }

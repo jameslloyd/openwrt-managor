@@ -1246,6 +1246,7 @@ test('Switch Port & FDB Resolution: parses DSA bridge ports and attributes wired
     portNumber: 1,
     portLabel: 'LAN 1 (lan1)',
     speedMbps: 2500,
+    maxSpeedMbps: 2500,
   });
   assert.deepEqual(formatSwitchPortLabel('sfp1', 10000), {
     iface: 'sfp1',
@@ -1253,6 +1254,7 @@ test('Switch Port & FDB Resolution: parses DSA bridge ports and attributes wired
     portNumber: 1,
     portLabel: 'SFP+ 1 (sfp1)',
     speedMbps: 10000,
+    maxSpeedMbps: 10000,
   });
   assert.deepEqual(formatSwitchPortLabel('eth2', 1000), {
     iface: 'eth2',
@@ -1260,6 +1262,7 @@ test('Switch Port & FDB Resolution: parses DSA bridge ports and attributes wired
     portNumber: 2,
     portLabel: 'LAN 2 (eth2)',
     speedMbps: 1000,
+    maxSpeedMbps: 1000,
   });
 
   // 2. Gateway SSH telemetry with 3 DSA bridge ports (lan1=trunk to Office AP, lan2=Proxmox-Server, lan3=down)
@@ -1438,4 +1441,41 @@ test('24-Port Core Switch: parses all 24 LAN + SFP+ ports on switch bridge / swc
   assert.equal(swParsed.switchPorts.length, 24, 'Expected all 24 swconfig ports instead of single eth0/eth0.1');
   assert.equal(swParsed.switchPorts[0].switchPort, 'Port 1');
   assert.equal(swParsed.switchPorts[23].switchPort, 'Port 24');
+});
+
+test('LAN Port Hardware Capability (maxSpeedMbps): parses PORTCAP and infers default capable speed when running slower', async () => {
+  const capLines = [
+    'BRPORT|switch|lan1|0x1|100|full|up|1|aa:bb:cc:00:99:01',
+    'BRPORT|switch|lan2|0x2|1000|full|up|1|aa:bb:cc:00:99:02',
+    'BRPORT|switch|lan3|0x3|1000|full|up|1|aa:bb:cc:00:99:03',
+    'BRPORT|switch|sfp1|0x19|1000|full|up|1|aa:bb:cc:00:99:19',
+    // Explicit hardware capabilities from netifd / ethtool:
+    // lan1 is a 1G port running at 100M; lan2 is a 2.5G port running at 1G; sfp1 is a 10G SFP+ cage running at 1G
+    'PORTCAP|lan1|1000|100',
+    'PORTCAP|lan2|2500|1000',
+    'PORTCAP|sfp1|10000|1000',
+    'FDB|aa:11:22:33:44:01|lan1|switch|1',
+    'FDB|aa:11:22:33:44:02|lan2|switch|1',
+  ];
+
+  const parsed = parseSwitchFdbSection(capLines.join('\n'));
+  const lan1 = parsed.switchPorts.find((p) => p.iface === 'lan1');
+  const lan2 = parsed.switchPorts.find((p) => p.iface === 'lan2');
+  const lan3 = parsed.switchPorts.find((p) => p.iface === 'lan3');
+  const sfp1 = parsed.switchPorts.find((p) => p.iface === 'sfp1');
+
+  assert.equal(lan1.speedMbps, 100);
+  assert.equal(lan1.maxSpeedMbps, 1000);
+  assert.equal(lan2.speedMbps, 1000);
+  assert.equal(lan2.maxSpeedMbps, 2500);
+  assert.equal(lan3.speedMbps, 1000);
+  assert.equal(lan3.maxSpeedMbps, 1000);
+  assert.equal(sfp1.speedMbps, 1000);
+  assert.equal(sfp1.maxSpeedMbps, 10000);
+
+  // Verify FDB entry also carries maxSpeedMbps for client & host port resolution
+  assert.equal(parsed.fdbByMac.get('aa:11:22:33:44:01')?.speedMbps, 100);
+  assert.equal(parsed.fdbByMac.get('aa:11:22:33:44:01')?.maxSpeedMbps, 1000);
+  assert.equal(parsed.fdbByMac.get('aa:11:22:33:44:02')?.speedMbps, 1000);
+  assert.equal(parsed.fdbByMac.get('aa:11:22:33:44:02')?.maxSpeedMbps, 2500);
 });

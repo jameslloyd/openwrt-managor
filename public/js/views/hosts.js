@@ -611,10 +611,25 @@ function renderHostRow(h) {
           <div style="display: flex; flex-wrap: wrap; gap: 3px; margin-top: 4px;">
             ${h.switchPorts.map((p) => {
               const isPortUp = p.linkUp ?? p.status === 'up';
+              const curSpd = Number(p.speedMbps) || 0;
+              const rawMax = Number(p.maxSpeedMbps) || 0;
+              const baseIfn = String(p.iface || '').split('.')[0];
+              const maxSpd = rawMax > 0
+                ? Math.max(rawMax, curSpd)
+                : (/^(?:sfp|te|ten|xg|opt|qsfp)/i.test(baseIfn) ? Math.max(curSpd, 10000) : Math.max(curSpd, 1000));
+              const curShort = curSpd >= 1000 ? `${curSpd / 1000}G` : `${curSpd}M`;
+              const maxShort = maxSpd >= 1000 ? `${maxSpd / 1000}G` : `${maxSpd}M`;
+              const isSuboptimal = isPortUp && curSpd > 0 && maxSpd > curSpd;
+              const speedInfo = isPortUp && curSpd > 0
+                ? (isSuboptimal ? `${curShort} / Capable: ${maxShort}` : curShort)
+                : `Down (${maxShort} max)`;
               const devNames = Array.isArray(p.connectedDevices) && p.connectedDevices.length > 0
                 ? p.connectedDevices.map((d) => d.hostname || d.ip || d.mac).join(', ')
                 : (isPortUp ? 'Link Up' : 'Down');
-              return `<span class="font-mono" title="${escapeHtml(`${p.switchPort || p.portLabel || p.iface} (${p.iface}): ${devNames}`)}" style="font-size: 9.5px; padding: 1px 5px; border-radius: 4px; background: ${isPortUp ? 'var(--color-primary-light)' : 'var(--color-surface-elevated)'}; color: ${isPortUp ? 'var(--color-primary)' : 'var(--color-text-muted)'}; border: 1px solid ${isPortUp ? 'var(--color-primary)' : 'var(--color-border)'};">${escapeHtml(p.switchPort || p.portLabel || p.iface)}</span>`;
+              const pillLabel = isSuboptimal
+                ? `${p.switchPort || p.portLabel || p.iface} (${curShort}/${maxShort})`
+                : (p.switchPort || p.portLabel || p.iface);
+              return `<span class="font-mono" title="${escapeHtml(`${p.switchPort || p.portLabel || p.iface} (${p.iface}) [${speedInfo}]: ${devNames}`)}" style="font-size: 9.5px; padding: 1px 5px; border-radius: 4px; background: ${isPortUp ? 'var(--color-primary-light)' : 'var(--color-surface-elevated)'}; color: ${isSuboptimal ? 'var(--color-warning)' : isPortUp ? 'var(--color-primary)' : 'var(--color-text-muted)'}; border: 1px solid ${isSuboptimal ? 'var(--color-warning)' : isPortUp ? 'var(--color-primary)' : 'var(--color-border)'};">${escapeHtml(pillLabel)}</span>`;
             }).join('')}
           </div>
         ` : ''}
