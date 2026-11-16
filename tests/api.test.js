@@ -1479,24 +1479,43 @@ test('LAN Port Hardware Capability (maxSpeedMbps): parses PORTCAP and infers def
   assert.equal(parsed.fdbByMac.get('aa:11:22:33:44:02')?.speedMbps, 1000);
   assert.equal(parsed.fdbByMac.get('aa:11:22:33:44:02')?.maxSpeedMbps, 2500);
 
-  // Verify UCINET-discovered ports with active FDB MACs or PORTCAP carrier=1 are marked UP instead of DOWN
+  // Verify UCINET-discovered ports with active FDB MACs, LINKUP (LOWER_UP), bridge STP state=3, or SWPORT are marked UP
   const uciActiveLines = [
-    "UCINET|network.@device[0].ports='lan1' 'lan2' 'lan3'",
+    'HOSTIF|lan1|00:11:22:33:44:01|',
+    "UCINET|network.@device[0].ports='lan1' 'lan2' 'lan3' 'lan4' 'lan5' 'lan6'",
     'PORTCAP|lan1|1000|1000|1|1',
     'PORTCAP|lan2|1000|1000|0|1',
     'PORTCAP|lan3|1000||0|0',
+    // lan4 has sysfs operstate=unknown and speed=-1, but bridge STP state is 3 (forwarding)
+    'BRPORT|switch|lan4|0x4|-1|full|unknown||00:11:22:33:44:04|3',
+    // lan5 is reported UP via ip link LOWER_UP (`LINKUP|lan5`)
+    'LINKUP|lan5',
+    // lan6 is reported UP via swconfig (`SWPORT|switch0|6|up|1000baseT|full-duplex`)
+    'SWPORT|switch0|6|up|1000baseT|full-duplex',
     'FDB|aa:bb:cc:dd:ee:02|lan2|switch|1',
+    // Multicast MAC and host's own interface MAC should be ignored from connectedMacs
+    'FDB|33:33:00:00:00:01|lan3|switch|1',
+    'FDB|00:11:22:33:44:01|lan3|switch|1',
   ];
   const uciParsed = parseSwitchFdbSection(uciActiveLines.join('\n'));
   const uLan1 = uciParsed.switchPorts.find((p) => p.iface === 'lan1');
   const uLan2 = uciParsed.switchPorts.find((p) => p.iface === 'lan2');
   const uLan3 = uciParsed.switchPorts.find((p) => p.iface === 'lan3');
+  const uLan4 = uciParsed.switchPorts.find((p) => p.iface === 'lan4');
+  const uLan5 = uciParsed.switchPorts.find((p) => p.iface === 'lan5');
+  const uLan6 = uciParsed.switchPorts.find((p) => p.iface === 'lan6');
   assert.equal(uLan1.status, 'up');
   assert.equal(uLan1.linkUp, true);
   assert.equal(uLan2.status, 'up');
   assert.equal(uLan2.linkUp, true);
   assert.equal(uLan3.status, 'down');
   assert.equal(uLan3.linkUp, false);
+  assert.equal(uLan4.status, 'up');
+  assert.equal(uLan4.linkUp, true);
+  assert.equal(uLan5.status, 'up');
+  assert.equal(uLan5.linkUp, true);
+  assert.equal(uLan6.status, 'up');
+  assert.equal(uLan6.linkUp, true);
 
   // Verify ===NETDEV_STATUS=== JSON parsing in parseSshTelemetryOutput and partial fallback preservation
   const fullSshWithNetdevStatus = [

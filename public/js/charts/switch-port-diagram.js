@@ -246,13 +246,73 @@ export class SwitchPortDiagram {
     }
 
     if (rawPorts.length > 0) {
-      if (this.showActiveOnly) {
-        const filtered = rawPorts.filter(
-          (p) => (p.linkUp ?? p.status === 'up') || (Array.isArray(p.connectedDevices) && p.connectedDevices.length > 0)
+      const isHostOnline = host.status !== 'offline';
+      const nic = host.nicInfo || {};
+      const enrichedPorts = rawPorts.map((p) => {
+        const existingDevices = Array.isArray(p.connectedDevices) ? [...p.connectedDevices] : [];
+        const extraClients = this.clients
+          .filter(
+            (c) =>
+              c.connectionType === 'wired' &&
+              c.connectedTo?.hostId === host.id &&
+              (c.connectedTo?.iface === p.iface ||
+                c.connectedTo?.switchPort === p.switchPort ||
+                (p.portNumber !== null && p.portNumber !== undefined && c.connectedTo?.portNumber === p.portNumber)) &&
+              !existingDevices.some((d) => d.mac && c.mac && d.mac.toLowerCase() === c.mac.toLowerCase())
+          )
+          .map((c) => ({
+            mac: c.mac,
+            ip: c.ip,
+            hostname: c.hostname,
+            vendor: c.vendor || null,
+            type: 'client',
+          }));
+        const extraPeers = this.hosts
+          .filter(
+            (peer) =>
+              peer.id !== host.id &&
+              peer.status !== 'offline' &&
+              peer.nicInfo?.upstreamHostId === host.id &&
+              (peer.nicInfo?.upstreamIface === p.iface || peer.nicInfo?.upstreamPort === p.switchPort) &&
+              !existingDevices.some((d) => d.id === peer.id)
+          )
+          .map((peer) => ({
+            id: peer.id,
+            mac: peer.mac || null,
+            ip: peer.ip || null,
+            hostname: peer.name || peer.hostname || peer.id,
+            type: peer.role || 'ap',
+          }));
+        const connectedDevices = [...existingDevices, ...extraPeers, ...extraClients];
+        const isActiveLocalNic =
+          isHostOnline &&
+          ((nic.localIface && p.iface === nic.localIface) || (nic.localPort && p.switchPort === nic.localPort));
+        const isActiveRole =
+          isHostOnline && (p.portRole === 'uplink' || p.portRole === 'trunk' || (p.portRole === 'wan' && host.role === 'gateway'));
+        const hasTraffic = Number(p.rxRateBps) > 0 || Number(p.txRateBps) > 0;
+        const hasMacs = Array.isArray(p.connectedMacs) && p.connectedMacs.length > 0;
+        const isUp = Boolean(
+          (p.linkUp ?? p.status === 'up') ||
+            connectedDevices.length > 0 ||
+            hasMacs ||
+            hasTraffic ||
+            isActiveLocalNic ||
+            isActiveRole
         );
-        return filtered.length > 0 ? filtered : rawPorts;
+        return {
+          ...p,
+          linkUp: isUp,
+          status: isUp ? 'up' : 'down',
+          connectedDevices,
+        };
+      });
+      if (this.showActiveOnly) {
+        const filtered = enrichedPorts.filter(
+          (p) => p.linkUp || (Array.isArray(p.connectedDevices) && p.connectedDevices.length > 0)
+        );
+        return filtered.length > 0 ? filtered : enrichedPorts;
       }
-      return rawPorts;
+      return enrichedPorts;
     }
 
     // Synthesize fallback NIC port from nicInfo if host has not yet reported individual switch ports
@@ -518,11 +578,17 @@ export class SwitchPortDiagram {
             Array.isArray(c.port.connectedDevices) &&
             c.port.connectedDevices.some((d) => d.id === secHost.id)
         ) ||
+        Array.from(portJackCoords.values()).find(
+          (c) => c.host.id === parentId && c.port.portRole !== 'wan' && (c.port.linkUp ?? c.port.status === 'up')
+        ) ||
         Array.from(portJackCoords.values()).find((c) => c.host.id === parentId);
 
       const tgtCoord =
         (nic.localIface && portJackCoords.get(`${secHost.id}:${nic.localIface}`)) ||
         (nic.localPort && portJackCoords.get(`${secHost.id}:${nic.localPort}`)) ||
+        Array.from(portJackCoords.values()).find(
+          (c) => c.host.id === secHost.id && (c.port.linkUp ?? c.port.status === 'up')
+        ) ||
         Array.from(portJackCoords.values()).find((c) => c.host.id === secHost.id);
 
       if (!srcCoord || !tgtCoord) return;

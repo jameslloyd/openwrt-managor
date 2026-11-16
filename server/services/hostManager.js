@@ -1185,18 +1185,22 @@ export class HostManager {
     for (const h of hosts) {
       const myPorts = portsByHostId.get(h.id) || [];
       for (const p of myPorts) {
-        if (p.connectedDevices.length > 0 && !p.linkUp) {
+        const isLocalUplinkOnOnlineHost =
+          h.status !== 'offline' && h.nicInfo?.localIface && p.iface === h.nicInfo.localIface;
+        const isActiveWanOnOnlineHost =
+          h.status !== 'offline' && p.portRole === 'wan' && Boolean(h.wan?.ip || h.defaultRoute?.gatewayIp);
+        if ((p.connectedDevices.length > 0 || isLocalUplinkOnOnlineHost || isActiveWanOnOnlineHost) && !p.linkUp) {
           p.linkUp = true;
           p.status = 'up';
         }
         if (!p.linkUp) {
           p.portRole = p.portRole === 'wan' ? 'wan' : 'down';
         } else if (p.portRole === 'wan') {
-          if (p.connectedDevices.length === 0 && h.wan?.ip) {
+          if (p.connectedDevices.length === 0 && (h.wan?.ip || h.defaultRoute?.gatewayIp)) {
             p.connectedDevices.push({
               id: 'wan-internet',
-              ip: h.wan.gateway || h.wan.ip,
-              hostname: `WAN Uplink (${h.wan.ip})`,
+              ip: h.wan?.gateway || h.wan?.ip || h.defaultRoute?.gatewayIp,
+              hostname: `WAN Uplink (${h.wan?.ip || h.defaultRoute?.gatewayIp})`,
               type: 'wan',
             });
           }
