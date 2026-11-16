@@ -406,16 +406,13 @@ export function parseOpkgUpgradable(text) {
 }
 
 export const ASU_STATUS_SCRIPT = [
-  'export PATH="/usr/sbin:/usr/bin:/sbin:/bin:$PATH"',
   'asu_found=0',
-  'if [ -f /usr/lib/opkg/status ]; then out=$(awk \'/^Package:[ \t]*(auc|owut|luci-app-attendedsysupgrade|attendedsysupgrade-common)$/{pkg=$2} /^Version:[ \t]*/ && pkg{print pkg " - " $2; pkg=""}\' /usr/lib/opkg/status 2>/dev/null); if [ -n "$out" ]; then echo "$out"; asu_found=1; fi; fi',
-  'if [ -f /lib/apk/db/installed ]; then out=$(awk -F: \'/^P:(auc|owut|luci-app-attendedsysupgrade|attendedsysupgrade-common)$/{pkg=$2} /^V:/ && pkg{print pkg " - " $2; pkg=""}\' /lib/apk/db/installed 2>/dev/null); if [ -n "$out" ]; then echo "$out"; asu_found=1; fi; fi',
-  'for f in /usr/lib/opkg/info/auc.control /usr/lib/opkg/info/owut.control /usr/lib/opkg/info/luci-app-attendedsysupgrade.control /usr/lib/opkg/info/attendedsysupgrade-common.control; do if [ -f "$f" ]; then awk \'/^Package:/{p=$2} /^Version:/{v=$2} END{if(p) print p " - " (v?v:"installed")}\' "$f" 2>/dev/null; asu_found=1; fi; done',
-  'if command -v opkg >/dev/null 2>&1; then out=$(opkg list-installed 2>/dev/null | grep -E "^(auc|owut|luci-app-attendedsysupgrade|attendedsysupgrade-common) "); if [ -n "$out" ]; then echo "$out"; asu_found=1; fi; fi',
-  'if command -v apk >/dev/null 2>&1; then out=$(apk info -v 2>/dev/null | grep -E "^(auc|owut|luci-app-attendedsysupgrade|attendedsysupgrade-common)-"); if [ -n "$out" ]; then echo "$out"; asu_found=1; fi; fi',
-  'if command -v auc >/dev/null 2>&1 || [ -x /usr/bin/auc ] || [ -x /bin/auc ]; then echo "HAS_BIN:auc"; asu_found=1; fi',
-  'if command -v owut >/dev/null 2>&1 || [ -x /usr/bin/owut ] || [ -x /bin/owut ]; then echo "HAS_BIN:owut"; asu_found=1; fi',
-  'if [ -f /etc/config/attendedsysupgrade ] || [ -f /usr/share/luci/menu.d/luci-app-attendedsysupgrade.json ] || [ -d /www/luci-static/resources/view/attendedsysupgrade ] || [ -f /usr/share/rpcd/acl.d/luci-app-attendedsysupgrade.json ] || [ -f /usr/lib/lua/luci/controller/attendedsysupgrade.lua ]; then echo "HAS_LUCI:luci-app-attendedsysupgrade"; asu_found=1; fi',
+  'for p in auc owut luci-app-attendedsysupgrade attendedsysupgrade-common; do f="/usr/lib/opkg/info/$p.control"; if [ -f "$f" ]; then awk \'/^Package:/{n=$2} /^Version:/{v=$2} END{if(n) print n " - " (v?v:"installed")}\' "$f" 2>/dev/null; asu_found=1; fi; done',
+  'if [ "$asu_found" = "0" ] && [ -f /usr/lib/opkg/status ]; then out=$(awk \'/^Package:[ \t]*(auc|owut|luci-app-attendedsysupgrade|attendedsysupgrade-common)$/{p=$2} /^Version:[ \t]*/ && p{print p " - " $2; p=""}\' /usr/lib/opkg/status 2>/dev/null); if [ -n "$out" ]; then echo "$out"; asu_found=1; fi; fi',
+  'if [ -f /lib/apk/db/installed ]; then out=$(awk -F: \'/^P:(auc|owut|luci-app-attendedsysupgrade|attendedsysupgrade-common)$/{p=$2} /^V:/ && p{print p " - " $2; p=""}\' /lib/apk/db/installed 2>/dev/null); if [ -n "$out" ]; then echo "$out"; asu_found=1; fi; fi',
+  'if command -v auc >/dev/null 2>&1 || [ -x /usr/bin/auc ]; then echo "HAS_BIN:auc"; asu_found=1; fi',
+  'if command -v owut >/dev/null 2>&1 || [ -x /usr/bin/owut ]; then echo "HAS_BIN:owut"; asu_found=1; fi',
+  'if [ -f /etc/config/attendedsysupgrade ] || [ -f /usr/share/luci/menu.d/luci-app-attendedsysupgrade.json ] || [ -d /www/luci-static/resources/view/attendedsysupgrade ]; then echo "HAS_LUCI:luci-app-attendedsysupgrade"; asu_found=1; fi',
   'uci_out=$(uci -q show attendedsysupgrade 2>/dev/null || cat /etc/config/attendedsysupgrade 2>/dev/null); if [ -n "$uci_out" ]; then echo "$uci_out"; asu_found=1; fi',
   '[ "$asu_found" = "0" ] && echo "ASU_NONE"',
 ].join('; ');
@@ -946,12 +943,13 @@ export async function pollRealHost(hostConfig, prevSample = null) {
     'ubus call network.wireless status 2>/dev/null',
     'echo "===IWDEV==="',
     'iw dev 2>/dev/null',
+    'IW_IFS=$(iw dev 2>/dev/null | awk \'$1=="Interface"{print $2}\')',
     'echo "===SURVEY==="',
-    'for iface in $(iw dev 2>/dev/null | awk \'$1=="Interface"{print $2}\'); do echo "---IFACE:$iface---"; iw dev "$iface" survey dump 2>/dev/null | awk \'/Survey data from/{if(inuse)exit; next} /\\[in use\\]/{inuse=1; print; next} inuse{print}\'; done',
+    'for iface in $IW_IFS; do echo "---IFACE:$iface---"; iw dev "$iface" survey dump 2>/dev/null | awk \'/Survey data from/{if(inuse)exit; next} /\\[in use\\]/{inuse=1; print; next} inuse{print}\'; done',
     'echo "===SCANDUMP==="',
-    'seen_phys=""; for iface in $(iw dev 2>/dev/null | awk \'$1=="Interface"{print $2}\'); do phy=$(iw dev "$iface" info 2>/dev/null | awk \'$1=="wiphy"{print $2}\'); case " $seen_phys " in *" $phy "*) continue ;; esac; seen_phys="$seen_phys $phy"; echo "---IFACE:$iface---"; iw dev "$iface" scan dump 2>/dev/null | grep -E "^(BSS |\\tfreq:|\\tsignal:|\\tSSID:|\\tDS Parameter set:|\\t\\* primary channel:|\\t\\* channel width:|\\t\\* STA channel width:|\\t\\* Manufacturer:|\\tRSN:|\\tWPA:|\\tlast seen:)"; done',
+    'seen_phys=""; for iface in $IW_IFS; do phy=$(iw dev "$iface" info 2>/dev/null | awk \'$1=="wiphy"{print $2}\'); case " $seen_phys " in *" $phy "*) continue ;; esac; seen_phys="$seen_phys $phy"; echo "---IFACE:$iface---"; iw dev "$iface" scan dump 2>/dev/null | grep -E "^(BSS |\\tfreq:|\\tsignal:|\\tSSID:|\\tDS Parameter set:|\\t\\* primary channel:|\\t\\* channel width:|\\t\\* STA channel width:|\\t\\* Manufacturer:|\\tRSN:|\\tWPA:|\\tlast seen:)"; done',
     'echo "===STATIONS==="',
-    'for iface in $(iw dev 2>/dev/null | awk \'$1=="Interface"{print $2}\'); do echo "---IFACE:$iface---"; iw dev "$iface" station dump 2>/dev/null; done',
+    'for iface in $IW_IFS; do echo "---IFACE:$iface---"; iw dev "$iface" station dump 2>/dev/null; done',
     'echo "===DHCP==="',
     'cat /tmp/dhcp.leases 2>/dev/null; lf=$(uci -q get dhcp.@dnsmasq[0].leasefile 2>/dev/null); [ -n "$lf" ] && [ "$lf" != "/tmp/dhcp.leases" ] && cat "$lf" 2>/dev/null',
     'echo "===UCI_DHCP==="',
@@ -961,24 +959,24 @@ export async function pollRealHost(hostConfig, prevSample = null) {
     'echo "===ETHERS==="',
     'cat /etc/ethers 2>/dev/null',
     // If any associated WiFi station is missing from local dhcp.leases and /proc/net/arp, sweep the br-lan subnet once so ARP resolves its IP
-    'missing_arp=0; if [ ! -f /tmp/.openwrt_mgr_arp_sweep ]; then for smac in $(iw dev 2>/dev/null | awk \'$1=="Interface"{print $2}\' | while read iface; do iw dev "$iface" station dump 2>/dev/null | awk \'/^Station/{print tolower($2)}\'; done); do if ! grep -qi "$smac" /tmp/dhcp.leases 2>/dev/null && ! awk \'tolower($4)=="\'$smac\'" && $3!="0x0"{found=1} END{exit !found}\' /proc/net/arp 2>/dev/null; then missing_arp=1; break; fi; done; fi',
+    'missing_arp=0; if [ ! -f /tmp/.openwrt_mgr_arp_sweep ]; then for smac in $(for iface in $IW_IFS; do iw dev "$iface" station dump 2>/dev/null | awk \'/^Station/{print tolower($2)}\'; done); do if ! grep -qi "$smac" /tmp/dhcp.leases 2>/dev/null && ! awk \'tolower($4)=="\'$smac\'" && $3!="0x0"{found=1} END{exit !found}\' /proc/net/arp 2>/dev/null; then missing_arp=1; break; fi; done; fi',
     'if [ "$missing_arp" = "1" ]; then touch /tmp/.openwrt_mgr_arp_sweep 2>/dev/null; subnet=$(ip -4 addr show br-lan 2>/dev/null | awk \'/inet /{print $2; exit}\' | cut -d. -f1-3); [ -z "$subnet" ] && subnet=$(ip -4 addr show 2>/dev/null | awk \'/inet / && !/127\\.0\\.0\\.1/{print $2; exit}\' | cut -d. -f1-3); if [ -n "$subnet" ]; then for b in 0 64 128 192; do i=$((b + 1)); while [ $i -le $((b + 64)) ] && [ $i -le 254 ]; do ping -c 1 -W 1 "$subnet.$i" >/dev/null 2>&1 & i=$((i + 1)); done; wait; done; fi; fi',
     'echo "===ARP==="',
     'cat /proc/net/arp 2>/dev/null; echo "---IPNEIGH---"; ip -4 neigh show 2>/dev/null',
+    'echo "===NETDEV_STATUS==="',
+    'ubus call network.device status 2>/dev/null',
     'echo "===SWITCH_FDB==="',
-    'for p in /sys/class/net/*/brif/*; do [ -e "$p" ] || continue; br=$(basename $(dirname $(dirname "$p"))); ifn=$(basename "$p"); pno=$(cat "$p/port_no" 2>/dev/null); spd=$(cat "/sys/class/net/$ifn/speed" 2>/dev/null); dup=$(cat "/sys/class/net/$ifn/duplex" 2>/dev/null); oper=$(cat "/sys/class/net/$ifn/operstate" 2>/dev/null); carr=$(cat "/sys/class/net/$ifn/carrier" 2>/dev/null); ifmac=$(cat "/sys/class/net/$ifn/address" 2>/dev/null); echo "BRPORT|$br|$ifn|$pno|$spd|$dup|$oper|$carr|$ifmac"; done',
-    'for d in /sys/class/net/*; do [ -e "$d" ] || continue; ifn=$(basename "$d"); [ -d "$d/bridge" ] || [ -d "$d/brif" ] || [ -d "$d/wireless" ] || [ -d "$d/phy80211" ] && continue; case "$ifn" in lo|br-*|br[0-9]*|switch|switch.*|*.*|wlan*|phy*|ra*|rax*|ath*|wds*|mesh*|mon*|wg*|tun*|tap*|docker*|veth*|sit*|gre*|ip6*|ifb*|teql*|erspan*|ip_vti*|ip6_vti*|ip6tnl*|pppoe*|ppp*|bat*|tailscale*|zt*|miireg*|dummy*|bond*) continue ;; esac; ifmac=$(cat "$d/address" 2>/dev/null); spd=$(cat "$d/speed" 2>/dev/null); dup=$(cat "$d/duplex" 2>/dev/null); oper=$(cat "$d/operstate" 2>/dev/null); carr=$(cat "$d/carrier" 2>/dev/null); br=""; [ -e "$d/brport/bridge" ] && br=$(basename $(readlink "$d/brport/bridge" 2>/dev/null) 2>/dev/null); echo "NICPORT|$ifn|$ifmac|$spd|$dup|$oper|$carr|$br"; done',
+    'for p in /sys/class/net/*/brif/*; do [ -e "$p" ] || continue; br=${p%/brif/*}; br=${br##*/}; ifn=${p##*/}; d="/sys/class/net/$ifn"; echo "BRPORT|$br|$ifn|$(cat "$p/port_no" 2>/dev/null)|$(cat "$d/speed" 2>/dev/null)|$(cat "$d/duplex" 2>/dev/null)|$(cat "$d/operstate" 2>/dev/null)|$(cat "$d/carrier" 2>/dev/null)|$(cat "$d/address" 2>/dev/null)"; done',
+    'for d in /sys/class/net/*; do [ -e "$d" ] || continue; ifn=${d##*/}; [ -d "$d/bridge" ] || [ -d "$d/brif" ] || [ -d "$d/wireless" ] || [ -d "$d/phy80211" ] && continue; case "$ifn" in lo|br-*|br[0-9]*|switch|switch.*|*.*|wlan*|phy*|ra*|rax*|ath*|wds*|mesh*|mon*|wg*|tun*|tap*|docker*|veth*|sit*|gre*|ip*|ifb*|teql*|erspan*|pppoe*|ppp*|bat*|tailscale*|zt*|miireg*|dummy*|bond*) continue ;; esac; br=""; [ -e "$d/brport/bridge" ] && br=$(readlink "$d/brport/bridge" 2>/dev/null) && br=${br##*/}; echo "NICPORT|$ifn|$(cat "$d/address" 2>/dev/null)|$(cat "$d/speed" 2>/dev/null)|$(cat "$d/duplex" 2>/dev/null)|$(cat "$d/operstate" 2>/dev/null)|$(cat "$d/carrier" 2>/dev/null)|$br"; done',
     'uci show network 2>/dev/null | grep -E "\\.(ports|device|ifname)=" | sed "s/^/UCINET|/"',
     'if command -v jsonfilter >/dev/null 2>&1 && [ -f /etc/board.json ]; then jsonfilter -i /etc/board.json -e "@.network.*.ports[*]" -e "@.network.*.device" 2>/dev/null | sed "s/^/BOARDPORT|/"; fi',
-    'ubus call network.device status > /tmp/.openwrt_mgr_netdev_st 2>/dev/null; awk \'index($0,"\\t\\"")==1 && index($0,"\\": {")>0 {cur=$1; gsub(/["\\t:]/,"",cur); m=0; spd=""; up=0; carr=0} cur!="" && $1=="\\"up\\":" {if($2~/true/)up=1} cur!="" && $1=="\\"carrier\\":" {if($2~/true/)carr=1} cur!="" && $1=="\\"speed\\":" {spd=$2; gsub(/[^0-9]/,"",spd)} cur!="" && /"[0-9]+base/ {s=$0; gsub(/[^0-9]/,"",s); n=s+0; if(n>m)m=n} index($0,"\\t}")==1 {if(cur!="") print "PORTCAP|" cur "|" m "|" spd "|" carr "|" up; cur=""}\' /tmp/.openwrt_mgr_netdev_st 2>/dev/null',
-    'if command -v ethtool >/dev/null 2>&1 && ! grep -q "link-supported" /tmp/.openwrt_mgr_netdev_st 2>/dev/null; then for d in /sys/class/net/*; do [ -e "$d" ] || continue; ifn=$(basename "$d"); [ -d "$d/bridge" ] || [ -d "$d/brif" ] || [ -d "$d/wireless" ] || [ -d "$d/phy80211" ] && continue; case "$ifn" in lo|br-*|br[0-9]*|switch|switch.*|*.*|wlan*|phy*|ra*|rax*|ath*|wds*|mesh*|mon*|wg*|tun*|tap*|docker*|veth*|sit*|gre*|ip6*|ifb*|teql*|erspan*|ip_vti*|ip6_vti*|ip6tnl*|pppoe*|ppp*|bat*|tailscale*|zt*|miireg*|dummy*|bond*) continue ;; esac; m=$(ethtool "$ifn" 2>/dev/null | awk \'/Supported link modes:/,/Supported pause frame|Supports auto-negotiation/{print}\' | tr " \\t" "\\n\\n" | awk \'/^[0-9]+base/{gsub(/base.*/,"",$0); n=$0+0; if(n>mx)mx=n} END{if(mx>0)print mx}\'); [ -n "$m" ] && echo "PORTCAP|$ifn|$m|"; done; fi',
-    'for d in /sys/class/net/*; do [ -e "$d/address" ] || continue; ifn=$(basename "$d"); [ "$ifn" = "lo" ] && continue; m=$(cat "$d/address" 2>/dev/null); ip4=$(ip -4 -o addr show dev "$ifn" 2>/dev/null | awk \'{print $4}\' | cut -d/ -f1 | head -n1); echo "HOSTIF|$ifn|$m|$ip4"; done',
+    'for d in /sys/class/net/*; do [ -e "$d/address" ] || continue; ifn=${d##*/}; [ "$ifn" = "lo" ] && continue; m=$(cat "$d/address" 2>/dev/null); ip4=$(ip -4 -o addr show dev "$ifn" 2>/dev/null | awk \'{print $4}\' | cut -d/ -f1 | head -n1); echo "HOSTIF|$ifn|$m|$ip4"; done',
     'ip -4 route show default 2>/dev/null | awk \'/default/{gw=""; dev=""; src=""; for(i=1;i<=NF;i++){if($i=="via") gw=$(i+1); if($i=="dev") dev=$(i+1); if($i=="src") src=$(i+1);} print "DEFROUTE|" gw "|" dev "|" src; exit}\'',
     'if command -v bridge >/dev/null 2>&1; then bridge fdb show 2>/dev/null | awk \'!/permanent|self/{mac=tolower($1); dev=""; br=""; vlan=""; for(i=2;i<=NF;i++){if($i=="dev") dev=$(i+1); if($i=="master") br=$(i+1); if($i=="vlan") vlan=$(i+1);} if(mac ~ /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/ && dev!="") print "FDB|" mac "|" dev "|" br "|" vlan}\'; fi',
-    'for b in /sys/class/net/*/brif; do [ -d "$b" ] || continue; br=$(basename $(dirname "$b")); brctl showmacs "$br" 2>/dev/null | awk -v br="$br" \'NR>1 && $3=="no"{print "BRMAC|" br "|" $1 "|" tolower($2)}\'; done',
+    'for b in /sys/class/net/*/brif; do [ -d "$b" ] || continue; br=${b%/brif}; br=${br##*/}; brctl showmacs "$br" 2>/dev/null | awk -v br="$br" \'NR>1 && $3=="no"{print "BRMAC|" br "|" $1 "|" tolower($2)}\'; done',
     'if command -v swconfig >/dev/null 2>&1; then for sw in $(swconfig list 2>/dev/null | awk \'{print $2}\' | tr -d ":"); do swconfig dev "$sw" show 2>/dev/null | awk -v sw="$sw" \'/^[[:space:]]*Port [0-9]+:/{sub(/:/,"",$2); cp=$2} /link:/{p=cp; st="down"; spd=""; dup=""; for(i=1;i<=NF;i++){if($i ~ /^port:/) p=substr($i,6); if($i ~ /^link:/){v=substr($i,6); if(v!="") st=v; else if($(i+1)!="") st=$(i+1);} if($i ~ /^speed:/){v=substr($i,7); if(v!="") spd=v; else if($(i+1)!="") spd=$(i+1);} if($i ~ /duplex/) dup=$i;} if(p!="") print "SWPORT|" sw "|" p "|" st "|" spd "|" dup}\'; done; fi',
     'echo "===RDNS==="',
-    'gw=$(ip route show default 2>/dev/null | awk \'/default/{print $3; exit}\'); [ -z "$gw" ] && gw=$(uci -q get network.lan.gateway 2>/dev/null); for smac in $(iw dev 2>/dev/null | awk \'$1=="Interface"{print $2}\' | while read iface; do iw dev "$iface" station dump 2>/dev/null | awk \'/^Station/{print tolower($2)}\'; done); do sip=$(awk \'tolower($4)=="\'$smac\'" && $3!="0x0"{print $1; exit}\' /proc/net/arp 2>/dev/null); if [ -n "$sip" ]; then rname=$(nslookup "$sip" ${gw:+"$gw"} 2>/dev/null | awk \'/name =/{print $NF; exit} /^Address 1:/ && NF>=4{print $4; exit}\'); echo "$smac $sip $rname"; fi; done',
+    'gw=$(ip route show default 2>/dev/null | awk \'/default/{print $3; exit}\'); [ -z "$gw" ] && gw=$(uci -q get network.lan.gateway 2>/dev/null); for smac in $(for iface in $IW_IFS; do iw dev "$iface" station dump 2>/dev/null | awk \'/^Station/{print tolower($2)}\'; done); do sip=$(awk \'tolower($4)=="\'$smac\'" && $3!="0x0"{print $1; exit}\' /proc/net/arp 2>/dev/null); if [ -n "$sip" ]; then rname=$(nslookup "$sip" ${gw:+"$gw"} 2>/dev/null | awk \'/name =/{print $NF; exit} /^Address 1:/ && NF>=4{print $4; exit}\'); echo "$smac $sip $rname"; fi; done',
     'echo "===OPKG_UPGRADABLE==="',
     'if command -v opkg >/dev/null 2>&1; then if [ -z "$(ls -A /var/opkg-lists 2>/dev/null)" ] && [ ! -f /tmp/.openwrt_mgr_opkg_init ]; then (touch /tmp/.openwrt_mgr_opkg_init; opkg update >/dev/null 2>&1) </dev/null >/dev/null 2>&1 & else opkg list-upgradable 2>/dev/null; fi; elif command -v apk >/dev/null 2>&1; then apk version -l "<" 2>/dev/null; fi',
     'echo "===ASU_CHECK==="',
@@ -1070,15 +1068,27 @@ export async function pollRealHost(hostConfig, prevSample = null) {
         'cat /proc/uptime 2>/dev/null',
         'echo "===MEMINFO==="',
         'cat /proc/meminfo 2>/dev/null',
+        'echo "===DHCP==="',
+        'cat /tmp/dhcp.leases 2>/dev/null',
+        'echo "===ARP==="',
+        'cat /proc/net/arp 2>/dev/null; echo "---IPNEIGH---"; ip -4 neigh show 2>/dev/null',
+        'echo "===IWDEV==="',
+        'iw dev 2>/dev/null',
+        'echo "===STATIONS==="',
+        'for iface in $(iw dev 2>/dev/null | awk \'$1=="Interface"{print $2}\'); do echo "---IFACE:$iface---"; iw dev "$iface" station dump 2>/dev/null; done',
         'true',
       ].join('; ');
-      const { stdout: quickOut } = await execSshCommand(hostConfig, quickScript, { timeoutMs: 6000 });
+      const { stdout: quickOut } = await execSshCommand(hostConfig, quickScript, { timeoutMs: 8000 });
       if (quickOut && /===(?:BOARD|UPTIME|SYSINFO)===/i.test(quickOut)) {
-        return parseSshTelemetryOutput(hostConfig, quickOut, prevSample);
+        const parsedQuick = parseSshTelemetryOutput(hostConfig, quickOut, prevSample);
+        parsedQuick.isPartialFallback = true;
+        return parsedQuick;
       }
     } catch (quickErr) {
       if (quickErr && typeof quickErr.stdout === 'string' && /===(?:BOARD|UPTIME|SYSINFO)===/i.test(quickErr.stdout)) {
-        return parseSshTelemetryOutput(hostConfig, quickErr.stdout, prevSample);
+        const parsedQuick = parseSshTelemetryOutput(hostConfig, quickErr.stdout, prevSample);
+        parsedQuick.isPartialFallback = true;
+        return parsedQuick;
       }
     }
     return {
@@ -1687,6 +1697,7 @@ export function parseSshTelemetryOutput(hostConfig, stdout, prevSample = null) {
   const ubusDhcpJson = getSectionJson('UBUS_DHCP');
   const ethersTxt = getSectionText('ETHERS');
   const arpTxt = getSectionText('ARP');
+  const netDevStatusJson = getSectionJson('NETDEV_STATUS');
   const switchFdbTxt = getSectionText('SWITCH_FDB');
   const rdnsTxt = getSectionText('RDNS');
   const opkgUpgradableTxt = getSectionText('OPKG_UPGRADABLE');
@@ -2126,10 +2137,41 @@ export function parseSshTelemetryOutput(hostConfig, stdout, prevSample = null) {
   }
   flushStation();
 
-  // 9b. Parse physical switch ports & bridge FDB (`===SWITCH_FDB===`)
+  // 9b. Parse physical switch ports & bridge FDB (`===SWITCH_FDB===` + `===NETDEV_STATUS===`)
+  let mergedSwitchFdbTxt = switchFdbTxt;
+  if (netDevStatusJson && typeof netDevStatusJson === 'object') {
+    const portCapLines = [];
+    for (const [ifn, info] of Object.entries(netDevStatusJson)) {
+      if (!info || typeof info !== 'object') continue;
+      let maxSpd = 0;
+      const modes = [
+        ...(Array.isArray(info['link-supported']) ? info['link-supported'] : []),
+        ...(Array.isArray(info['link-advertising']) ? info['link-advertising'] : []),
+      ];
+      for (const m of modes) {
+        const match = String(m).match(/^(\d+)base/i);
+        if (match) {
+          const spd = parseInt(match[1], 10);
+          if (spd > maxSpd) maxSpd = spd;
+        }
+      }
+      const curMatch = String(info.speed || '').match(/^(\d+)/);
+      const curSpd = curMatch ? parseInt(curMatch[1], 10) : '';
+      const carr = info.carrier === true ? '1' : info.carrier === false ? '0' : '';
+      const up = info.up === true ? '1' : info.up === false ? '0' : '';
+      if (maxSpd > 0 || curSpd || carr !== '' || up !== '') {
+        portCapLines.push(`PORTCAP|${ifn}|${maxSpd || ''}|${curSpd}|${carr}|${up}`);
+      }
+    }
+    if (portCapLines.length > 0) {
+      mergedSwitchFdbTxt = mergedSwitchFdbTxt
+        ? `${mergedSwitchFdbTxt}\n${portCapLines.join('\n')}`
+        : portCapLines.join('\n');
+    }
+  }
   const sampleDtSec = prevSample?.timestamp ? Math.max(1, (nowMs - prevSample.timestamp) / 1000) : 10;
   const { switchPorts, fdbByMac, hostInterfaces, allHostMacs, defaultRoute } = parseSwitchFdbSection(
-    switchFdbTxt,
+    mergedSwitchFdbTxt,
     iwInterfaces,
     {
       wanDev,

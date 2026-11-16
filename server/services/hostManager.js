@@ -155,7 +155,7 @@ export class HostManager {
     if (Array.isArray(telemetry.allMacs) && telemetry.allMacs.length > 0) {
       host.allMacs = telemetry.allMacs;
     }
-    if (Array.isArray(telemetry.hostInterfaces)) {
+    if (Array.isArray(telemetry.hostInterfaces) && (!telemetry.isPartialFallback || telemetry.hostInterfaces.length > 0)) {
       host.hostInterfaces = telemetry.hostInterfaces;
     }
     if (telemetry.defaultRoute) {
@@ -167,7 +167,7 @@ export class HostManager {
     host.rxRateBps = telemetry.rxRateBps || 0;
     host.txRateBps = telemetry.txRateBps || 0;
     if (telemetry.wan) host.wan = telemetry.wan;
-    if (Array.isArray(telemetry.radios)) {
+    if (Array.isArray(telemetry.radios) && (!telemetry.isPartialFallback || telemetry.radios.length > 0)) {
       host.radios = telemetry.radios;
       this.liveRadiosByHost.set(host.id, telemetry.radios);
       if (telemetry.radios.length === 0) {
@@ -181,7 +181,7 @@ export class HostManager {
         this.liveNeighborsByHost.set(host.id, telemetry.neighbors);
       }
     }
-    if (Array.isArray(telemetry.clients)) {
+    if (Array.isArray(telemetry.clients) && (!telemetry.isPartialFallback || telemetry.clients.length > 0 || !this.liveClientsByHost.has(host.id))) {
       host.clientCount = telemetry.clients.length;
       this.liveClientsByHost.set(host.id, telemetry.clients);
 
@@ -195,19 +195,19 @@ export class HostManager {
         }
       }
     }
-    if (telemetry.dhcpMap) {
+    if (telemetry.dhcpMap && (!telemetry.isPartialFallback || Object.keys(telemetry.dhcpMap).length > 0 || !this.dhcpByHost.has(host.id))) {
       this.dhcpByHost.set(host.id, telemetry.dhcpMap);
     }
-    if (telemetry.arpMap) {
+    if (telemetry.arpMap && (!telemetry.isPartialFallback || Object.keys(telemetry.arpMap).length > 0 || !this.arpByHost.has(host.id))) {
       this.arpByHost.set(host.id, telemetry.arpMap);
     }
-    if (telemetry.rdnsMap) {
+    if (telemetry.rdnsMap && (!telemetry.isPartialFallback || Object.keys(telemetry.rdnsMap).length > 0 || !this.rdnsByHost.has(host.id))) {
       this.rdnsByHost.set(host.id, telemetry.rdnsMap);
     }
-    if (telemetry.fdbMap) {
+    if (telemetry.fdbMap && (!telemetry.isPartialFallback || Object.keys(telemetry.fdbMap).length > 0 || !this.fdbByHost.has(host.id))) {
       this.fdbByHost.set(host.id, telemetry.fdbMap);
     }
-    if (Array.isArray(telemetry.switchPorts)) {
+    if (Array.isArray(telemetry.switchPorts) && (!telemetry.isPartialFallback || telemetry.switchPorts.length > 0)) {
       host.switchPorts = telemetry.switchPorts;
       this.switchPortsByHost.set(host.id, telemetry.switchPorts);
     }

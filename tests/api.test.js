@@ -1497,4 +1497,65 @@ test('LAN Port Hardware Capability (maxSpeedMbps): parses PORTCAP and infers def
   assert.equal(uLan2.linkUp, true);
   assert.equal(uLan3.status, 'down');
   assert.equal(uLan3.linkUp, false);
+
+  // Verify ===NETDEV_STATUS=== JSON parsing in parseSshTelemetryOutput and partial fallback preservation
+  const fullSshWithNetdevStatus = [
+    '===BOARD===',
+    JSON.stringify({ hostname: 'Switch-Core', model: 'ZyXEL GS1900-24' }),
+    '===UPTIME===',
+    '3600.00 3000.00',
+    '===DHCP===',
+    '1700000000 aa:bb:cc:dd:ee:99 192.168.1.99 Workstation-PC *',
+    '===NETDEV_STATUS===',
+    JSON.stringify({
+      lan1: {
+        up: true,
+        carrier: true,
+        speed: '100F',
+        'link-supported': ['10baseT-H', '10baseT-F', '100baseT-H', '100baseT-F', '1000baseT-F'],
+      },
+      lan2: {
+        up: true,
+        carrier: true,
+        speed: '1000F',
+        'link-supported': ['100baseT-F', '1000baseT-F', '2500baseT-F'],
+      },
+    }),
+    '===SWITCH_FDB===',
+    'BRPORT|switch|lan1|0x1|100|full|up|1|00:11:22:33:44:01',
+    'BRPORT|switch|lan2|0x2|1000|full|up|1|00:11:22:33:44:02',
+    'FDB|aa:bb:cc:dd:ee:99|lan1|switch|1',
+  ].join('\n');
+
+  const swHost = await hostManager.createHost({
+    id: 'sw-netdev-test',
+    name: 'Switch Core',
+    ip: '192.168.1.3',
+    role: 'switch',
+  });
+  const parsedFull = parseSshTelemetryOutput(swHost, fullSshWithNetdevStatus);
+  assert.equal(parsedFull.switchPorts.find((p) => p.iface === 'lan1')?.speedMbps, 100);
+  assert.equal(parsedFull.switchPorts.find((p) => p.iface === 'lan1')?.maxSpeedMbps, 1000);
+  assert.equal(parsedFull.switchPorts.find((p) => p.iface === 'lan2')?.speedMbps, 1000);
+  assert.equal(parsedFull.switchPorts.find((p) => p.iface === 'lan2')?.maxSpeedMbps, 2500);
+
+  const allDbHosts = await db.getHosts();
+  const dbSwHost = allDbHosts.find((h) => h.id === 'sw-netdev-test');
+  hostManager.applyTelemetryToHost(dbSwHost, parsedFull);
+  assert.ok(hostManager.getLiveClients().some((c) => c.mac.toLowerCase() === 'aa:bb:cc:dd:ee:99'));
+
+  // Simulate a subsequent partial fallback poll with empty clients/dhcpMap and ensure existing client data is preserved
+  hostManager.applyTelemetryToHost(dbSwHost, {
+    online: true,
+    isPartialFallback: true,
+    uptimeSec: 3630,
+    clients: [],
+    dhcpMap: {},
+    arpMap: {},
+    fdbMap: {},
+    switchPorts: [],
+  });
+  assert.ok(hostManager.getLiveClients().some((c) => c.mac.toLowerCase() === 'aa:bb:cc:dd:ee:99'));
+
+  await hostManager.deleteHost('sw-netdev-test', true);
 });
