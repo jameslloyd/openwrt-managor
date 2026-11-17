@@ -122,3 +122,115 @@
 :root:has(> head > meta[name="color-scheme"][content="light"]) {
   color-scheme: light;
 }
+
+/* ==========================================================================
+   Component-Specific Light / Dark Theme for Editing & Inspector Panes
+   (modern-web-guidance: component-specific-light-dark-theme & child-state-based-styling)
+   ========================================================================== */
+:root {
+  /* Explicit light/dark fallback tokens for browsers without light-dark() */
+  --light-canvas: #f8fafc;
+  --dark-canvas: #0f172a;
+  --light-surface: #ffffff;
+  --dark-surface: #1e293b;
+  --light-surface-elevated: #f1f5f9;
+  --dark-surface-elevated: #253348;
+  --light-surface-hover: #e2e8f0;
+  --dark-surface-hover: #334155;
+  --light-border: #cbd5e1;
+  --dark-border: #334155;
+  --light-border-subtle: #e2e8f0;
+  --dark-border-subtle: #1e293b;
+  --light-text-primary: #0f172a;
+  --dark-text-primary: #f8fafc;
+  --light-text-secondary: #475569;
+  --dark-text-secondary: #94a3b8;
+  --light-text-inverse: #f8fafc;
+  --dark-text-inverse: #0f172a;
+  --light-warning-text: #92400e;
+  --dark-warning-text: #fbbf24;
+  --light-diff-add-text: #065f46;
+  --dark-diff-add-text: #34d399;
+  --light-diff-del-text: #991b1b;
+  --dark-diff-del-text: #f87171;
+}
+
+:is(dialog, .inspector-drawer)[data-pane-theme="light"],
+:is(dialog, .inspector-drawer):has(.pane-theme-btn[data-pane-theme-choice="light"][aria-pressed="true"]) {
+  color-scheme: only light;
+  /* Re-specify inherited light-dark() tokens at computed-value time + fallback variables */
+  --color-canvas: light-dark(var(--light-canvas), var(--dark-canvas));
+  --color-surface: light-dark(var(--light-surface), var(--dark-surface));
+  --color-surface-elevated: light-dark(var(--light-surface-elevated), var(--dark-surface-elevated));
+  --color-surface-hover: light-dark(var(--light-surface-hover), var(--dark-surface-hover));
+  --color-border: light-dark(var(--light-border), var(--dark-border));
+  --color-border-subtle: light-dark(var(--light-border-subtle), var(--dark-border-subtle));
+  --color-text-primary: light-dark(var(--light-text-primary), var(--dark-text-primary));
+  --color-text-secondary: light-dark(var(--light-text-secondary), var(--dark-text-secondary));
+  --color-text-muted: light-dark(var(--light-text-secondary), var(--dark-text-secondary));
+  --color-text-inverse: light-dark(var(--light-text-inverse), var(--dark-text-inverse));
+  --color-warning-text: light-dark(var(--light-warning-text), var(--dark-warning-text));
+  --color-diff-add-text: light-dark(var(--light-diff-add-text), var(--dark-diff-add-text));
+  --color-diff-del-text: light-dark(var(--light-diff-del-text), var(--dark-diff-del-text));
+  background-color: var(--color-surface);
+  color: var(--color-text-primary);
+  border-color: var(--color-border);
+  accent-color: var(--color-primary);
+}
+
+:is(dialog, .inspector-drawer)[data-pane-theme="dark"],
+:is(dialog, .inspector-drawer):has(.pane-theme-btn[data-pane-theme-choice="dark"][aria-pressed="true"]) {
+  color-scheme: only dark;
+  /* Re-specify inherited light-dark() tokens at computed-value time + fallback variables */
+  --color-canvas: light-dark(var(--light-canvas), var(--dark-canvas));
+  --color-surface: light-dark(var(--light-surface), var(--dark-surface));
+  --color-surface-elevated: light-dark(var(--light-surface-elevated), var(--dark-surface-elevated));
+  --color-surface-hover: light-dark(var(--light-surface-hover), var(--dark-surface-hover));
+  --color-border: light-dark(var(--light-border), var(--dark-border));
+  --color-border-subtle: light-dark(var(--light-border-subtle), var(--dark-border-subtle));
+  --color-text-primary: light-dark(var(--light-text-primary), var(--dark-text-primary));
+  --color-text-secondary: light-dark(var(--light-text-secondary), var(--dark-text-secondary));
+  --color-text-muted: light-dark(var(--light-text-secondary), var(--dark-text-secondary));
+  --color-text-inverse: light-dark(var(--light-text-inverse), var(--dark-text-inverse));
+  --color-warning-text: light-dark(var(--light-warning-text), var(--dark-warning-text));
+  --color-diff-add-text: light-dark(var(--light-diff-add-text), var(--dark-diff-add-text));
+  --color-diff-del-text: light-dark(var(--light-diff-del-text), var(--dark-diff-del-text));
+  background-color: var(--color-surface);
+  color: var(--color-text-primary);
+  border-color: var(--color-border);
+  accent-color: var(--color-primary);
+}
+
+@supports not (color: light-dark(white, black)) {
+  :is(dialog, .inspector-drawer)[data-pane-theme="light"] {
+    --color-canvas: var(--light-canvas);
+    --color-surface: var(--light-surface);
+    --color-surface-elevated: var(--light-surface-elevated);
+    --color-surface-hover: var(--light-surface-hover);
+    --color-border: var(--light-border);
+    --color-border-subtle: var(--light-border-subtle);
+    --color-text-primary: var(--light-text-primary);
+    --color-text-secondary: var(--light-text-secondary);
+    --color-text-muted: var(--light-text-secondary);
+    --color-text-inverse: var(--light-text-inverse);
+    --color-warning-text: var(--light-warning-text);
+    --color-diff-add-text: var(--light-diff-add-text);
+    --color-diff-del-text: var(--light-diff-del-text);
+  }
+
+  :is(dialog, .inspector-drawer)[data-pane-theme="dark"] {
+    --color-canvas: var(--dark-canvas);
+    --color-surface: var(--dark-surface);
+    --color-surface-elevated: var(--dark-surface-elevated);
+    --color-surface-hover: var(--dark-surface-hover);
+    --color-border: var(--dark-border);
+    --color-border-subtle: var(--dark-border-subtle);
+    --color-text-primary: var(--dark-text-primary);
+    --color-text-secondary: var(--dark-text-secondary);
+    --color-text-muted: var(--dark-text-secondary);
+    --color-text-inverse: var(--dark-text-inverse);
+    --color-warning-text: var(--dark-warning-text);
+    --color-diff-add-text: var(--dark-diff-add-text);
+    --color-diff-del-text: var(--dark-diff-del-text);
+  }
+}

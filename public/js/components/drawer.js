@@ -6,6 +6,7 @@
 import { store } from '../store.js';
 import { api } from '../api.js';
 import { toast } from './toast.js';
+import { renderPaneThemeToggle, syncPaneTheme } from './modal.js';
 import { formatBytes, formatBps, formatUptime, formatRssi, formatSwitchPort, formatMac, escapeHtml, resolveClientSideVendor } from '../utils/formatters.js';
 import { renderIcon } from '../utils/icons.js';
 import { openHostUpdatesModal } from '../views/hosts.js';
@@ -77,6 +78,7 @@ export function isDrawerOpen() {
 export function openDrawer(triggerEl = null) {
   if (!drawerEl) return;
   lastDrawerTrigger = triggerEl || document.activeElement;
+  syncPaneTheme(drawerEl);
   drawerEl.hidden = false;
   drawerEl.classList.add('open');
   if (backdropEl) {
@@ -180,13 +182,16 @@ export function renderNodeDetails(node) {
 
   drawerEl.innerHTML = `
     <div class="drawer-header">
-      <div style="display: flex; align-items: center; gap: 8px;">
+      <div style="display: flex; align-items: center; gap: 8px; min-width: 0;">
         <span class="status-dot ${node.status === 'online' ? 'online' : 'offline'}"></span>
-        <h2 id="drawer-title" class="modal-title" style="font-size: 15px;">${escapeHtml(node.label || node.id)}</h2>
+        <h2 id="drawer-title" class="modal-title" style="font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(node.label || node.id)}</h2>
       </div>
-      <button type="button" class="btn-icon drawer-close-btn" aria-label="Close drawer">
-        ${renderIcon('x', 'icon')}
-      </button>
+      <div class="drawer-header-actions">
+        ${renderPaneThemeToggle()}
+        <button type="button" class="btn-icon drawer-close-btn" aria-label="Close drawer">
+          ${renderIcon('x', 'icon')}
+        </button>
+      </div>
     </div>
     <div class="drawer-body">
       <!-- General Specs -->
@@ -350,13 +355,16 @@ export function renderClientDetails(client) {
 
   drawerEl.innerHTML = `
     <div class="drawer-header">
-      <div style="display: flex; align-items: center; gap: 8px;">
+      <div style="display: flex; align-items: center; gap: 8px; min-width: 0;">
         ${renderIcon(isWired ? 'server' : 'wifi', 'icon')}
-        <h2 id="drawer-title" class="modal-title" style="font-size: 15px;">${escapeHtml(client.hostname || client.ip)}</h2>
+        <h2 id="drawer-title" class="modal-title" style="font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(client.hostname || client.ip)}</h2>
       </div>
-      <button type="button" class="btn-icon drawer-close-btn" aria-label="Close drawer">
-        ${renderIcon('x', 'icon')}
-      </button>
+      <div class="drawer-header-actions">
+        ${renderPaneThemeToggle()}
+        <button type="button" class="btn-icon drawer-close-btn" aria-label="Close drawer">
+          ${renderIcon('x', 'icon')}
+        </button>
+      </div>
     </div>
     <div class="drawer-body">
       <!-- Identity & Vendor -->

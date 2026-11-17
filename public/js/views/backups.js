@@ -7,7 +7,7 @@
 import { store } from '../store.js';
 import { api } from '../api.js';
 import { toast } from '../components/toast.js';
-import { openModal, closeModal, confirmAction } from '../components/modal.js';
+import { openModal, closeModal, confirmAction, renderPaneThemeToggle } from '../components/modal.js';
 import { renderDiff } from '../utils/diff-viewer.js';
 import { formatBytes, formatRelativeTime, escapeHtml } from '../utils/formatters.js';
 import { renderIcon } from '../utils/icons.js';
@@ -405,9 +405,12 @@ function renderBackupModals(activeSched = {}, retentionCount = 14) {
     <dialog id="backup-files-dialog" aria-labelledby="files-modal-title">
       <div class="modal-header">
         <h2 id="files-modal-title" class="modal-title">Inspect UCI Configuration Files</h2>
-        <button type="button" class="btn-icon" onclick="document.getElementById('backup-files-dialog').close()" aria-label="Close">
-          ${renderIcon('x', 'icon')}
-        </button>
+        <div class="modal-header-actions">
+          ${renderPaneThemeToggle()}
+          <button type="button" class="btn-icon" onclick="document.getElementById('backup-files-dialog').close()" aria-label="Close">
+            ${renderIcon('x', 'icon')}
+          </button>
+        </div>
       </div>
       <div class="modal-body" style="gap: 16px;">
         <div style="font-size: 12.5px; color: var(--color-text-secondary);" id="inspector-backup-meta"></div>
@@ -427,9 +430,12 @@ function renderBackupModals(activeSched = {}, retentionCount = 14) {
     <dialog id="backup-diff-dialog" aria-labelledby="diff-modal-title" style="max-width: 860px;">
       <div class="modal-header">
         <h2 id="diff-modal-title" class="modal-title">Side-by-Side UCI Configuration Diff</h2>
-        <button type="button" class="btn-icon" onclick="document.getElementById('backup-diff-dialog').close()" aria-label="Close">
-          ${renderIcon('x', 'icon')}
-        </button>
+        <div class="modal-header-actions">
+          ${renderPaneThemeToggle()}
+          <button type="button" class="btn-icon" onclick="document.getElementById('backup-diff-dialog').close()" aria-label="Close">
+            ${renderIcon('x', 'icon')}
+          </button>
+        </div>
       </div>
       <div class="modal-body" style="gap: 12px;">
         <div class="diff-file-selector" style="border-radius: var(--radius-md);">
@@ -455,9 +461,12 @@ function renderBackupModals(activeSched = {}, retentionCount = 14) {
     <dialog id="schedule-config-dialog" aria-labelledby="sched-modal-title">
       <div class="modal-header">
         <h2 id="sched-modal-title" class="modal-title">Configure TrueNAS Automated Backup Schedule</h2>
-        <button type="button" class="btn-icon" onclick="document.getElementById('schedule-config-dialog').close()" aria-label="Close">
-          ${renderIcon('x', 'icon')}
-        </button>
+        <div class="modal-header-actions">
+          ${renderPaneThemeToggle()}
+          <button type="button" class="btn-icon" onclick="document.getElementById('schedule-config-dialog').close()" aria-label="Close">
+            ${renderIcon('x', 'icon')}
+          </button>
+        </div>
       </div>
       <div class="modal-body">
         <div class="form-group">

@@ -6,7 +6,7 @@
 import { store } from '../store.js';
 import { api } from '../api.js';
 import { toast } from '../components/toast.js';
-import { openModal, closeModal, confirmAction } from '../components/modal.js';
+import { openModal, closeModal, confirmAction, renderPaneThemeToggle } from '../components/modal.js';
 import { formatUptime, formatMac, formatRelativeTime, escapeHtml, resolveClientSideVendor } from '../utils/formatters.js';
 import { renderIcon } from '../utils/icons.js';
 
@@ -126,9 +126,12 @@ export function renderHosts(container) {
     <dialog id="host-updates-dialog" aria-labelledby="updates-modal-title" style="max-width: 780px;">
       <div class="modal-header">
         <h2 id="updates-modal-title" class="modal-title">Software Packages &amp; Attended Sysupgrade</h2>
-        <button type="button" class="btn-icon" onclick="document.getElementById('host-updates-dialog').close()" aria-label="Close">
-          ${renderIcon('x', 'icon')}
-        </button>
+        <div class="modal-header-actions">
+          ${renderPaneThemeToggle()}
+          <button type="button" class="btn-icon" onclick="document.getElementById('host-updates-dialog').close()" aria-label="Close">
+            ${renderIcon('x', 'icon')}
+          </button>
+        </div>
       </div>
       <div class="modal-body" id="host-updates-modal-body" style="gap: 16px;"></div>
       <div class="modal-footer">
@@ -141,9 +144,12 @@ export function renderHosts(container) {
       <form id="host-form" method="dialog">
         <div class="modal-header">
           <h2 id="host-modal-title" class="modal-title">Add OpenWrt Node</h2>
-          <button type="button" class="btn-icon" onclick="document.getElementById('host-form-dialog').close()" aria-label="Close">
-            ${renderIcon('x', 'icon')}
-          </button>
+          <div class="modal-header-actions">
+            ${renderPaneThemeToggle()}
+            <button type="button" class="btn-icon" onclick="document.getElementById('host-form-dialog').close()" aria-label="Close">
+              ${renderIcon('x', 'icon')}
+            </button>
+          </div>
         </div>
 
         <div class="modal-body">

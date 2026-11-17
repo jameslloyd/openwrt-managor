@@ -5,8 +5,94 @@
  */
 
 import { escapeHtml } from '../utils/formatters.js';
+import { renderIcon } from '../utils/icons.js';
 
 let lastActiveTrigger = null;
+let paneThemeDelegationBound = false;
+
+const PANE_THEME_STORAGE_KEY = 'editing-pane-theme';
+
+export function getPaneTheme() {
+  try {
+    const saved = localStorage.getItem(PANE_THEME_STORAGE_KEY);
+    if (saved === 'light' || saved === 'dark') return saved;
+    const globalTheme = localStorage.getItem('color-scheme');
+    if (globalTheme === 'light' || globalTheme === 'dark') return globalTheme;
+  } catch {}
+  const meta = typeof document !== 'undefined' ? document.querySelector('meta[name="color-scheme"]') : null;
+  if (meta && meta.content === 'light') return 'light';
+  return 'dark';
+}
+
+export function syncPaneTheme(targetEl = null) {
+  if (typeof document === 'undefined') return;
+  ensurePaneThemeDelegation();
+  const theme = getPaneTheme();
+  const panes = targetEl
+    ? [targetEl]
+    : Array.from(document.querySelectorAll('dialog, .inspector-drawer'));
+
+  panes.forEach((pane) => {
+    if (!pane) return;
+    pane.setAttribute('data-pane-theme', theme);
+    pane.querySelectorAll('.pane-theme-btn[data-pane-theme-choice]').forEach((btn) => {
+      const isMatch = btn.getAttribute('data-pane-theme-choice') === theme;
+      btn.classList.toggle('active', isMatch);
+      btn.setAttribute('aria-pressed', isMatch ? 'true' : 'false');
+    });
+  });
+}
+
+export function setPaneTheme(theme) {
+  const normalized = theme === 'light' ? 'light' : 'dark';
+  try {
+    localStorage.setItem(PANE_THEME_STORAGE_KEY, normalized);
+  } catch {}
+  syncPaneTheme();
+}
+
+function ensurePaneThemeDelegation() {
+  if (paneThemeDelegationBound || typeof document === 'undefined') return;
+  paneThemeDelegationBound = true;
+  document.addEventListener('click', (e) => {
+    const btn = e.target?.closest?.('.pane-theme-btn[data-pane-theme-choice]');
+    if (!btn) return;
+    e.preventDefault();
+    const choice = btn.getAttribute('data-pane-theme-choice');
+    if (choice === 'light' || choice === 'dark') {
+      setPaneTheme(choice);
+    }
+  });
+}
+
+export function renderPaneThemeToggle() {
+  ensurePaneThemeDelegation();
+  const current = getPaneTheme();
+  return `
+    <div class="pane-theme-switcher" role="group" aria-label="Editing pane color theme">
+      <button
+        type="button"
+        class="pane-theme-btn ${current === 'light' ? 'active' : ''}"
+        data-pane-theme-choice="light"
+        aria-pressed="${current === 'light' ? 'true' : 'false'}"
+        title="Light theme for editing pane"
+      >
+        ${renderIcon('sun', 'icon icon-sm')}
+        <span>Light</span>
+      </button>
+      <button
+        type="button"
+        class="pane-theme-btn ${current === 'dark' ? 'active' : ''}"
+        data-pane-theme-choice="dark"
+        aria-pressed="${current === 'dark' ? 'true' : 'false'}"
+        title="Dark theme for editing pane"
+      >
+        ${renderIcon('moon', 'icon icon-sm')}
+        <span>Dark</span>
+      </button>
+    </div>
+  `;
+}
 
 export function setupDialogLightDismiss(dialog) {
   if (!dialog) return;
@@ -55,6 +141,7 @@ export function openModal(dialogOrId, triggerEl = null) {
 
   lastActiveTrigger = triggerEl || document.activeElement;
   setupDialogLightDismiss(dialog);
+  syncPaneTheme(dialog);
 
   try {
     dialog.showModal();
@@ -83,9 +170,12 @@ export function confirmAction({ title, message, confirmLabel = 'Confirm', isDest
       <form method="dialog" class="modal-content">
         <div class="modal-header">
           <h2 id="confirm-modal-title" class="modal-title">${escapeHtml(title)}</h2>
-          <button type="button" class="btn-icon modal-close-btn" aria-label="Close dialog">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:16px;height:16px;"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-          </button>
+          <div class="modal-header-actions">
+            ${renderPaneThemeToggle()}
+            <button type="button" class="btn-icon modal-close-btn" aria-label="Close dialog">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:16px;height:16px;"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </button>
+          </div>
         </div>
         <div class="modal-body">
           <p style="font-size: 13.5px; line-height: 1.5; color: var(--color-text-secondary);">${escapeHtml(message)}</p>
