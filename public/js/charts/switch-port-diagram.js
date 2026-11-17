@@ -595,20 +595,87 @@ export class SwitchPortDiagram {
 
     const hostGapX = 32;
     const tierGapY = 86;
-    const dumbBoxW = 205;
-    const dumbBoxH = 54;
 
-    // Count total potential width per tier so svgW is wide enough for all chassis and dumb switches
-    const totalDumbSwitches = this.hosts.reduce((acc, h) => {
+    // Dynamically size each Dumb Switch box so every attached host can be read in full
+    const measureDumbSwitchBox = (host, port, usw) => {
+      const rawDevices =
+        Array.isArray(usw?.devices) && usw.devices.length > 0
+          ? usw.devices
+          : Array.isArray(port?.connectedDevices)
+            ? port.connectedDevices
+            : [];
+      const deviceEntries = rawDevices.map((d) => {
+        const primary = d.hostname || d.ip || d.mac || 'Host';
+        const secondary =
+          d.hostname && d.ip && d.ip !== '0.0.0.0'
+            ? ` (${d.ip})`
+            : !d.hostname && d.ip && d.mac
+              ? ` (${d.mac})`
+              : '';
+        return {
+          device: d,
+          label: `${primary}${secondary}`,
+          isInfra:
+            d.type === 'ap' ||
+            d.type === 'gateway' ||
+            d.type === 'switch' ||
+            d.type === 'mesh',
+        };
+      });
+
+      const devCount = deviceEntries.length || usw?.deviceCount || 2;
+      const titleText = `Dumb Switch (${port.switchPort || port.iface})`;
+      const subText = `${devCount} Hosts on ${host.name || host.hostname || host.id}`;
+      const cols = deviceEntries.length > 4 ? 2 : 1;
+      const rows = Math.max(1, Math.ceil(deviceEntries.length / cols));
+      const maxEntryChars = deviceEntries.reduce(
+        (maxLen, e) => Math.max(maxLen, e.label.length),
+        18
+      );
+      const colW = Math.max(155, Math.ceil(maxEntryChars * 6.1) + 22);
+      const headerMinW = Math.max(
+        Math.ceil(titleText.length * 7.0) + 36,
+        Math.ceil(subText.length * 6.1) + 28
+      );
+      const contentW = cols * colW + (cols - 1) * 14 + 24;
+      const w = Math.max(215, headerMinW, contentW);
+      const headerH = 40;
+      const rowH = 16;
+      const h = headerH + rows * rowH + 12;
+
+      return {
+        w,
+        h,
+        cols,
+         rows,
+        colW,
+        headerH,
+        rowH,
+        titleText,
+        subText,
+        deviceEntries,
+      };
+    };
+
+    // Count total potential width per tier so svgW is wide enough for all chassis and expanded dumb switches
+    let totalDumbSwitchesW = 0;
+    let totalDumbSwitchesCount = 0;
+    this.hosts.forEach((h) => {
       const ports = this.normalizeHostPorts(h);
-      return acc + ports.filter((p) => p.hasUnmanagedSwitch).length;
-    }, 0);
+      ports.forEach((p) => {
+        if (p.hasUnmanagedSwitch) {
+          const metrics = measureDumbSwitchBox(h, p, p.unmanagedSwitch);
+          totalDumbSwitchesW += metrics.w;
+          totalDumbSwitchesCount += 1;
+        }
+      });
+    });
     const switchTierEstW =
       switchSpecs.reduce((acc, s) => acc + s.w, 0) + Math.max(0, switchSpecs.length - 1) * hostGapX;
     const apAndDumbEstW =
       apSpecs.reduce((acc, s) => acc + s.w, 0) +
-      totalDumbSwitches * dumbBoxW +
-      Math.max(0, apSpecs.length + totalDumbSwitches - 1) * hostGapX;
+      totalDumbSwitchesW +
+      Math.max(0, apSpecs.length + totalDumbSwitchesCount - 1) * hostGapX;
     const maxTierW = Math.max(gwSpec.w, switchTierEstW, apAndDumbEstW);
 
     const svgW = Math.max(920, maxTierW + 96);
@@ -862,18 +929,27 @@ export class SwitchPortDiagram {
     let currentY = 18;
 
     const renderDumbSwitchItem = (item, bx, by) => {
-      const { host, port, coord, usw } = item;
-      const devNames = (usw.devices || [])
-        .map((d) => d.hostname || d.ip || d.mac)
-        .filter(Boolean)
-        .join(', ');
-      const bCenterX = bx + dumbBoxW / 2;
+      const { host, port, coord, usw, metrics } = item;
+      const boxW = item.w;
+      const boxH = item.h;
+      const {
+        cols,
+        colW,
+        headerH,
+        rowH,
+        titleText,
+        subText,
+        deviceEntries,
+      } = metrics || measureDumbSwitchBox(host, port, usw);
+
+      const devNames = deviceEntries.map((e) => e.label).join(', ');
+      const bCenterX = bx + boxW / 2;
       const swCoord = {
         x: bx,
         y: by,
         centerX: bCenterX,
         topY: by,
-        bottomY: by + dumbBoxH,
+        bottomY: by + boxH,
         host,
         port,
         usw,
@@ -898,21 +974,43 @@ export class SwitchPortDiagram {
         </g>
       `;
 
+      let hostsListSvg = '';
+      deviceEntries.forEach((entry, idx) => {
+        const r = Math.floor(idx / cols);
+        const c = idx % cols;
+        const itemX = bx + 14 + c * (colW + 14);
+        const itemY = by + headerH + 14 + r * rowH;
+        const dotColor = entry.isInfra ? 'var(--color-primary)' : 'var(--color-warning)';
+        const textColor = entry.isInfra ? 'var(--color-primary)' : 'var(--color-text-secondary)';
+        hostsListSvg += `
+          <g class="sw-svg-dumb-host"
+             data-host-id="${escapeHtml(entry.device?.id || '')}"
+             data-client-mac="${escapeHtml(entry.device?.mac || '')}"
+             style="cursor: pointer;">
+            <circle cx="${itemX}" cy="${itemY - 3.5}" r="3" fill="${dotColor}" />
+            <text x="${itemX + 8}" y="${itemY}" font-size="9.5" font-weight="${entry.isInfra ? '700' : '500'}"
+                  fill="${textColor}" font-family="var(--font-mono)">
+              ${escapeHtml(entry.label)}
+            </text>
+          </g>
+        `;
+      });
+
       dumbSwNodesSvg += `
         <g class="sw-svg-dumb-switch" data-host-id="${escapeHtml(host.id)}" style="cursor: pointer;">
           <title>${escapeHtml(`${usw.name} on ${host.name || host.hostname} (${port.portLabel || port.iface}) — ${usw.deviceCount} hosts: ${devNames}`)}</title>
-          <rect x="${bx}" y="${by}" width="${dumbBoxW}" height="${dumbBoxH}" rx="8"
+          <rect x="${bx}" y="${by}" width="${boxW}" height="${boxH}" rx="8"
                 fill="var(--color-surface-elevated)" stroke="var(--color-warning)" stroke-width="1.8" stroke-dasharray="5,3" />
           <circle cx="${bx + 14}" cy="${by + 16}" r="4" fill="var(--color-warning)" />
           <text x="${bx + 24}" y="${by + 19}" font-size="11" font-weight="700" fill="var(--color-text-primary)">
-            ${escapeHtml(truncateText(`Dumb Switch (${port.switchPort || port.iface})`, 25))}
+            ${escapeHtml(titleText)}
           </text>
           <text x="${bx + 14}" y="${by + 33}" font-size="9.5" font-weight="600" fill="var(--color-warning)" font-family="var(--font-mono)">
-            ${escapeHtml(`${usw.deviceCount} Hosts on ${host.name || host.hostname}`)}
+            ${escapeHtml(subText)}
           </text>
-          <text x="${bx + 14}" y="${by + 45}" font-size="9" fill="var(--color-text-muted)">
-            ${escapeHtml(truncateText(devNames, 29))}
-          </text>
+          <line x1="${bx + 10}" y1="${by + headerH}" x2="${bx + boxW - 10}" y2="${by + headerH}"
+                stroke="var(--color-border-subtle)" stroke-width="1" />
+          ${hostsListSvg}
         </g>
       `;
     };
@@ -924,22 +1022,25 @@ export class SwitchPortDiagram {
           if (p.hasUnmanagedSwitch) {
             const coord = portJackCoords.get(`${spec.host.id}:${p.iface}`);
             if (coord) {
+              const usw = p.unmanagedSwitch || {
+                id: `unmanaged-switch-${spec.host.id}-${p.iface}`,
+                name: `Unmanaged Switch (${p.switchPort || p.iface})`,
+                deviceCount: Array.isArray(p.connectedDevices) ? p.connectedDevices.length : 2,
+                devices: p.connectedDevices || [],
+              };
+              const metrics = measureDumbSwitchBox(spec.host, p, usw);
               items.push({
                 kind: 'dumb_switch',
-                w: dumbBoxW,
-                h: dumbBoxH,
+                w: metrics.w,
+                h: metrics.h,
+                metrics,
                 targetX: coord.x,
                 targetRow: coord.row ?? 0,
                 orderIdx: pIdx,
                 host: spec.host,
                 port: p,
                 coord,
-                usw: p.unmanagedSwitch || {
-                  id: `unmanaged-switch-${spec.host.id}-${p.iface}`,
-                  name: `Unmanaged Switch (${p.switchPort || p.iface})`,
-                  deviceCount: Array.isArray(p.connectedDevices) ? p.connectedDevices.length : 2,
-                  devices: p.connectedDevices || [],
-                },
+                usw,
               });
             }
           }
@@ -1158,6 +1259,27 @@ export class SwitchPortDiagram {
         const hostId = el.getAttribute('data-host-id');
         const host = this.hosts.find((h) => h.id === hostId);
         if (host && this.onHostClick) this.onHostClick(host);
+      });
+    });
+
+    svgWrap.querySelectorAll('.sw-svg-dumb-host').forEach((el) => {
+      el.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const hostId = el.getAttribute('data-host-id');
+        const mac = el.getAttribute('data-client-mac');
+        if (hostId && hostId !== 'wan-internet') {
+          const foundHost = this.hosts.find((h) => h.id === hostId);
+          if (foundHost && this.onHostClick) {
+            this.onHostClick(foundHost);
+            return;
+          }
+        }
+        if (mac) {
+          const foundClient = this.clients.find(
+            (c) => (c.mac || '').toLowerCase() === mac.toLowerCase()
+          );
+          if (foundClient && this.onClientClick) this.onClientClick(foundClient);
+        }
       });
     });
   }

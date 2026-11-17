@@ -395,24 +395,64 @@ export class TopologyGraph {
       });
     });
 
+    // Measure node card dimensions (dumb switches expand to show all attached hosts)
+    const nodeBoxMetrics = new Map();
+    const getNodeMetrics = (node) => {
+      if (!node) return { w: 176, h: 60 };
+      if (nodeBoxMetrics.has(node.id)) return nodeBoxMetrics.get(node.id);
+      if (node.type === 'unmanaged_switch') {
+        const rawDevs = Array.isArray(node.unmanagedSwitch?.devices)
+          ? node.unmanagedSwitch.devices
+          : [];
+        const entries = rawDevs.map((d) => {
+          const primary = d.hostname || d.ip || d.mac || 'Host';
+          const secondary =
+            d.hostname && d.ip && d.ip !== '0.0.0.0' ? ` (${d.ip})` : '';
+          return `${primary}${secondary}`;
+        });
+        const cols = entries.length > 4 ? 2 : 1;
+        const rows = entries.length > 0 ? Math.ceil(entries.length / cols) : 0;
+        const maxLen = entries.reduce((m, s) => Math.max(m, s.length), 18);
+        const colW = Math.max(145, Math.ceil(maxLen * 5.8) + 18);
+        const titleStr = node.label || node.id;
+        const subStr = node.ip || '';
+        const headerW = Math.max(
+          Math.ceil(titleStr.length * 6.8) + 36,
+          Math.ceil(subStr.length * 6.0) + 32
+        );
+        const w = Math.max(205, headerW, rows > 0 ? cols * colW + (cols - 1) * 12 + 24 : 176);
+        const h = rows > 0 ? 48 + rows * 15 + 10 : 60;
+        const m = { w, h, cols, rows, colW, entries };
+        nodeBoxMetrics.set(node.id, m);
+        return m;
+      }
+      const m = { w: 176, h: 60, cols: 1, rows: 0, colW: 150, entries: [] };
+      nodeBoxMetrics.set(node.id, m);
+      return m;
+    };
+
     const getDirectClientClusterWidth = (hostId) => {
-      if (this.collapseClients) return 0;
+      const node = infraById.get(hostId);
+      const minW = (getNodeMetrics(node).w || 176) + 48;
+      if (this.collapseClients) return minW;
       const count = (clientsByHost.get(hostId) || []).length;
       if (count === 0) return 0;
       const cols = Math.min(maxColsPerCluster, Math.max(1, count));
-      return Math.max(240, cols * clientColSpacing + 48);
+      return Math.max(minW, cols * clientColSpacing + 48);
     };
 
     const subtreeWidths = new Map();
     const visitedWidth = new Set();
     const computeSubtreeWidth = (nodeId) => {
-      if (visitedWidth.has(nodeId)) return 240;
+      const node = infraById.get(nodeId);
+      const ownMinW = (getNodeMetrics(node).w || 176) + 48;
+      if (visitedWidth.has(nodeId)) return ownMinW;
       visitedWidth.add(nodeId);
       const children = childrenByParent.get(nodeId) || [];
       const directClientW = getDirectClientClusterWidth(nodeId);
 
       if (children.length === 0) {
-        const w = Math.max(240, directClientW);
+        const w = Math.max(ownMinW, directClientW);
         subtreeWidths.set(nodeId, w);
         return w;
       }
@@ -424,7 +464,7 @@ export class TopologyGraph {
       if (directClientW > 0) {
         totalChildrenW += directClientW;
       }
-      const w = Math.max(240, totalChildrenW);
+      const w = Math.max(ownMinW, totalChildrenW);
       subtreeWidths.set(nodeId, w);
       return w;
     };
@@ -439,24 +479,28 @@ export class TopologyGraph {
       const node = infraById.get(nodeId);
       if (!node) return;
 
+      const metrics = getNodeMetrics(node);
+      const extraH = Math.max(0, metrics.h - 60);
       const totalW = subtreeWidths.get(nodeId) || 240;
       const children = childrenByParent.get(nodeId) || [];
       const directClientW = getDirectClientClusterWidth(nodeId);
+      const centerY = y + extraH / 2;
 
       if (children.length === 0) {
         const cx = leftX + totalW / 2;
-        nodePositions.set(nodeId, { x: cx, y, node });
+        nodePositions.set(nodeId, { x: cx, y: centerY, node, metrics });
         if (directClientW > 0) {
-          clientClusterCenters.set(nodeId, { x: cx, y: y + 148 });
+          clientClusterCenters.set(nodeId, { x: cx, y: centerY + metrics.h / 2 + 118 });
         }
         return;
       }
 
+      const childTierY = centerY + metrics.h / 2 + tierStepY - 30;
       let cursorX = leftX;
       const childCenters = [];
       children.forEach(({ node: child }) => {
         const cw = subtreeWidths.get(child.id) || 240;
-        layoutSubtree(child.id, cursorX, y + tierStepY);
+        layoutSubtree(child.id, cursorX, childTierY);
         const cPos = nodePositions.get(child.id);
         if (cPos) childCenters.push(cPos.x);
         cursorX += cw;
@@ -465,7 +509,7 @@ export class TopologyGraph {
       if (directClientW > 0) {
         clientClusterCenters.set(nodeId, {
           x: cursorX + directClientW / 2,
-          y: y + tierStepY,
+          y: childTierY,
         });
         cursorX += directClientW;
       }
@@ -475,7 +519,7 @@ export class TopologyGraph {
         childCenters.length > 0
           ? (childCenters[0] + childCenters[childCenters.length - 1]) / 2
           : leftX + totalW / 2;
-      nodePositions.set(nodeId, { x: parentX, y, node });
+      nodePositions.set(nodeId, { x: parentX, y: centerY, node, metrics });
     };
 
     if (gwNode) {
@@ -537,8 +581,9 @@ export class TopologyGraph {
     let minY = Infinity;
     let maxY = -Infinity;
     nodePositions.forEach((pos) => {
-      const halfW = pos.node ? 95 : 65;
-      const halfH = pos.node ? 35 : 45;
+      const m = pos.metrics || (pos.node ? getNodeMetrics(pos.node) : null);
+      const halfW = m ? m.w / 2 + 8 : pos.node ? 95 : 65;
+      const halfH = m ? m.h / 2 + 8 : pos.node ? 35 : 45;
       if (pos.x - halfW < minX) minX = pos.x - halfW;
       if (pos.x + halfW > maxX) maxX = pos.x + halfW;
       if (pos.y - halfH < minY) minY = pos.y - halfH;
@@ -576,8 +621,10 @@ export class TopologyGraph {
       if (link.medium === 'wifi_mesh') mediumClass = 'wifi-mesh';
       else if (link.medium === 'wifi_station') mediumClass = 'wifi-station';
 
-      const y1 = tgtPos.y > srcPos.y ? srcPos.y + 26 : srcPos.y;
-      const y2 = tgtPos.y > srcPos.y ? tgtPos.y - 26 : tgtPos.y;
+      const srcHalfH = (srcPos.metrics?.h || 60) / 2 - 2;
+      const tgtHalfH = (tgtPos.metrics?.h || 60) / 2 - 2;
+      const y1 = tgtPos.y > srcPos.y ? srcPos.y + srcHalfH : srcPos.y;
+      const y2 = tgtPos.y > srcPos.y ? tgtPos.y - tgtHalfH : tgtPos.y;
       const midY = (y1 + y2) / 2;
       const pathD = `M ${srcPos.x} ${y1} C ${srcPos.x} ${midY}, ${tgtPos.x} ${midY}, ${tgtPos.x} ${y2}`;
       const speedText = link.speedMbps >= 1000 ? `${link.speedMbps / 1000}G` : `${link.speedMbps}M`;
@@ -634,10 +681,11 @@ export class TopologyGraph {
         const parentHostId = resolveClientParentId(c);
         const parentPos = nodePositions.get(parentHostId) || nodePositions.get(c.connectedTo?.hostId || defaultParentId);
         if (cPos && parentPos) {
-          const midY = parentPos.y + (cPos.y - parentPos.y) * 0.45;
+          const parentBottomY = parentPos.y + (parentPos.metrics?.h || 60) / 2 - 4;
+          const midY = parentBottomY + (cPos.y - parentBottomY) * 0.45;
           const isWired = c.connectionType === 'wired';
           linksSvg += `
-            <path d="M ${parentPos.x} ${parentPos.y + 24} C ${parentPos.x} ${midY}, ${cPos.x} ${midY}, ${cPos.x} ${cPos.y - 18}"
+            <path d="M ${parentPos.x} ${parentBottomY} C ${parentPos.x} ${midY}, ${cPos.x} ${midY}, ${cPos.x} ${cPos.y - 18}"
                   class="topo-link ${isWired ? 'speed-1g' : 'wifi-station'}" opacity="0.4" />
           `;
         }
@@ -653,14 +701,34 @@ export class TopologyGraph {
         const isWan = n.type === 'wan';
         const isDumbSw = n.type === 'unmanaged_switch';
         const isSelected = this.selectedNodeId === n.id;
-        const w = 176;
-        const h = 60;
+        const metrics = pos.metrics || getNodeMetrics(n);
+        const w = metrics.w;
+        const h = metrics.h;
         const nicBadge = !isWan && n.nicInfo?.localIface
           ? ` • ${n.nicInfo.localIface}`
           : '';
         const fullTitle = `${n.label || n.id} (${n.ip || (isWan ? 'Public IP' : '')}${n.nicInfo?.localPortLabel ? ` • NIC: ${n.nicInfo.localPortLabel}` : ''})`;
-        const titleText = truncateLabel(n.label || n.id, 19);
-        const subText = truncateLabel(`${n.ip || (isWan ? 'Public IP' : '')}${nicBadge}`, 22);
+        const titleText = isDumbSw ? n.label || n.id : truncateLabel(n.label || n.id, 19);
+        const subText = isDumbSw
+          ? `${n.ip || ''}${nicBadge}`
+          : truncateLabel(`${n.ip || (isWan ? 'Public IP' : '')}${nicBadge}`, 22);
+
+        let dumbHostsSvg = '';
+        if (isDumbSw && Array.isArray(metrics.entries) && metrics.entries.length > 0) {
+          dumbHostsSvg += `<line x1="10" y1="46" x2="${w - 10}" y2="46" stroke="var(--color-border-subtle)" stroke-width="1" />`;
+          metrics.entries.forEach((entryLabel, idx) => {
+            const r = Math.floor(idx / metrics.cols);
+            const c = idx % metrics.cols;
+            const ix = 14 + c * (metrics.colW + 12);
+            const iy = 60 + r * 15;
+            dumbHostsSvg += `
+              <circle cx="${ix}" cy="${iy - 3.5}" r="2.5" fill="var(--color-warning)" />
+              <text x="${ix + 7}" y="${iy}" font-size="9.5" fill="var(--color-text-secondary)" font-family="var(--font-mono)" text-anchor="start">
+                ${escapeHtml(entryLabel)}
+              </text>
+            `;
+          });
+        }
 
         nodesSvg += `
           <g class="topo-node ${isSelected ? 'selected' : ''}"
@@ -671,9 +739,10 @@ export class TopologyGraph {
              transform="translate(${pos.x - w / 2}, ${pos.y - h / 2})">
             <title>${escapeHtml(fullTitle)}</title>
             <rect width="${w}" height="${h}" class="topo-node-card" ${isDumbSw ? 'style="stroke: var(--color-warning); stroke-dasharray: 5,3;"' : ''} />
-            <circle cx="16" cy="22" r="5" fill="${isDumbSw ? 'var(--color-warning)' : n.status === 'online' ? 'var(--color-success)' : 'var(--color-danger)'}" />
-            <text x="28" y="25" class="topo-node-label" text-anchor="start">${escapeHtml(titleText)}</text>
-            <text x="28" y="44" class="topo-node-subtext" text-anchor="start">${escapeHtml(subText)}</text>
+            <circle cx="16" cy="20" r="5" fill="${isDumbSw ? 'var(--color-warning)' : n.status === 'online' ? 'var(--color-success)' : 'var(--color-danger)'}" />
+            <text x="28" y="23" class="topo-node-label" text-anchor="start">${escapeHtml(titleText)}</text>
+            <text x="28" y="39" class="topo-node-subtext" text-anchor="start">${escapeHtml(subText)}</text>
+            ${dumbHostsSvg}
           </g>
         `;
 
