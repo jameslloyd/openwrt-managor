@@ -395,7 +395,7 @@ export class TopologyGraph {
       });
     });
 
-    // Measure node card dimensions (dumb switches expand to show all attached hosts)
+    // Measure node card dimensions (dumb switches expand to show all attached hosts as a vertical list of pills)
     const nodeBoxMetrics = new Map();
     const getNodeMetrics = (node) => {
       if (!node) return { w: 176, h: 60 };
@@ -406,27 +406,44 @@ export class TopologyGraph {
           : [];
         const entries = rawDevs.map((d) => {
           const primary = d.hostname || d.ip || d.mac || 'Host';
-          const secondary =
-            d.hostname && d.ip && d.ip !== '0.0.0.0' ? ` (${d.ip})` : '';
-          return `${primary}${secondary}`;
+          const remoteNic = d.remotePortLabel || d.remoteIface || '';
+          const ipText =
+            d.ip && d.ip !== '0.0.0.0' && d.ip !== primary
+              ? d.ip
+              : !d.hostname && d.mac && d.mac !== primary
+                ? d.mac
+                : '';
+          const fullText = `${primary}${remoteNic ? ` [NIC: ${remoteNic}]` : ''}${ipText ? ` ${ipText}` : ''}`;
+          const pillW = Math.max(148, Math.ceil(fullText.length * 6.3) + 34);
+          return {
+            device: d,
+            primary,
+            remoteNic,
+            ipText,
+            label: fullText,
+            pillW,
+            isInfra:
+              d.type === 'ap' ||
+              d.type === 'gateway' ||
+              d.type === 'switch' ||
+              d.type === 'mesh',
+          };
         });
-        const cols = entries.length > 4 ? 2 : 1;
-        const rows = entries.length > 0 ? Math.ceil(entries.length / cols) : 0;
-        const maxLen = entries.reduce((m, s) => Math.max(m, s.length), 18);
-        const colW = Math.max(145, Math.ceil(maxLen * 5.8) + 18);
+        const rows = entries.length;
+        const maxPillW = entries.reduce((m, e) => Math.max(m, e.pillW), 160);
         const titleStr = node.label || node.id;
         const subStr = node.ip || '';
         const headerW = Math.max(
           Math.ceil(titleStr.length * 6.8) + 36,
           Math.ceil(subStr.length * 6.0) + 32
         );
-        const w = Math.max(205, headerW, rows > 0 ? cols * colW + (cols - 1) * 12 + 24 : 176);
-        const h = rows > 0 ? 48 + rows * 15 + 10 : 60;
-        const m = { w, h, cols, rows, colW, entries };
+        const w = Math.max(215, headerW, rows > 0 ? maxPillW + 24 : 176);
+        const h = rows > 0 ? 48 + rows * 26 + 8 : 60;
+        const m = { w, h, rows, entries };
         nodeBoxMetrics.set(node.id, m);
         return m;
       }
-      const m = { w: 176, h: 60, cols: 1, rows: 0, colW: 150, entries: [] };
+      const m = { w: 176, h: 60, rows: 0, entries: [] };
       nodeBoxMetrics.set(node.id, m);
       return m;
     };
@@ -716,16 +733,25 @@ export class TopologyGraph {
         let dumbHostsSvg = '';
         if (isDumbSw && Array.isArray(metrics.entries) && metrics.entries.length > 0) {
           dumbHostsSvg += `<line x1="10" y1="46" x2="${w - 10}" y2="46" stroke="var(--color-border-subtle)" stroke-width="1" />`;
-          metrics.entries.forEach((entryLabel, idx) => {
-            const r = Math.floor(idx / metrics.cols);
-            const c = idx % metrics.cols;
-            const ix = 14 + c * (metrics.colW + 12);
-            const iy = 60 + r * 15;
+          metrics.entries.forEach((entry, idx) => {
+            const pillX = 12;
+            const pillY = 52 + idx * 26;
+            const pillW = w - 24;
+            const bgFill = entry.isInfra ? 'var(--color-primary-light)' : 'var(--color-surface)';
+            const fgColor = entry.isInfra ? 'var(--color-primary)' : 'var(--color-text-primary)';
+            const borderColor = entry.isInfra ? 'var(--color-primary)' : 'var(--color-border)';
+            const iconText = entry.isInfra ? '📡' : '🔌';
             dumbHostsSvg += `
-              <circle cx="${ix}" cy="${iy - 3.5}" r="2.5" fill="var(--color-warning)" />
-              <text x="${ix + 7}" y="${iy}" font-size="9.5" fill="var(--color-text-secondary)" font-family="var(--font-mono)" text-anchor="start">
-                ${escapeHtml(entryLabel)}
-              </text>
+              <g>
+                <rect x="${pillX}" y="${pillY}" width="${pillW}" height="22" rx="11"
+                      fill="${bgFill}" stroke="${borderColor}" stroke-width="1" />
+                <text x="${pillX + 10}" y="${pillY + 14.5}" font-size="10.5" fill="${fgColor}" text-anchor="start">
+                  <tspan>${iconText} </tspan>
+                  <tspan font-weight="700">${escapeHtml(entry.primary || entry.label)}</tspan>
+                  ${entry.remoteNic ? `<tspan font-size="9.5" font-family="var(--font-mono)" opacity="0.85"> [NIC: ${escapeHtml(entry.remoteNic)}]</tspan>` : ''}
+                  ${entry.ipText ? `<tspan font-size="9.5" font-family="var(--font-mono)" fill="var(--color-text-muted)"> ${escapeHtml(entry.ipText)}</tspan>` : ''}
+                </text>
+              </g>
             `;
           });
         }

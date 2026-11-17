@@ -596,7 +596,7 @@ export class SwitchPortDiagram {
     const hostGapX = 32;
     const tierGapY = 86;
 
-    // Dynamically size each Dumb Switch box so every attached host can be read in full
+    // Dynamically size each Dumb Switch box so every attached host is rendered as a vertical list of pills
     const measureDumbSwitchBox = (host, port, usw) => {
       const rawDevices =
         Array.isArray(usw?.devices) && usw.devices.length > 0
@@ -606,15 +606,22 @@ export class SwitchPortDiagram {
             : [];
       const deviceEntries = rawDevices.map((d) => {
         const primary = d.hostname || d.ip || d.mac || 'Host';
-        const secondary =
-          d.hostname && d.ip && d.ip !== '0.0.0.0'
-            ? ` (${d.ip})`
-            : !d.hostname && d.ip && d.mac
-              ? ` (${d.mac})`
+        const remoteNic = d.remotePortLabel || d.remoteIface || '';
+        const ipText =
+          d.ip && d.ip !== '0.0.0.0' && d.ip !== primary
+            ? d.ip
+            : !d.hostname && d.mac && d.mac !== primary
+              ? d.mac
               : '';
+        const fullText = `${primary}${remoteNic ? ` [NIC: ${remoteNic}]` : ''}${ipText ? ` ${ipText}` : ''}`;
+        const pillW = Math.max(148, Math.ceil(fullText.length * 6.3) + 34);
         return {
           device: d,
-          label: `${primary}${secondary}`,
+          primary,
+          remoteNic,
+          ipText,
+          label: fullText,
+          pillW,
           isInfra:
             d.type === 'ap' ||
             d.type === 'gateway' ||
@@ -626,30 +633,27 @@ export class SwitchPortDiagram {
       const devCount = deviceEntries.length || usw?.deviceCount || 2;
       const titleText = `Dumb Switch (${port.switchPort || port.iface})`;
       const subText = `${devCount} Hosts on ${host.name || host.hostname || host.id}`;
-      const cols = deviceEntries.length > 4 ? 2 : 1;
-      const rows = Math.max(1, Math.ceil(deviceEntries.length / cols));
-      const maxEntryChars = deviceEntries.reduce(
-        (maxLen, e) => Math.max(maxLen, e.label.length),
-        18
+      const rows = Math.max(1, deviceEntries.length);
+      const maxPillW = deviceEntries.reduce(
+        (maxW, e) => Math.max(maxW, e.pillW),
+        170
       );
-      const colW = Math.max(155, Math.ceil(maxEntryChars * 6.1) + 22);
       const headerMinW = Math.max(
         Math.ceil(titleText.length * 7.0) + 36,
         Math.ceil(subText.length * 6.1) + 28
       );
-      const contentW = cols * colW + (cols - 1) * 14 + 24;
-      const w = Math.max(215, headerMinW, contentW);
+      const w = Math.max(220, headerMinW, maxPillW + 24);
       const headerH = 40;
-      const rowH = 16;
-      const h = headerH + rows * rowH + 12;
+      const pillH = 22;
+      const rowH = 26;
+      const h = headerH + 8 + rows * rowH + 6;
 
       return {
         w,
         h,
-        cols,
-         rows,
-        colW,
+        rows,
         headerH,
+        pillH,
         rowH,
         titleText,
         subText,
@@ -933,9 +937,8 @@ export class SwitchPortDiagram {
       const boxW = item.w;
       const boxH = item.h;
       const {
-        cols,
-        colW,
         headerH,
+        pillH = 22,
         rowH,
         titleText,
         subText,
@@ -976,21 +979,26 @@ export class SwitchPortDiagram {
 
       let hostsListSvg = '';
       deviceEntries.forEach((entry, idx) => {
-        const r = Math.floor(idx / cols);
-        const c = idx % cols;
-        const itemX = bx + 14 + c * (colW + 14);
-        const itemY = by + headerH + 14 + r * rowH;
-        const dotColor = entry.isInfra ? 'var(--color-primary)' : 'var(--color-warning)';
-        const textColor = entry.isInfra ? 'var(--color-primary)' : 'var(--color-text-secondary)';
+        const pillX = bx + 12;
+        const pillY = by + headerH + 8 + idx * rowH;
+        const pillW = boxW - 24;
+        const bgFill = entry.isInfra ? 'var(--color-primary-light)' : 'var(--color-surface)';
+        const fgColor = entry.isInfra ? 'var(--color-primary)' : 'var(--color-text-primary)';
+        const borderColor = entry.isInfra ? 'var(--color-primary)' : 'var(--color-border)';
+        const iconText = entry.isInfra ? '📡' : '🔌';
+
         hostsListSvg += `
           <g class="sw-svg-dumb-host"
              data-host-id="${escapeHtml(entry.device?.id || '')}"
              data-client-mac="${escapeHtml(entry.device?.mac || '')}"
              style="cursor: pointer;">
-            <circle cx="${itemX}" cy="${itemY - 3.5}" r="3" fill="${dotColor}" />
-            <text x="${itemX + 8}" y="${itemY}" font-size="9.5" font-weight="${entry.isInfra ? '700' : '500'}"
-                  fill="${textColor}" font-family="var(--font-mono)">
-              ${escapeHtml(entry.label)}
+            <rect x="${pillX}" y="${pillY}" width="${pillW}" height="${pillH}" rx="11"
+                  fill="${bgFill}" stroke="${borderColor}" stroke-width="1" />
+            <text x="${pillX + 10}" y="${pillY + 14.5}" font-size="10.5" fill="${fgColor}">
+              <tspan>${iconText} </tspan>
+              <tspan font-weight="700">${escapeHtml(entry.primary || entry.label)}</tspan>
+              ${entry.remoteNic ? `<tspan font-size="9.5" font-family="var(--font-mono)" opacity="0.85"> [NIC: ${escapeHtml(entry.remoteNic)}]</tspan>` : ''}
+              ${entry.ipText ? `<tspan font-size="9.5" font-family="var(--font-mono)" fill="var(--color-text-muted)"> ${escapeHtml(entry.ipText)}</tspan>` : ''}
             </text>
           </g>
         `;
@@ -1431,7 +1439,7 @@ export class SwitchPortDiagram {
                       ${
                         devices.length > 0
                           ? `
-                        <div style="display: flex; flex-wrap: wrap; gap: 4px; margin-top: 2px;">
+                        <div style="display: flex; flex-direction: column; align-items: flex-start; gap: 4px; margin-top: 2px;">
                           ${devices
                             .map((d) => {
                               const isInfra = d.type === 'ap' || d.type === 'gateway' || d.type === 'switch' || d.type === 'mesh' || d.type === 'wan';
