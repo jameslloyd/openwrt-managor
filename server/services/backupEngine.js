@@ -171,7 +171,7 @@ export class BackupEngine {
     await this.createSimulatedBackup('node-gw-01', gwTime1, 0, 'scheduled');
 
     // 2. node-gw-01: Current backup from today with realistic diffs (versionOffset = 1)
-    const gwTime2 = new Date(now - 3600 * 1000).toISOString();
+    const gwTime2 = new Date(now).toISOString();
     await this.createSimulatedBackup('node-gw-01', gwTime2, 1, 'manual');
 
     // 3. node-ap-01 backup
@@ -421,38 +421,169 @@ export class BackupEngine {
     };
   }
 
+  getUtcDateKey(date) {
+    const y = date.getUTCFullYear();
+    const m = String(date.getUTCMonth() + 1).padStart(2, '0');
+    const d = String(date.getUTCDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+
+  getIsoWeekKey(date) {
+    const d = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+    const dayNum = d.getUTCDay() || 7;
+    d.setUTCDate(d.getUTCDate() + 4 - dayNum);
+    const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+    const weekNo = Math.ceil(((d - yearStart) / 86400000 + 1) / 7);
+    return `${d.getUTCFullYear()}-W${String(weekNo).padStart(2, '0')}`;
+  }
+
+  getUtcMonthKey(date) {
+    const y = date.getUTCFullYear();
+    const m = String(date.getUTCMonth() + 1).padStart(2, '0');
+    return `${y}-${m}`;
+  }
+
+  getUtcYearKey(date) {
+    return `${date.getUTCFullYear()}`;
+  }
+
+  /**
+   * Evaluates GFS (Grandfather-Father-Son) retention for a host's backups:
+   * Keeps the newest:
+   *  - 7 daily backups (keepDaily = 7)
+   *  - 4 weekly backups (keepWeekly = 4)
+   *  - 6 monthly backups (keepMonthly = 6)
+   *  - 1 yearly backup (keepYearly = 1)
+   * Backups outside of this retention policy are marked for deletion.
+   */
+  evaluateGfsRetention(backups = [], policy = {}) {
+    const keepDaily = Number.isFinite(Number(policy.keepDaily))
+      ? Math.max(0, Math.round(Number(policy.keepDaily)))
+      : 7;
+    const keepWeekly = Number.isFinite(Number(policy.keepWeekly))
+      ? Math.max(0, Math.round(Number(policy.keepWeekly)))
+      : 4;
+    const keepMonthly = Number.isFinite(Number(policy.keepMonthly))
+      ? Math.max(0, Math.round(Number(policy.keepMonthly)))
+      : 6;
+    const keepYearly = Number.isFinite(Number(policy.keepYearly))
+      ? Math.max(0, Math.round(Number(policy.keepYearly)))
+      : 1;
+
+    const sorted = [...backups].sort(
+      (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+    );
+
+    // 1. Pick the newest backup for each distinct UTC calendar day (older same-day backups are pruned)
+    const seenDays = new Set();
+    const dailyRepresentatives = [];
+    for (const b of sorted) {
+      const dt = new Date(b.timestamp);
+      if (Number.isNaN(dt.getTime())) continue;
+      const dayKey = this.getUtcDateKey(dt);
+      if (!seenDays.has(dayKey)) {
+        seenDays.add(dayKey);
+        dailyRepresentatives.push({ backup: b, date: dt });
+      }
+    }
+
+    const tierById = new Map();
+
+    // 2. Keep newest N daily backups (default 7)
+    for (const entry of dailyRepresentatives) {
+      if (tierById.size >= keepDaily) break;
+      tierById.set(entry.backup.id, 'daily');
+    }
+
+    // 3. Keep newest N weekly backups (default 4) from older daily representatives
+    const seenWeeks = new Set();
+    for (const entry of dailyRepresentatives) {
+      if (tierById.has(entry.backup.id)) continue;
+      if (seenWeeks.size >= keepWeekly) break;
+      const weekKey = this.getIsoWeekKey(entry.date);
+      if (!seenWeeks.has(weekKey)) {
+        seenWeeks.add(weekKey);
+        tierById.set(entry.backup.id, 'weekly');
+      }
+    }
+
+    // 4. Keep newest N monthly backups (default 6) from older daily representatives
+    const seenMonths = new Set();
+    for (const entry of dailyRepresentatives) {
+      if (tierById.has(entry.backup.id)) continue;
+      if (seenMonths.size >= keepMonthly) break;
+      const monthKey = this.getUtcMonthKey(entry.date);
+      if (!seenMonths.has(monthKey)) {
+        seenMonths.add(monthKey);
+        tierById.set(entry.backup.id, 'monthly');
+      }
+    }
+
+    // 5. Keep newest N yearly backups (default 1) from older daily representatives
+    const seenYears = new Set();
+    for (const entry of dailyRepresentatives) {
+      if (tierById.has(entry.backup.id)) continue;
+      if (seenYears.size >= keepYearly) break;
+      const yearKey = this.getUtcYearKey(entry.date);
+      if (!seenYears.has(yearKey)) {
+        seenYears.add(yearKey);
+        tierById.set(entry.backup.id, 'yearly');
+      }
+    }
+
+    const kept = [];
+    const deleted = [];
+    for (const b of sorted) {
+      if (tierById.has(b.id)) {
+        kept.push(b);
+      } else {
+        deleted.push(b);
+      }
+    }
+
+    return { kept, deleted, tierById };
+  }
+
   async applyRetention(hostId) {
     const settings = (await db.getSettings()) || {};
     const schedules = (await db.getSchedules()) || [];
-    const primarySched = schedules[0];
-    const schedRetention = Number(primarySched?.retentionMaxBackups);
+    const primarySched = schedules[0] || {};
+    const ret = settings.retention || {};
 
-    const retention = {
-      maxBackupsPerHost:
-        Number.isFinite(schedRetention) && schedRetention >= 2
-          ? schedRetention
-          : Number(settings.retention?.maxBackupsPerHost) || 10,
-      maxAgeDays: Number(settings.retention?.maxAgeDays) || 30,
-      minRetainedPerHost: Number(settings.retention?.minRetainedPerHost) || 2,
+    const policy = {
+      keepDaily: primarySched.keepDaily ?? ret.keepDaily ?? 7,
+      keepWeekly: primarySched.keepWeekly ?? ret.keepWeekly ?? 4,
+      keepMonthly: primarySched.keepMonthly ?? ret.keepMonthly ?? 6,
+      keepYearly: primarySched.keepYearly ?? ret.keepYearly ?? 1,
     };
 
     const hostBackups = await this.listBackups(hostId);
-    if (hostBackups.length <= retention.minRetainedPerHost) {
+    if (hostBackups.length === 0) {
       return;
     }
 
-    const now = Date.now();
-    const maxAgeMs = retention.maxAgeDays * 24 * 3600 * 1000;
+    const { kept, deleted, tierById } = this.evaluateGfsRetention(hostBackups, policy);
 
-    // Keep at least minRetainedPerHost
-    for (let i = retention.minRetainedPerHost; i < hostBackups.length; i++) {
-      const b = hostBackups[i];
-      const ageMs = now - new Date(b.timestamp).getTime();
-      const exceedsCount = i >= retention.maxBackupsPerHost;
-      const exceedsAge = ageMs > maxAgeMs;
+    for (const b of deleted) {
+      await this.deleteBackup(b.id);
+    }
 
-      if (exceedsCount || exceedsAge) {
-        await this.deleteBackup(b.id);
+    // Persist retentionTier ('daily' | 'weekly' | 'monthly' | 'yearly') on kept backup metadata
+    const resolvedBackupDir = path.resolve(this.backupDir);
+    for (const b of kept) {
+      const tier = tierById.get(b.id);
+      if (tier && b.retentionTier !== tier && b.filename) {
+        b.retentionTier = tier;
+        const metaPath = path.resolve(
+          resolvedBackupDir,
+          b.hostId,
+          `${b.filename.replace('.tar.gz', '')}.meta.json`
+        );
+        if (metaPath.startsWith(resolvedBackupDir + path.sep)) {
+          try {
+            await writeJsonAtomic(metaPath, b);
+          } catch {}
+        }
       }
     }
   }

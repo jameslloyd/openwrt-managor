@@ -381,24 +381,36 @@ export async function handleApiRequest(req, res, pathname, searchParams) {
         if (mergedAgentApi.requireApiKey && !mergedAgentApi.apiKey) {
           mergedAgentApi.apiKey = generateAgentApiKey();
         }
+        const mergedRetention = {
+          keepDaily: 7,
+          keepWeekly: 4,
+          keepMonthly: 6,
+          keepYearly: 1,
+          ...(current.retention || {}),
+          ...(body.retention || {}),
+        };
         const updated = {
           ...current,
           ...body,
-          retention: { ...current.retention, ...(body.retention || {}) },
+          retention: mergedRetention,
           alerts: { ...current.alerts, ...(body.alerts || {}) },
           agentApi: mergedAgentApi,
         };
         await db.saveSettings(updated);
 
         // Keep primary backup schedule retention in sync with settings
-        if (updated.retention?.maxBackupsPerHost) {
-          const schedules = (await db.getSchedules()) || [];
-          if (schedules.length > 0) {
+        const schedules = (await db.getSchedules()) || [];
+        if (schedules.length > 0) {
+          if (updated.retention?.maxBackupsPerHost) {
             schedules[0].retentionMaxBackups = Number(updated.retention.maxBackupsPerHost);
-            await db.saveSchedules(schedules);
           }
-          await backupEngine.applyAllRetention();
+          schedules[0].keepDaily = Number(updated.retention.keepDaily ?? 7);
+          schedules[0].keepWeekly = Number(updated.retention.keepWeekly ?? 4);
+          schedules[0].keepMonthly = Number(updated.retention.keepMonthly ?? 6);
+          schedules[0].keepYearly = Number(updated.retention.keepYearly ?? 1);
+          await db.saveSchedules(schedules);
         }
+        await backupEngine.applyAllRetention();
 
         sendJson(res, 200, updated);
         return true;
@@ -730,8 +742,21 @@ export async function handleApiRequest(req, res, pathname, searchParams) {
           const prev = existing.find((s) => s.id === item.id) || existing[idx] || {};
           const cron = String(item.cron || prev.cron || '0 3 * * *').trim();
           const enabled = item.enabled !== undefined ? Boolean(item.enabled) : prev.enabled !== false;
-          const rawRet = Number(item.retentionMaxBackups ?? prev.retentionMaxBackups ?? 14);
-          const retentionMaxBackups = Number.isFinite(rawRet) ? Math.max(2, Math.min(100, Math.round(rawRet))) : 14;
+          const keepDaily = Number.isFinite(Number(item.keepDaily ?? prev.keepDaily))
+            ? Math.max(0, Math.min(365, Math.round(Number(item.keepDaily ?? prev.keepDaily))))
+            : 7;
+          const keepWeekly = Number.isFinite(Number(item.keepWeekly ?? prev.keepWeekly))
+            ? Math.max(0, Math.min(104, Math.round(Number(item.keepWeekly ?? prev.keepWeekly))))
+            : 4;
+          const keepMonthly = Number.isFinite(Number(item.keepMonthly ?? prev.keepMonthly))
+            ? Math.max(0, Math.min(120, Math.round(Number(item.keepMonthly ?? prev.keepMonthly))))
+            : 6;
+          const keepYearly = Number.isFinite(Number(item.keepYearly ?? prev.keepYearly))
+            ? Math.max(0, Math.min(20, Math.round(Number(item.keepYearly ?? prev.keepYearly))))
+            : 1;
+          const gfsTotal = keepDaily + keepWeekly + keepMonthly + keepYearly;
+          const rawRet = Number(item.retentionMaxBackups ?? prev.retentionMaxBackups ?? gfsTotal);
+          const retentionMaxBackups = Number.isFinite(rawRet) ? Math.max(1, Math.min(500, Math.round(rawRet))) : 18;
 
           return {
             id: item.id || prev.id || 'sched-nightly-fleet',
@@ -740,6 +765,10 @@ export async function handleApiRequest(req, res, pathname, searchParams) {
             enabled,
             targets: Array.isArray(item.targets) && item.targets.length > 0 ? item.targets : prev.targets || ['all'],
             retentionMaxBackups,
+            keepDaily,
+            keepWeekly,
+            keepMonthly,
+            keepYearly,
             lastRun: item.lastRun !== undefined ? item.lastRun : prev.lastRun || null,
             nextRun: enabled ? backupEngine.computeNextRun(cron, now) : null,
           };
@@ -747,14 +776,18 @@ export async function handleApiRequest(req, res, pathname, searchParams) {
 
         await db.saveSchedules(normalizedList);
 
-        // Sync primary schedule retention count with settings.retention.maxBackupsPerHost
+        // Sync primary schedule retention policy with settings.retention
         if (normalizedList.length > 0) {
           const currentSettings = (await db.getSettings()) || {};
           const updatedSettings = {
             ...currentSettings,
             retention: {
-              ...(currentSettings.retention || { maxAgeDays: 30, minRetainedPerHost: 2 }),
+              ...(currentSettings.retention || { maxAgeDays: 365, minRetainedPerHost: 1 }),
               maxBackupsPerHost: normalizedList[0].retentionMaxBackups,
+              keepDaily: normalizedList[0].keepDaily,
+              keepWeekly: normalizedList[0].keepWeekly,
+              keepMonthly: normalizedList[0].keepMonthly,
+              keepYearly: normalizedList[0].keepYearly,
             },
           };
           await db.saveSettings(updatedSettings);

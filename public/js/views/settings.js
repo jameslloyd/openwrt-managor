@@ -183,8 +183,25 @@ export function renderSettings(container) {
 
         <div class="form-row-2col" style="margin-top: 14px;">
           <div class="form-group">
-            <label class="form-label" for="settings-max-archives">Max Archives Per Host</label>
-            <input type="number" id="settings-max-archives" class="form-input" min="2" max="100" value="${settings?.retention?.maxBackupsPerHost || 10}" />
+            <label class="form-label">GFS Config Backup Retention (Daily / Weekly / Monthly / Yearly)</label>
+            <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px;">
+              <div>
+                <label class="form-label" for="settings-keep-daily" style="font-size: 11px;">Daily</label>
+                <input type="number" id="settings-keep-daily" class="form-input" min="0" max="365" value="${settings?.retention?.keepDaily ?? 7}" />
+              </div>
+              <div>
+                <label class="form-label" for="settings-keep-weekly" style="font-size: 11px;">Weekly</label>
+                <input type="number" id="settings-keep-weekly" class="form-input" min="0" max="104" value="${settings?.retention?.keepWeekly ?? 4}" />
+              </div>
+              <div>
+                <label class="form-label" for="settings-keep-monthly" style="font-size: 11px;">Monthly</label>
+                <input type="number" id="settings-keep-monthly" class="form-input" min="0" max="120" value="${settings?.retention?.keepMonthly ?? 6}" />
+              </div>
+              <div>
+                <label class="form-label" for="settings-keep-yearly" style="font-size: 11px;">Yearly</label>
+                <input type="number" id="settings-keep-yearly" class="form-input" min="0" max="20" value="${settings?.retention?.keepYearly ?? 1}" />
+              </div>
+            </div>
           </div>
           <div class="form-group">
             <label class="form-label" for="settings-poll-select">Telemetry Poll Interval</label>
@@ -274,7 +291,11 @@ export function renderSettings(container) {
   // Save Settings
   container.querySelector('#settings-save-btn')?.addEventListener('click', async () => {
     const pollInterval = parseInt(container.querySelector('#settings-poll-select')?.value || '10000', 10);
-    const maxBackups = parseInt(container.querySelector('#settings-max-archives')?.value || '10', 10);
+    const keepDaily = Math.max(0, parseInt(container.querySelector('#settings-keep-daily')?.value || '7', 10) || 7);
+    const keepWeekly = Math.max(0, parseInt(container.querySelector('#settings-keep-weekly')?.value || '4', 10) || 4);
+    const keepMonthly = Math.max(0, parseInt(container.querySelector('#settings-keep-monthly')?.value || '6', 10) || 6);
+    const keepYearly = Math.max(0, parseInt(container.querySelector('#settings-keep-yearly')?.value || '1', 10) || 1);
+    const maxBackups = keepDaily + keepWeekly + keepMonthly + keepYearly;
     const requireApiKey = container.querySelector('#agent-api-auth-select')?.value === 'key';
     const apiKey = container.querySelector('#agent-api-key-input')?.value || '';
 
@@ -282,9 +303,13 @@ export function renderSettings(container) {
       const updated = await api.updateSettings({
         pollIntervalMs: pollInterval,
         retention: {
+          keepDaily,
+          keepWeekly,
+          keepMonthly,
+          keepYearly,
           maxBackupsPerHost: maxBackups,
-          maxAgeDays: 30,
-          minRetainedPerHost: 2
+          maxAgeDays: 365,
+          minRetainedPerHost: 1
         },
         agentApi: {
           enabled: true,

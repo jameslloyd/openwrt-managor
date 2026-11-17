@@ -61,12 +61,20 @@ export function renderBackups(container) {
     cron: '0 3 * * *',
     enabled: true,
     targets: ['all'],
-    retentionMaxBackups: settings?.retention?.maxBackupsPerHost || 14,
+    retentionMaxBackups: settings?.retention?.maxBackupsPerHost || 18,
+    keepDaily: settings?.retention?.keepDaily ?? 7,
+    keepWeekly: settings?.retention?.keepWeekly ?? 4,
+    keepMonthly: settings?.retention?.keepMonthly ?? 6,
+    keepYearly: settings?.retention?.keepYearly ?? 1,
     lastRun: null,
     nextRun: null
   };
   const isScheduleEnabled = activeSched.enabled !== false;
-  const retentionCount = activeSched.retentionMaxBackups || settings?.retention?.maxBackupsPerHost || 14;
+  const keepDaily = activeSched.keepDaily ?? settings?.retention?.keepDaily ?? 7;
+  const keepWeekly = activeSched.keepWeekly ?? settings?.retention?.keepWeekly ?? 4;
+  const keepMonthly = activeSched.keepMonthly ?? settings?.retention?.keepMonthly ?? 6;
+  const keepYearly = activeSched.keepYearly ?? settings?.retention?.keepYearly ?? 1;
+  const retentionCount = keepDaily + keepWeekly + keepMonthly + keepYearly;
   const backupDirPath = health?.storage?.backupDir || '/backups';
 
   container.innerHTML = `
@@ -93,7 +101,7 @@ export function renderBackups(container) {
         </div>
         <div>
           <div style="font-weight: 600; font-size: 14px;">Storage Target: <span class="font-mono">${escapeHtml(backupDirPath)}</span> (TrueNAS ZFS Mount)</div>
-          <div style="font-size: 12px; color: var(--color-text-secondary);">Retention Policy: Retain last <strong>${retentionCount}</strong> archives per host (min 2 protected)</div>
+          <div style="font-size: 12px; color: var(--color-text-secondary);">Retention Policy: Keep newest <strong>${keepDaily} Daily</strong>, <strong>${keepWeekly} Weekly</strong>, <strong>${keepMonthly} Monthly</strong>, and <strong>${keepYearly} Yearly</strong> config backups per host</div>
         </div>
       </div>
       <div style="display: flex; align-items: center; gap: 16px; font-size: 13px;">
@@ -194,11 +202,17 @@ export function renderBackups(container) {
   container.querySelector('#backup-config-sched-btn')?.addEventListener('click', () => {
     const presetSelect = container.querySelector('#sched-preset-select');
     const nameInput = container.querySelector('#sched-name-input');
-    const retentionInput = container.querySelector('#sched-retention-input');
+    const dailyInput = container.querySelector('#sched-keep-daily-input');
+    const weeklyInput = container.querySelector('#sched-keep-weekly-input');
+    const monthlyInput = container.querySelector('#sched-keep-monthly-input');
+    const yearlyInput = container.querySelector('#sched-keep-yearly-input');
     const enabledCheckbox = container.querySelector('#sched-enabled-checkbox');
     if (presetSelect) presetSelect.value = activeSched.cron || '0 3 * * *';
     if (nameInput) nameInput.value = activeSched.name || 'Nightly Fleet Backup';
-    if (retentionInput) retentionInput.value = String(retentionCount);
+    if (dailyInput) dailyInput.value = String(keepDaily);
+    if (weeklyInput) weeklyInput.value = String(keepWeekly);
+    if (monthlyInput) monthlyInput.value = String(keepMonthly);
+    if (yearlyInput) yearlyInput.value = String(keepYearly);
     if (enabledCheckbox) enabledCheckbox.checked = isScheduleEnabled;
     openModal('schedule-config-dialog');
   });
@@ -207,7 +221,15 @@ export function renderBackups(container) {
   container.querySelector('#sched-save-btn')?.addEventListener('click', async () => {
     const cron = container.querySelector('#sched-preset-select')?.value || '0 3 * * *';
     const name = (container.querySelector('#sched-name-input')?.value || 'Nightly Fleet Backup').trim();
-    const retention = parseInt(container.querySelector('#sched-retention-input')?.value || '14', 10);
+    const newDaily = parseInt(container.querySelector('#sched-keep-daily-input')?.value || '7', 10);
+    const newWeekly = parseInt(container.querySelector('#sched-keep-weekly-input')?.value || '4', 10);
+    const newMonthly = parseInt(container.querySelector('#sched-keep-monthly-input')?.value || '6', 10);
+    const newYearly = parseInt(container.querySelector('#sched-keep-yearly-input')?.value || '1', 10);
+    const safeDaily = Number.isFinite(newDaily) ? Math.max(0, newDaily) : 7;
+    const safeWeekly = Number.isFinite(newWeekly) ? Math.max(0, newWeekly) : 4;
+    const safeMonthly = Number.isFinite(newMonthly) ? Math.max(0, newMonthly) : 6;
+    const safeYearly = Number.isFinite(newYearly) ? Math.max(0, newYearly) : 1;
+    const retention = safeDaily + safeWeekly + safeMonthly + safeYearly;
     const enabled = container.querySelector('#sched-enabled-checkbox')
       ? Boolean(container.querySelector('#sched-enabled-checkbox').checked)
       : true;
@@ -221,7 +243,11 @@ export function renderBackups(container) {
             cron,
             enabled,
             targets: activeSched.targets || ['all'],
-            retentionMaxBackups: Number.isFinite(retention) ? retention : 14
+            retentionMaxBackups: retention,
+            keepDaily: safeDaily,
+            keepWeekly: safeWeekly,
+            keepMonthly: safeMonthly,
+            keepYearly: safeYearly,
           }
         ]
       });
@@ -234,7 +260,11 @@ export function renderBackups(container) {
               ...store.state.settings,
               retention: {
                 ...(store.state.settings.retention || {}),
-                maxBackupsPerHost: updatedSchedules[0]?.retentionMaxBackups || retention
+                maxBackupsPerHost: updatedSchedules[0]?.retentionMaxBackups || retention,
+                keepDaily: safeDaily,
+                keepWeekly: safeWeekly,
+                keepMonthly: safeMonthly,
+                keepYearly: safeYearly,
               }
             }
           : store.state.settings
@@ -301,10 +331,16 @@ export function renderBackups(container) {
 
 function renderBackupRow(b) {
   const shortSha = b.sha256 ? `${b.sha256.slice(0, 10)}...` : 'N/A';
+  const tierLabel = b.retentionTier
+    ? b.retentionTier.charAt(0).toUpperCase() + b.retentionTier.slice(1)
+    : null;
   return `
     <tr data-backup-id="${b.id}">
       <td>
-        <div style="font-weight: 600;">${formatRelativeTime(b.timestamp)}</div>
+        <div style="display: flex; align-items: center; gap: 6px;">
+          <span style="font-weight: 600;">${formatRelativeTime(b.timestamp)}</span>
+          ${tierLabel ? `<span style="font-size: 10px; font-weight: 700; padding: 1px 6px; border-radius: 999px; background: var(--color-primary-light); color: var(--color-primary);">${escapeHtml(tierLabel)}</span>` : ''}
+        </div>
         <div style="font-size: 11px; color: var(--color-text-muted);">${new Date(b.timestamp).toLocaleString()}</div>
       </td>
       <td>
@@ -435,9 +471,26 @@ function renderBackupModals(activeSched = {}, retentionCount = 14) {
           </select>
         </div>
         <div class="form-group">
-          <label class="form-label" for="sched-retention-input">Retention Count (Max archives per host)</label>
-          <input type="number" id="sched-retention-input" class="form-input" min="2" max="100" value="${retentionCount}" />
-          <span class="form-hint">TrueNAS will automatically prune archives older than this limit while protecting the 2 most recent snapshots.</span>
+          <label class="form-label">GFS Retention Policy (Archives kept per host)</label>
+          <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px;">
+            <div>
+              <label class="form-label" for="sched-keep-daily-input" style="font-size: 11px;">Daily</label>
+              <input type="number" id="sched-keep-daily-input" class="form-input" min="0" max="365" value="${activeSched.keepDaily ?? 7}" />
+            </div>
+            <div>
+              <label class="form-label" for="sched-keep-weekly-input" style="font-size: 11px;">Weekly</label>
+              <input type="number" id="sched-keep-weekly-input" class="form-input" min="0" max="104" value="${activeSched.keepWeekly ?? 4}" />
+            </div>
+            <div>
+              <label class="form-label" for="sched-keep-monthly-input" style="font-size: 11px;">Monthly</label>
+              <input type="number" id="sched-keep-monthly-input" class="form-input" min="0" max="120" value="${activeSched.keepMonthly ?? 6}" />
+            </div>
+            <div>
+              <label class="form-label" for="sched-keep-yearly-input" style="font-size: 11px;">Yearly</label>
+              <input type="number" id="sched-keep-yearly-input" class="form-input" min="0" max="20" value="${activeSched.keepYearly ?? 1}" />
+            </div>
+          </div>
+          <span class="form-hint">Keeps the newest 7 daily, 4 weekly, 6 monthly, and 1 yearly config backups per host. Backups outside this retention are automatically deleted.</span>
         </div>
         <div class="form-group" style="flex-direction: row; align-items: center; gap: 8px; margin-top: 4px;">
           <input type="checkbox" id="sched-enabled-checkbox" ${isEnabled ? 'checked' : ''} style="width: 16px; height: 16px; accent-color: var(--color-primary);" />
