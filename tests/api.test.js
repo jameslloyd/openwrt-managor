@@ -1576,5 +1576,21 @@ test('LAN Port Hardware Capability (maxSpeedMbps): parses PORTCAP and infers def
   });
   assert.ok(hostManager.getLiveClients().some((c) => c.mac.toLowerCase() === 'aa:bb:cc:dd:ee:99'));
 
+  // Verify 24-port managed switch where ports come from UCINET/NICPORT and FDB comes from BRMAC (brforward) or VLAN subinterfaces
+  const managed24Out = [
+    "UCINET|network.@device[0].ports='lan1' 'lan2' 'lan3' 'lan4'",
+    'NICPORT|lan1|00:aa:bb:cc:dd:01|1000|full|down|0|switch|3|1',
+    'NICPORT|lan2|00:aa:bb:cc:dd:01|-1|unknown|down|0|switch|0|2',
+    'NICPORT|lan3|00:aa:bb:cc:dd:01|-1|unknown|down|0|switch|0|3',
+    'BRMAC|switch|2|aa:bb:cc:11:22:33',
+    'FDB|aa:bb:cc:44:55:66|lan4.1|switch|1',
+  ].join('\n');
+  const parsedM24 = parseSwitchFdbSection(managed24Out);
+  assert.equal(parsedM24.switchPorts.find((p) => p.iface === 'lan1')?.linkUp, true); // brport/state=3 forwarding
+  assert.equal(parsedM24.switchPorts.find((p) => p.iface === 'lan2')?.linkUp, true); // BRMAC on portNo 2
+  assert.ok(parsedM24.switchPorts.find((p) => p.iface === 'lan2')?.connectedMacs.includes('aa:bb:cc:11:22:33'));
+  assert.equal(parsedM24.switchPorts.find((p) => p.iface === 'lan3')?.linkUp, false);
+  assert.equal(parsedM24.switchPorts.find((p) => p.iface === 'lan4')?.linkUp, true); // FDB on lan4.1 matched to lan4
+
   await hostManager.deleteHost('sw-netdev-test', true);
 });

@@ -31,8 +31,18 @@ function getPortMaxSpeedMbps(port) {
   return Math.max(curSpd, 1000);
 }
 
+function isPortActive(port) {
+  return Boolean(
+    (port?.linkUp ?? port?.status === 'up') ||
+      (Array.isArray(port?.connectedDevices) && port.connectedDevices.length > 0) ||
+      (Array.isArray(port?.connectedMacs) && port.connectedMacs.length > 0) ||
+      Number(port?.rxRateBps) > 0 ||
+      Number(port?.txRateBps) > 0
+  );
+}
+
 function isPortSpeedSuboptimal(port) {
-  const isUp = port.linkUp ?? port.status === 'up';
+  const isUp = isPortActive(port);
   if (!isUp) return false;
   const cur = Number(port.speedMbps) || 0;
   const max = getPortMaxSpeedMbps(port);
@@ -40,7 +50,7 @@ function isPortSpeedSuboptimal(port) {
 }
 
 function getPortSpeedColor(port) {
-  const isUp = port.linkUp ?? port.status === 'up';
+  const isUp = isPortActive(port);
   if (!isUp) return 'var(--color-text-muted)';
   const spd = Number(port.speedMbps) || 1000;
   if (spd >= 10000) return '#a855f7'; // 10G Purple
@@ -50,24 +60,24 @@ function getPortSpeedColor(port) {
 }
 
 function getPortSpeedShort(port) {
-  const isUp = port.linkUp ?? port.status === 'up';
+  const isUp = isPortActive(port);
   const cur = Number(port.speedMbps) || 0;
   const max = getPortMaxSpeedMbps(port);
   if (!isUp) return 'DOWN';
   if (cur > 0 && max > 0 && cur !== max) {
     return `${formatSpeedShort(cur)}/${formatSpeedShort(max)}`;
   }
-  return formatSpeedShort(cur) || 'UP';
+  return formatSpeedShort(cur) || '1G';
 }
 
 function getPortSpeedDetail(port) {
-  const isUp = port.linkUp ?? port.status === 'up';
+  const isUp = isPortActive(port);
   const cur = Number(port.speedMbps) || 0;
   const max = getPortMaxSpeedMbps(port);
   if (!isUp) {
     return max > 0 ? `DOWN (Capable: ${formatSpeedShort(max)})` : 'DOWN';
   }
-  const curLabel = formatSpeedShort(cur) || 'UP';
+  const curLabel = formatSpeedShort(cur) || '1G';
   const dupLabel = port.duplex ? ` • ${String(port.duplex).toUpperCase()}` : '';
   if (cur > 0 && max > 0 && cur !== max) {
     return `${curLabel}${dupLabel} (Capable: ${formatSpeedShort(max)})`;
@@ -76,7 +86,7 @@ function getPortSpeedDetail(port) {
 }
 
 function getPortRoleMeta(port) {
-  const isUp = port.linkUp ?? port.status === 'up';
+  const isUp = isPortActive(port);
   const role = port.portRole || (isUp ? 'access' : 'down');
   if (role === 'wan') return { label: 'WAN', bg: 'rgba(59, 130, 246, 0.16)', fg: '#3b82f6' };
   if (role === 'uplink') return { label: 'UPLINK', bg: 'rgba(6, 182, 212, 0.16)', fg: '#06b6d4' };
@@ -198,6 +208,7 @@ export class SwitchPortDiagram {
   normalizeHostPorts(host) {
     const rawPorts = Array.isArray(host.switchPorts) ? host.switchPorts : [];
     const expectedSwitchCapacity = inferSwitchPortCapacity(host);
+    const isCoreSwitch = host.role === 'switch' || expectedSwitchCapacity >= 8 || rawPorts.length >= 8;
 
     // If the host is a multi-port switch (e.g. 24-port core switch) but only reported <= 1 management/bridge interface
     // (e.g. switch.1 or eth0 before full DSA/swconfig port enumeration), synthesize the full 24-port faceplate
@@ -208,7 +219,7 @@ export class SwitchPortDiagram {
       for (let i = 1; i <= expectedSwitchCapacity; i++) {
         const iface = `lan${i}`;
         const switchPort = `LAN ${i}`;
-        const isUplinkPort = i === 1 && host.status === 'online';
+        const isUplinkPort = i === 1 && host.status !== 'offline';
         const attachedClients = this.clients
           .filter(
             (c) =>
@@ -223,14 +234,30 @@ export class SwitchPortDiagram {
             vendor: c.vendor || null,
             type: 'client',
           }));
-        const connectedDevices = i === 1 ? [...existingDevices, ...attachedClients] : attachedClients;
+        const attachedPeers = this.hosts
+          .filter(
+            (peer) =>
+              peer.id !== host.id &&
+              peer.status !== 'offline' &&
+              peer.nicInfo?.upstreamHostId === host.id &&
+              (peer.nicInfo?.upstreamIface === iface || peer.nicInfo?.upstreamPort === switchPort)
+          )
+          .map((peer) => ({
+            id: peer.id,
+            mac: peer.mac || null,
+            ip: peer.ip || null,
+            hostname: peer.name || peer.hostname || peer.id,
+            type: peer.role || 'ap',
+          }));
+        const connectedDevices =
+          i === 1 ? [...existingDevices, ...attachedPeers, ...attachedClients] : [...attachedPeers, ...attachedClients];
         const isUp = isUplinkPort || connectedDevices.length > 0;
         synthPorts.push({
           iface,
           switchPort,
           portNumber: i,
           portLabel: `LAN ${i} (${iface})`,
-          portRole: isUplinkPort ? 'uplink' : connectedDevices.length > 0 ? 'access' : 'down',
+          portRole: isUplinkPort ? 'uplink' : attachedPeers.length > 0 ? 'trunk' : connectedDevices.length > 0 ? 'access' : 'down',
           speedMbps: existingPort?.speedMbps || 1000,
           duplex: 'full',
           status: isUp ? 'up' : 'down',
@@ -238,6 +265,70 @@ export class SwitchPortDiagram {
           connectedDevices,
         });
       }
+
+      // Distribute any unassigned downstream APs or wired clients attached to this switch across ports 2..N
+      const assignedPeerIds = new Set(
+        synthPorts.flatMap((p) => p.connectedDevices.map((d) => d.id).filter(Boolean))
+      );
+      const unassignedPeers = this.hosts.filter(
+        (peer) =>
+          peer.id !== host.id &&
+          peer.role !== 'gateway' &&
+          peer.status !== 'offline' &&
+          !assignedPeerIds.has(peer.id) &&
+          (peer.nicInfo?.upstreamHostId === host.id || (!peer.nicInfo?.upstreamIface && isCoreSwitch))
+      );
+      let nextPortIdx = 1;
+      for (const peer of unassignedPeers) {
+        while (nextPortIdx < synthPorts.length && synthPorts[nextPortIdx].connectedDevices.length > 0) {
+          nextPortIdx++;
+        }
+        if (nextPortIdx < synthPorts.length) {
+          const targetPort = synthPorts[nextPortIdx];
+          targetPort.connectedDevices.push({
+            id: peer.id,
+            mac: peer.mac || null,
+            ip: peer.ip || null,
+            hostname: peer.name || peer.hostname || peer.id,
+            type: peer.role || 'ap',
+          });
+          targetPort.linkUp = true;
+          targetPort.status = 'up';
+          targetPort.portRole = 'trunk';
+          nextPortIdx++;
+        }
+      }
+
+      const assignedClientMacs = new Set(
+        synthPorts.flatMap((p) => p.connectedDevices.map((d) => d.mac && d.mac.toLowerCase()).filter(Boolean))
+      );
+      const unassignedClients = this.clients.filter(
+        (c) =>
+          c.connectionType === 'wired' &&
+          c.connectedTo?.hostId === host.id &&
+          c.mac &&
+          !assignedClientMacs.has(c.mac.toLowerCase())
+      );
+      for (const c of unassignedClients) {
+        while (nextPortIdx < synthPorts.length && synthPorts[nextPortIdx].connectedDevices.length > 0) {
+          nextPortIdx++;
+        }
+        const targetPort = synthPorts[nextPortIdx < synthPorts.length ? nextPortIdx : 0];
+        if (targetPort) {
+          targetPort.connectedDevices.push({
+            mac: c.mac,
+            ip: c.ip,
+            hostname: c.hostname,
+            vendor: c.vendor || null,
+            type: 'client',
+          });
+          targetPort.linkUp = true;
+          targetPort.status = 'up';
+          if (targetPort.portRole === 'down') targetPort.portRole = 'access';
+          nextPortIdx++;
+        }
+      }
+
       if (this.showActiveOnly) {
         const active = synthPorts.filter((p) => p.linkUp || p.connectedDevices.length > 0);
         return active.length > 0 ? active : synthPorts;
@@ -250,16 +341,23 @@ export class SwitchPortDiagram {
       const nic = host.nicInfo || {};
       const enrichedPorts = rawPorts.map((p) => {
         const existingDevices = Array.isArray(p.connectedDevices) ? [...p.connectedDevices] : [];
+        const portMacSet = new Set(
+          Array.isArray(p.connectedMacs) ? p.connectedMacs.map((m) => String(m || '').toLowerCase()).filter(Boolean) : []
+        );
+        const isTrunkOrUplink = p.portRole === 'trunk' || p.portRole === 'uplink' || p.portRole === 'wan';
         const extraClients = this.clients
-          .filter(
-            (c) =>
-              c.connectionType === 'wired' &&
+          .filter((c) => {
+            if (c.connectionType !== 'wired') return false;
+            const cMac = c.mac ? c.mac.toLowerCase() : null;
+            if (existingDevices.some((d) => d.mac && cMac && d.mac.toLowerCase() === cMac)) return false;
+            const matchByConnectedTo =
               c.connectedTo?.hostId === host.id &&
               (c.connectedTo?.iface === p.iface ||
                 c.connectedTo?.switchPort === p.switchPort ||
-                (p.portNumber !== null && p.portNumber !== undefined && c.connectedTo?.portNumber === p.portNumber)) &&
-              !existingDevices.some((d) => d.mac && c.mac && d.mac.toLowerCase() === c.mac.toLowerCase())
-          )
+                (p.portNumber !== null && p.portNumber !== undefined && c.connectedTo?.portNumber === p.portNumber));
+            const matchByPortFdb = !isTrunkOrUplink && cMac && portMacSet.has(cMac);
+            return matchByConnectedTo || matchByPortFdb;
+          })
           .map((c) => ({
             mac: c.mac,
             ip: c.ip,
@@ -268,14 +366,16 @@ export class SwitchPortDiagram {
             type: 'client',
           }));
         const extraPeers = this.hosts
-          .filter(
-            (peer) =>
-              peer.id !== host.id &&
-              peer.status !== 'offline' &&
+          .filter((peer) => {
+            if (peer.id === host.id || peer.status === 'offline') return false;
+            if (existingDevices.some((d) => d.id === peer.id)) return false;
+            const matchByUpstream =
               peer.nicInfo?.upstreamHostId === host.id &&
-              (peer.nicInfo?.upstreamIface === p.iface || peer.nicInfo?.upstreamPort === p.switchPort) &&
-              !existingDevices.some((d) => d.id === peer.id)
-          )
+              (peer.nicInfo?.upstreamIface === p.iface || peer.nicInfo?.upstreamPort === p.switchPort);
+            const peerMac = peer.mac ? peer.mac.toLowerCase() : null;
+            const matchByPeerMac = peerMac && portMacSet.has(peerMac) && p.portRole !== 'uplink';
+            return matchByUpstream || matchByPeerMac;
+          })
           .map((peer) => ({
             id: peer.id,
             mac: peer.mac || null,
@@ -290,22 +390,74 @@ export class SwitchPortDiagram {
         const isActiveRole =
           isHostOnline && (p.portRole === 'uplink' || p.portRole === 'trunk' || (p.portRole === 'wan' && host.role === 'gateway'));
         const hasTraffic = Number(p.rxRateBps) > 0 || Number(p.txRateBps) > 0;
-        const hasMacs = Array.isArray(p.connectedMacs) && p.connectedMacs.length > 0;
+        const hasMacs = portMacSet.size > 0;
+        const hasTopologyLink = this.links.some(
+          (l) =>
+            (l.source === host.id && (l.sourceIface === p.iface || l.sourcePort === p.switchPort)) ||
+            (l.target === host.id && (l.targetIface === p.iface || l.targetPort === p.switchPort))
+        );
         const isUp = Boolean(
           (p.linkUp ?? p.status === 'up') ||
             connectedDevices.length > 0 ||
             hasMacs ||
             hasTraffic ||
+            hasTopologyLink ||
             isActiveLocalNic ||
             isActiveRole
         );
+        let portRole = p.portRole;
+        if (isUp && (!portRole || portRole === 'down' || portRole === 'lan')) {
+          if (extraPeers.length > 0 || connectedDevices.some((d) => d.type === 'ap' || d.type === 'switch' || d.type === 'mesh')) {
+            portRole = 'trunk';
+          } else if (connectedDevices.length > 0) {
+            portRole = 'access';
+          } else {
+            portRole = 'idle';
+          }
+        }
         return {
           ...p,
+          portRole,
           linkUp: isUp,
           status: isUp ? 'up' : 'down',
           connectedDevices,
         };
       });
+
+      // Attach any remaining wired clients assigned to `host.id` whose iface didn't match a specific port name
+      const assignedMacs = new Set(
+        enrichedPorts.flatMap((p) => p.connectedDevices.map((d) => d.mac && d.mac.toLowerCase()).filter(Boolean))
+      );
+      const leftoverClients = this.clients.filter(
+        (c) =>
+          c.connectionType === 'wired' &&
+          c.connectedTo?.hostId === host.id &&
+          c.mac &&
+          !assignedMacs.has(c.mac.toLowerCase())
+      );
+      if (leftoverClients.length > 0) {
+        let portCursor = enrichedPorts.findIndex((p) => p.portRole !== 'wan' && p.portRole !== 'uplink' && p.connectedDevices.length === 0);
+        if (portCursor === -1) portCursor = 0;
+        for (const c of leftoverClients) {
+          const targetPort = enrichedPorts[portCursor % enrichedPorts.length];
+          if (targetPort) {
+            targetPort.connectedDevices.push({
+              mac: c.mac,
+              ip: c.ip,
+              hostname: c.hostname,
+              vendor: c.vendor || null,
+              type: 'client',
+            });
+            targetPort.linkUp = true;
+            targetPort.status = 'up';
+            if (!targetPort.portRole || targetPort.portRole === 'down' || targetPort.portRole === 'idle') {
+              targetPort.portRole = 'access';
+            }
+            portCursor++;
+          }
+        }
+      }
+
       if (this.showActiveOnly) {
         const filtered = enrichedPorts.filter(
           (p) => p.linkUp || (Array.isArray(p.connectedDevices) && p.connectedDevices.length > 0)

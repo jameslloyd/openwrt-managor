@@ -965,15 +965,17 @@ export async function pollRealHost(hostConfig, prevSample = null) {
     'echo "===NETDEV_STATUS==="',
     'ubus call network.device status 2>/dev/null',
     'echo "===SWITCH_FDB==="',
-    'ip -o link show 2>/dev/null | awk -F": " \'/LOWER_UP/ && !/NO-CARRIER/{sub(/@.*/,"",$2); print "LINKUP|" $2}\'',
+    'ip link show 2>/dev/null | awk -F": " \'/^[0-9]+:/ && (/LOWER_UP/ || /state UP/) && !/NO-CARRIER/{sub(/@.*/,"",$2); print "LINKUP|" $2}\'',
+    'ip -4 addr show 2>/dev/null | awk \'/^[0-9]+:/{sub(/:/,"",$2);sub(/@.*/,"",$2);cur=$2} /inet /{split($2,a,"/");if(cur!=""&&a[1]!="")print "IFADDR|"cur"|"a[1]}\'',
     'for p in /sys/class/net/*/brif/*; do [ -e "$p" ] || continue; br=${p%/brif/*}; br=${br##*/}; ifn=${p##*/}; d="/sys/class/net/$ifn"; echo "BRPORT|$br|$ifn|$(cat "$p/port_no" 2>/dev/null)|$(cat "$d/speed" 2>/dev/null)|$(cat "$d/duplex" 2>/dev/null)|$(cat "$d/operstate" 2>/dev/null)|$(cat "$d/carrier" 2>/dev/null)|$(cat "$d/address" 2>/dev/null)|$(cat "$p/state" 2>/dev/null)"; done',
-    'has_eth=$(command -v ethtool 2>/dev/null); for d in /sys/class/net/*; do [ -e "$d" ] || continue; ifn=${d##*/}; [ "$ifn" = "lo" ] && continue; m=$(cat "$d/address" 2>/dev/null); ip4=$(ip -4 -o addr show dev "$ifn" 2>/dev/null | awk \'{print $4}\' | cut -d/ -f1 | head -n1); [ -n "$m" ] && echo "HOSTIF|$ifn|$m|$ip4"; [ -d "$d/bridge" ] || [ -d "$d/brif" ] || [ -d "$d/wireless" ] || [ -d "$d/phy80211" ] && continue; case "$ifn" in br-*|br[0-9]*|switch|switch.*|*.*|wlan*|phy*|ra*|rax*|ath*|wds*|mesh*|mon*|wg*|tun*|tap*|docker*|veth*|sit*|gre*|ip*|ifb*|teql*|erspan*|pppoe*|ppp*|bat*|tailscale*|zt*|miireg*|dummy*|bond*) continue ;; esac; br=""; [ -e "$d/brport/bridge" ] && br=$(readlink "$d/brport/bridge" 2>/dev/null) && br=${br##*/}; echo "NICPORT|$ifn|$m|$(cat "$d/speed" 2>/dev/null)|$(cat "$d/duplex" 2>/dev/null)|$(cat "$d/operstate" 2>/dev/null)|$(cat "$d/carrier" 2>/dev/null)|$br"; [ -n "$has_eth" ] && ethtool "$ifn" 2>/dev/null | awk -v i="$ifn" \'{for(k=1;k<=NF;k++)if($k~/^[0-9]+base/){s=$k+0;if(s>m)m=s}}/Speed:/{c=$2+0}/Link detected:/{l=($3=="yes"?1:0)}END{if(m||c||l!="")print "PORTCAP|"i"|"m"|"c"|"l}\'; done',
+    'has_eth=$(command -v ethtool 2>/dev/null); for d in /sys/class/net/*; do [ -e "$d" ] || continue; ifn=${d##*/}; [ "$ifn" = "lo" ] && continue; m=$(cat "$d/address" 2>/dev/null); [ -n "$m" ] && echo "HOSTIF|$ifn|$m|"; [ -d "$d/bridge" ] || [ -d "$d/brif" ] || [ -d "$d/wireless" ] || [ -d "$d/phy80211" ] && continue; case "$ifn" in br-*|br[0-9]*|switch|switch.*|*.*|wlan*|phy*|ra*|rax*|ath*|wds*|mesh*|mon*|wg*|tun*|tap*|docker*|veth*|sit*|gre*|ip*|ifb*|teql*|erspan*|pppoe*|ppp*|bat*|tailscale*|zt*|miireg*|dummy*|bond*) continue ;; esac; br=""; [ -e "$d/brport/bridge" ] && br=$(readlink "$d/brport/bridge" 2>/dev/null) && br=${br##*/}; bst=$(cat "$d/brport/state" 2>/dev/null); bpno=$(cat "$d/brport/port_no" 2>/dev/null); spd=$(cat "$d/speed" 2>/dev/null); dup=$(cat "$d/duplex" 2>/dev/null); oper=$(cat "$d/operstate" 2>/dev/null); car=$(cat "$d/carrier" 2>/dev/null); echo "NICPORT|$ifn|$m|$spd|$dup|$oper|$car|$br|$bst|$bpno"; if [ -n "$has_eth" ] && { [ "$car" = "1" ] || [ "$oper" = "up" ] || [ "$bst" = "3" ] || [ "$bst" = "2" ]; }; then ethtool "$ifn" 2>/dev/null | awk -v i="$ifn" \'{for(k=1;k<=NF;k++)if($k~/^[0-9]+base/){s=$k+0;if(s>m)m=s}} /Speed:/{c=$2+0} /Link detected:/{l=($3=="yes"?1:0)} END{if(m||c||l==1)print "PORTCAP|"i"|"m"|"c"|"l}\'; fi; done',
     'uci show network 2>/dev/null | grep -E "\\.(ports|device|ifname)=" | sed "s/^/UCINET|/"',
     'command -v jsonfilter >/dev/null 2>&1 && [ -f /etc/board.json ] && jsonfilter -i /etc/board.json -e "@.network.*.ports[*]" -e "@.network.*.device" 2>/dev/null | sed "s/^/BOARDPORT|/"',
     'ip -4 route show default 2>/dev/null | awk \'/default/{for(i=1;i<=NF;i++){if($i=="via")g=$(i+1);if($i=="dev")d=$(i+1);if($i=="src")s=$(i+1)}print "DEFROUTE|"g"|"d"|"s;exit}\'',
-    'command -v bridge >/dev/null 2>&1 && bridge fdb show 2>/dev/null | awk \'!/permanent/{m=tolower($1);d="";b="";v="";for(i=2;i<=NF;i++){if($i=="dev")d=$(i+1);if($i=="master")b=$(i+1);if($i=="vlan")v=$(i+1)}if(m~/^([0-9a-f]{2}:){5}[0-9a-f]{2}$/&&d!="")print "FDB|"m"|"d"|"b"|"v}\'',
+    'command -v bridge >/dev/null 2>&1 && bridge fdb show 2>/dev/null | awk \'!(/permanent/ && /master/ && !/self/){m=tolower($1);d="";b="";v="";for(i=2;i<=NF;i++){if($i=="dev")d=$(i+1);if($i=="master")b=$(i+1);if($i=="vlan")v=$(i+1)}if(m~/^([0-9a-f]{2}:){5}[0-9a-f]{2}$/&&d!="")print "FDB|"m"|"d"|"b"|"v}\'',
     'for b in /sys/class/net/*/brif; do [ -d "$b" ] || continue; br=${b%/brif}; br=${br##*/}; brctl showmacs "$br" 2>/dev/null | awk -v br="$br" \'NR>1&&$3=="no"{print "BRMAC|"br"|"$1"|"tolower($2)}\'; done',
-    'command -v swconfig >/dev/null 2>&1 && for sw in $(swconfig list 2>/dev/null | awk \'{print $2}\' | tr -d ":"); do swconfig dev "$sw" show 2>/dev/null | awk -v sw="$sw" \'/^[[:space:]]*Port [0-9]+:/{sub(/:/,"",$2);cp=$2}/link:/{p=cp;st="down";spd="";dup="";for(i=1;i<=NF;i++){if($i~/^port:/)p=substr($i,6);if($i~/^link:/){v=substr($i,6);st=(v!=""?v:$(i+1))}if($i~/^speed:/){v=substr($i,7);spd=(v!=""?v:$(i+1))}if($i~/duplex/)dup=$i}if(p!="")print "SWPORT|"sw"|"p"|"st"|"spd"|"dup}\'; done',
+    'command -v hexdump >/dev/null 2>&1 && for b in /sys/class/net/*/brforward; do [ -e "$b" ] || continue; br=${b%/brforward}; br=${br##*/}; hexdump -v -e \'6/1 "%02x:" " " 1/1 "%u " 1/1 "%u " 4/1 "%02x" " " 1/1 "%u" 3/1 " %02x" "\\n"\' "$b" 2>/dev/null | awk -v br="$br" \'$3==0&&$2>0{sub(/:$/,"",$1);p=$2+($5*256);print "BRMAC|"br"|"p"|"tolower($1)}\'; done',
+    'command -v swconfig >/dev/null 2>&1 && for sw in $(swconfig list 2>/dev/null | awk \'{print $2}\' | tr -d ":"); do swconfig dev "$sw" show 2>/dev/null | awk -v sw="$sw" \'/^[ \t]*Port [0-9]+:/{sub(/:/,"",$2);cp=$2} /link:/{p=cp;st="down";spd="";dup="";for(i=1;i<=NF;i++){if($i~/^port:/){v=substr($i,6);p=(v!=""?v:$(i+1))}if($i~/^link:/){v=substr($i,6);st=(v!=""?v:$(i+1))}if($i~/^speed:/){v=substr($i,7);spd=(v!=""?v:$(i+1))}if($i~/duplex/)dup=$i}if(p!="")print "SWPORT|"sw"|"p"|"st"|"spd"|"dup}\'; done',
     'echo "===RDNS==="',
     'gw=$(ip route show default 2>/dev/null | awk \'/default/{print $3;exit}\'); for smac in $(for iface in $IW_IFS; do iw dev "$iface" station dump 2>/dev/null | awk \'/^Station/{print tolower($2)}\'; done | head -n 10); do sip=$(awk \'tolower($4)=="\'$smac\'"&&$3!="0x0"{print $1;exit}\' /proc/net/arp 2>/dev/null); [ -n "$sip" ] && echo "$smac $sip $(nslookup "$sip" ${gw:+"$gw"} 2>/dev/null | awk \'/name =/{print $NF;exit}/^Address 1:/&&NF>=4{print $4;exit}\')"; done',
     'echo "===OPKG_UPGRADABLE==="',
@@ -1074,10 +1076,14 @@ export async function pollRealHost(hostConfig, prevSample = null) {
         'echo "===NETDEV_STATUS==="',
         'ubus call network.device status 2>/dev/null',
         'echo "===SWITCH_FDB==="',
-        'ip -o link show 2>/dev/null | awk -F": " \'/LOWER_UP/ && !/NO-CARRIER/{sub(/@.*/,"",$2); print "LINKUP|" $2}\'',
+        'ip link show 2>/dev/null | awk -F": " \'/^[0-9]+:/ && (/LOWER_UP/ || /state UP/) && !/NO-CARRIER/{sub(/@.*/,"",$2); print "LINKUP|" $2}\'',
         'for p in /sys/class/net/*/brif/*; do [ -e "$p" ] || continue; br=${p%/brif/*}; br=${br##*/}; ifn=${p##*/}; d="/sys/class/net/$ifn"; echo "BRPORT|$br|$ifn|$(cat "$p/port_no" 2>/dev/null)|$(cat "$d/speed" 2>/dev/null)|$(cat "$d/duplex" 2>/dev/null)|$(cat "$d/operstate" 2>/dev/null)|$(cat "$d/carrier" 2>/dev/null)|$(cat "$d/address" 2>/dev/null)|$(cat "$p/state" 2>/dev/null)"; done',
+        'for d in /sys/class/net/*; do [ -e "$d" ] || continue; ifn=${d##*/}; [ "$ifn" = "lo" ] && continue; m=$(cat "$d/address" 2>/dev/null); [ -n "$m" ] && echo "HOSTIF|$ifn|$m|"; [ -d "$d/bridge" ] || [ -d "$d/brif" ] || [ -d "$d/wireless" ] || [ -d "$d/phy80211" ] && continue; case "$ifn" in br-*|br[0-9]*|switch|switch.*|*.*|wlan*|phy*|ra*|rax*|ath*|wds*|mesh*|mon*|wg*|tun*|tap*|docker*|veth*|sit*|gre*|ip*|ifb*|teql*|erspan*|pppoe*|ppp*|bat*|tailscale*|zt*|miireg*|dummy*|bond*) continue ;; esac; br=""; [ -e "$d/brport/bridge" ] && br=$(readlink "$d/brport/bridge" 2>/dev/null) && br=${br##*/}; echo "NICPORT|$ifn|$m|$(cat "$d/speed" 2>/dev/null)|$(cat "$d/duplex" 2>/dev/null)|$(cat "$d/operstate" 2>/dev/null)|$(cat "$d/carrier" 2>/dev/null)|$br|$(cat "$d/brport/state" 2>/dev/null)|$(cat "$d/brport/port_no" 2>/dev/null)"; done',
         'uci show network 2>/dev/null | grep -E "\\.(ports|device|ifname)=" | sed "s/^/UCINET|/"',
-        'if command -v bridge >/dev/null 2>&1; then bridge fdb show 2>/dev/null | awk \'!/permanent/{mac=tolower($1); dev=""; br=""; vlan=""; for(i=2;i<=NF;i++){if($i=="dev") dev=$(i+1); if($i=="master") br=$(i+1); if($i=="vlan") vlan=$(i+1);} if(mac ~ /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/ && dev!="") print "FDB|" mac "|" dev "|" br "|" vlan}\'; fi',
+        'command -v jsonfilter >/dev/null 2>&1 && [ -f /etc/board.json ] && jsonfilter -i /etc/board.json -e "@.network.*.ports[*]" -e "@.network.*.device" 2>/dev/null | sed "s/^/BOARDPORT|/"',
+        'command -v bridge >/dev/null 2>&1 && bridge fdb show 2>/dev/null | awk \'!(/permanent/ && /master/ && !/self/){m=tolower($1);d="";b="";v="";for(i=2;i<=NF;i++){if($i=="dev")d=$(i+1);if($i=="master")b=$(i+1);if($i=="vlan")v=$(i+1)}if(m~/^([0-9a-f]{2}:){5}[0-9a-f]{2}$/&&d!="")print "FDB|"m"|"d"|"b"|"v}\'',
+        'command -v hexdump >/dev/null 2>&1 && for b in /sys/class/net/*/brforward; do [ -e "$b" ] || continue; br=${b%/brforward}; br=${br##*/}; hexdump -v -e \'6/1 "%02x:" " " 1/1 "%u " 1/1 "%u " 4/1 "%02x" " " 1/1 "%u" 3/1 " %02x" "\\n"\' "$b" 2>/dev/null | awk -v br="$br" \'$3==0&&$2>0{sub(/:$/,"",$1);p=$2+($5*256);print "BRMAC|"br"|"p"|"tolower($1)}\'; done',
+        'command -v swconfig >/dev/null 2>&1 && for sw in $(swconfig list 2>/dev/null | awk \'{print $2}\' | tr -d ":"); do swconfig dev "$sw" show 2>/dev/null | awk -v sw="$sw" \'/^[ \t]*Port [0-9]+:/{sub(/:/,"",$2);cp=$2} /link:/{p=cp;st="down";spd="";dup="";for(i=1;i<=NF;i++){if($i~/^port:/){v=substr($i,6);p=(v!=""?v:$(i+1))}if($i~/^link:/){v=substr($i,6);st=(v!=""?v:$(i+1))}if($i~/^speed:/){v=substr($i,7);spd=(v!=""?v:$(i+1))}if($i~/duplex/)dup=$i}if(p!="")print "SWPORT|"sw"|"p"|"st"|"spd"|"dup}\'; done',
         'echo "===IWDEV==="',
         'iw dev 2>/dev/null',
         'echo "===STATIONS==="',
@@ -1211,6 +1217,9 @@ export function parseSwitchFdbSection(switchFdbTxt, iwInterfaces = new Map(), op
   const switchPortsByIface = new Map();
   const rawNicPorts = [];
   const swconfigPorts = [];
+  const deferredFdbEntries = [];
+  const deferredBrMacEntries = [];
+  const ifAddrByIface = new Map();
   const uciConfiguredPorts = new Set();
   const lowerUpIfaces = new Set();
   const activeBridgeMembers = new Set();
@@ -1257,6 +1266,14 @@ export function parseSwitchFdbSection(switchFdbTxt, iwInterfaces = new Map(), op
       continue;
     }
 
+    if (line.startsWith('IFADDR|')) {
+      const [, ifname, ipv4] = line.split('|');
+      if (ifname && ipv4 && !ifAddrByIface.has(ifname)) {
+        ifAddrByIface.set(ifname, ipv4.trim());
+      }
+      continue;
+    }
+
     if (line.startsWith('BRMEMBER|')) {
       const [, , member] = line.split('|');
       if (member) {
@@ -1276,7 +1293,7 @@ export function parseSwitchFdbSection(switchFdbTxt, iwInterfaces = new Map(), op
         hostInterfaces.push({
           iface: ifname,
           mac: mac || null,
-          ipv4: ipv4 || null,
+          ipv4: ipv4 || ifAddrByIface.get(ifname) || null,
         });
       }
       continue;
@@ -1305,14 +1322,16 @@ export function parseSwitchFdbSection(switchFdbTxt, iwInterfaces = new Map(), op
       const formatted = formatSwitchPortLabel(ifname, speedMbps);
       if (!formatted) continue;
 
+      const isBrForwarding = rawBrState === '3' || rawBrState === '2';
       const isExplicitlyDown =
-        rawCarrier === '0' || rawOper === 'down' || rawOper === 'lowerlayerdown' || rawBrState === '0';
+        !isBrForwarding &&
+        (rawCarrier === '0' || rawOper === 'down' || rawOper === 'lowerlayerdown' || rawBrState === '0');
       const isUp =
         rawCarrier === '1' ||
         rawOper === 'up' ||
+        isBrForwarding ||
         lowerUpIfaces.has(ifname) ||
-        (!isExplicitlyDown && (rawBrState === '3' || rawBrState === '2')) ||
-        (!isExplicitlyDown && rawOper === 'unknown' && speedMbps !== null && speedMbps > 0);
+        (!isExplicitlyDown && speedMbps !== null && speedMbps > 0);
 
       const portObj = {
         iface: ifname,
@@ -1337,12 +1356,16 @@ export function parseSwitchFdbSection(switchFdbTxt, iwInterfaces = new Map(), op
     }
 
     if (line.startsWith('NICPORT|')) {
-      const [, ifname, rawIfMac, rawSpeed, rawDuplex, rawOper, rawCarrier, bridge] = line.split('|');
+      const [, ifname, rawIfMac, rawSpeed, rawDuplex, rawOper, rawCarrier, bridge, rawBrState, rawPortNo] = line.split('|');
       if (!ifname || iwInterfaces.has(ifname) || /^(wlan|phy|ra|rax|ath|wds|mesh|lo|br-)/i.test(ifname)) {
         continue;
       }
       const ifMac = normalizeMac(rawIfMac);
       if (ifMac) allHostMacsSet.add(ifMac);
+      const portNo = normalizePortNo(rawPortNo);
+      if (bridge && portNo !== null && !portNoToIfaceByBridge.has(`${bridge}:${portNo}`)) {
+        portNoToIfaceByBridge.set(`${bridge}:${portNo}`, ifname);
+      }
       rawNicPorts.push({
         ifname,
         ifMac,
@@ -1351,6 +1374,8 @@ export function parseSwitchFdbSection(switchFdbTxt, iwInterfaces = new Map(), op
         rawOper,
         rawCarrier,
         bridge: bridge || null,
+        rawBrState: rawBrState || null,
+        portNo,
       });
       continue;
     }
@@ -1447,29 +1472,12 @@ export function parseSwitchFdbSection(switchFdbTxt, iwInterfaces = new Map(), op
       const mac = (rawMac || '').toLowerCase();
       if (!/^([0-9a-f]{2}:){5}[0-9a-f]{2}$/.test(mac) || isMulticastOrBroadcastMac(mac)) continue;
       if (!dev || iwInterfaces.has(dev) || /^(wlan|phy|ra|rax|ath|wds|mesh|lo)/i.test(dev)) continue;
-
-      const existingFdb = fdbByMac.get(mac);
-      const isVirtualOrConduitDev = dev.includes('.') || /^(switch|br-|eth\d+$)/i.test(dev);
-      const existingIsPhysical =
-        existingFdb && !existingFdb.iface.includes('.') && !/^(switch|br-|eth\d+$)/i.test(existingFdb.iface);
-      if (existingIsPhysical && isVirtualOrConduitDev) continue;
-
-      const knownPort = switchPortsByIface.get(dev);
-      const formatted = knownPort || formatSwitchPortLabel(dev);
-      if (!formatted) continue;
-
-      fdbByMac.set(mac, {
-        iface: dev,
-        switchPort: formatted.switchPort,
-        portNumber: formatted.portNumber ?? null,
-        portLabel: formatted.portLabel,
-        bridge: bridge || knownPort?.bridge || 'br-lan',
-        speedMbps: knownPort?.speedMbps || formatted.speedMbps || 1000,
+      deferredFdbEntries.push({
+        mac,
+        dev: dev.trim(),
+        bridge: bridge || 'br-lan',
         vlan: rawVlan ? parseInt(rawVlan, 10) || 1 : 1,
       });
-      if (knownPort && !knownPort.connectedMacs.includes(mac)) {
-        knownPort.connectedMacs.push(mac);
-      }
       continue;
     }
 
@@ -1477,36 +1485,20 @@ export function parseSwitchFdbSection(switchFdbTxt, iwInterfaces = new Map(), op
       const [, bridge, rawPortNo, rawMac] = line.split('|');
       const mac = (rawMac || '').toLowerCase();
       if (!/^([0-9a-f]{2}:){5}[0-9a-f]{2}$/.test(mac) || isMulticastOrBroadcastMac(mac)) continue;
-      if (fdbByMac.has(mac)) continue;
       const portNo = normalizePortNo(rawPortNo);
-      const ifname = portNo !== null ? portNoToIfaceByBridge.get(`${bridge}:${portNo}`) : null;
-      if (!ifname || iwInterfaces.has(ifname)) continue;
-
-      const knownPort = switchPortsByIface.get(ifname);
-      const formatted = knownPort || formatSwitchPortLabel(ifname);
-      if (!formatted) continue;
-
-      fdbByMac.set(mac, {
-        iface: ifname,
-        switchPort: formatted.switchPort,
-        portNumber: formatted.portNumber ?? portNo,
-        portLabel: formatted.portLabel,
+      if (portNo === null) continue;
+      deferredBrMacEntries.push({
+        mac,
         bridge: bridge || 'br-lan',
-        speedMbps: knownPort?.speedMbps || 1000,
-        vlan: 1,
+        portNo,
       });
-      if (knownPort && !knownPort.connectedMacs.includes(mac)) {
-        knownPort.connectedMacs.push(mac);
-      }
     }
   }
 
-  // Remove any of the host's own local interface MAC addresses from fdbByMac so hardware `self` FDB entries for local ports aren't treated as external clients
-  for (const ownMac of allHostMacsSet) {
-    fdbByMac.delete(ownMac);
-  }
-  for (const portObj of switchPortsByIface.values()) {
-    portObj.connectedMacs = portObj.connectedMacs.filter((m) => !allHostMacsSet.has(m));
+  for (const hi of hostInterfaces) {
+    if (!hi.ipv4 && ifAddrByIface.has(hi.iface)) {
+      hi.ipv4 = ifAddrByIface.get(hi.iface);
+    }
   }
 
   // Merge standalone / routed NIC ports (`NICPORT`) not already in `switchPortsByIface`
@@ -1518,6 +1510,10 @@ export function parseSwitchFdbSection(switchFdbTxt, iwInterfaces = new Map(), op
     if (switchPortsByIface.has(nic.ifname)) {
       const existing = switchPortsByIface.get(nic.ifname);
       if (!existing.mac && nic.ifMac) existing.mac = nic.ifMac;
+      if (nic.rawBrState === '3' || nic.rawBrState === '2') {
+        existing.linkUp = true;
+        existing.status = 'up';
+      }
       continue;
     }
     const isWanNic = nic.ifname === wanDev || /^wan\d*$/i.test(nic.ifname) || (defaultRoute?.dev === nic.ifname && !nic.bridge);
@@ -1539,21 +1535,26 @@ export function parseSwitchFdbSection(switchFdbTxt, iwInterfaces = new Map(), op
       : formatSwitchPortLabel(nic.ifname, speedMbps);
     if (!formatted) continue;
 
+    const isBrForwarding = nic.rawBrState === '3' || nic.rawBrState === '2';
+    const isExplicitlyDown =
+      !isBrForwarding &&
+      (nic.rawCarrier === '0' || nic.rawOper === 'down' || nic.rawOper === 'lowerlayerdown' || nic.rawBrState === '0');
     const isUp =
       nic.rawCarrier === '1' ||
       nic.rawOper === 'up' ||
+      isBrForwarding ||
       lowerUpIfaces.has(nic.ifname) ||
-      (nic.rawOper === 'unknown' && speedMbps !== null && speedMbps > 0);
+      (!isExplicitlyDown && speedMbps !== null && speedMbps > 0);
 
     switchPortsByIface.set(nic.ifname, {
       iface: nic.ifname,
       switchPort: formatted.switchPort,
-      portNumber: formatted.portNumber,
+      portNumber: formatted.portNumber ?? nic.portNo,
       portLabel: formatted.portLabel,
       portRole: isWanNic ? 'wan' : nic.bridge ? 'lan' : 'routed',
       mac: nic.ifMac || null,
       bridge: nic.bridge || null,
-      portNo: null,
+      portNo: nic.portNo,
       speedMbps: speedMbps || formatted.speedMbps || 1000,
       duplex: nic.rawDuplex && nic.rawDuplex !== 'unknown' ? nic.rawDuplex : 'full',
       status: isUp ? 'up' : 'down',
@@ -1584,6 +1585,9 @@ export function parseSwitchFdbSection(switchFdbTxt, iwInterfaces = new Map(), op
       linkUp: Boolean(isUp),
       connectedMacs: [],
     });
+    if (formatted.portNumber !== null && !portNoToIfaceByBridge.has(`switch:${formatted.portNumber}`)) {
+      portNoToIfaceByBridge.set(`switch:${formatted.portNumber}`, uciPort);
+    }
   }
 
   // If `switchPortsByIface` contains a virtual bridge/VLAN subinterface (like `switch.1` or `eth0.1`) alongside real physical ports, remove the virtual subinterface
@@ -1608,6 +1612,8 @@ export function parseSwitchFdbSection(switchFdbTxt, iwInterfaces = new Map(), op
         }
       }
     }
+    const hasZeroPort = swconfigPorts.some((p) => p.portNumber === 0);
+    const hasLanZero = switchPortsByIface.has('lan0') || switchPortsByIface.has('port0');
     for (const swp of swconfigPorts) {
       if (!Number.isFinite(swp.portNumber)) continue;
       const spdMatch = String(swp.rawSpeed).match(/(\d+)/);
@@ -1616,7 +1622,8 @@ export function parseSwitchFdbSection(switchFdbTxt, iwInterfaces = new Map(), op
       const existingMatch =
         switchPortsByIface.get(`port${swp.portNumber}`) ||
         switchPortsByIface.get(`lan${swp.portNumber}`) ||
-        Array.from(switchPortsByIface.values()).find((p) => p.portNumber === swp.portNumber);
+        Array.from(switchPortsByIface.values()).find((p) => p.portNumber === swp.portNumber) ||
+        (hasZeroPort && !hasLanZero ? switchPortsByIface.get(`lan${swp.portNumber + 1}`) : null);
       if (existingMatch) {
         if (isUp && !existingMatch.linkUp) {
           existingMatch.linkUp = true;
@@ -1648,11 +1655,72 @@ export function parseSwitchFdbSection(switchFdbTxt, iwInterfaces = new Map(), op
     }
   }
 
-  // Ensure any port added via NICPORT or UCINET has its connectedMacs populated from fdbByMac
-  for (const [mac, entry] of fdbByMac.entries()) {
-    const portObj = switchPortsByIface.get(entry.iface);
-    if (portObj && !portObj.connectedMacs.includes(mac)) {
-      portObj.connectedMacs.push(mac);
+  // Now resolve deferred FDB| and BRMAC| entries against the complete set of ports in `switchPortsByIface`
+  for (const fdbItem of deferredFdbEntries) {
+    const { mac, dev, bridge, vlan } = fdbItem;
+    if (allHostMacsSet.has(mac)) continue;
+
+    const baseDev = dev.split('.')[0];
+    const knownPort =
+      switchPortsByIface.get(dev) ||
+      switchPortsByIface.get(baseDev) ||
+      Array.from(switchPortsByIface.values()).find(
+        (p) => p.portNumber !== null && p.portNumber === formatSwitchPortLabel(baseDev)?.portNumber
+      ) ||
+      null;
+    const resolvedIface = knownPort ? knownPort.iface : dev;
+
+    const existingFdb = fdbByMac.get(mac);
+    const isVirtualOrConduitDev = resolvedIface.includes('.') || /^(switch|br-|eth\d+$)/i.test(resolvedIface);
+    const existingIsPhysical =
+      existingFdb && !existingFdb.iface.includes('.') && !/^(switch|br-|eth\d+$)/i.test(existingFdb.iface);
+    if (existingIsPhysical && isVirtualOrConduitDev) continue;
+
+    const formatted = knownPort || formatSwitchPortLabel(resolvedIface);
+    if (!formatted) continue;
+
+    fdbByMac.set(mac, {
+      iface: resolvedIface,
+      switchPort: formatted.switchPort,
+      portNumber: formatted.portNumber ?? null,
+      portLabel: formatted.portLabel,
+      bridge: bridge || knownPort?.bridge || 'br-lan',
+      speedMbps: knownPort?.speedMbps || formatted.speedMbps || 1000,
+      vlan,
+    });
+    if (knownPort && !knownPort.connectedMacs.includes(mac)) {
+      knownPort.connectedMacs.push(mac);
+    }
+  }
+
+  for (const brItem of deferredBrMacEntries) {
+    const { mac, bridge, portNo } = brItem;
+    if (allHostMacsSet.has(mac) || fdbByMac.has(mac)) continue;
+
+    let ifname = portNoToIfaceByBridge.get(`${bridge}:${portNo}`) || null;
+    if (!ifname) {
+      const byPortNo = Array.from(switchPortsByIface.values()).find(
+        (p) => p.portNo === portNo || p.portNumber === portNo
+      );
+      if (byPortNo) ifname = byPortNo.iface;
+    }
+    if (!ifname || iwInterfaces.has(ifname)) continue;
+
+    const knownPort = switchPortsByIface.get(ifname);
+    const formatted = knownPort || formatSwitchPortLabel(ifname);
+    if (!formatted) continue;
+
+    fdbByMac.set(mac, {
+      iface: ifname,
+      switchPort: formatted.switchPort,
+      portNumber: formatted.portNumber ?? portNo,
+      portLabel: formatted.portLabel,
+      bridge: bridge || 'br-lan',
+      speedMbps: knownPort?.speedMbps || 1000,
+      vlan: 1,
+    });
+    if (knownPort && !knownPort.connectedMacs.includes(mac)) {
+      knownPort.connectedMacs.push(mac);
     }
   }
 
@@ -1682,11 +1750,16 @@ export function parseSwitchFdbSection(switchFdbTxt, iwInterfaces = new Map(), op
       cap?.carrier === true ||
       (cap?.carrier !== false && cap?.up === true && (cap?.curSpeedMbps > 0 || activeBridgeMembers.has(portObj.iface))) ||
       (cap?.carrier !== false && activeBridgeMembers.has(portObj.iface));
-    const hasLiveTraffic = (portObj.rxRateBps > 0 || portObj.txRateBps > 0) && cap?.carrier !== false;
+    const hasLiveTraffic = portObj.rxRateBps > 0 || portObj.txRateBps > 0;
+    const baseIface = portObj.iface.split('.')[0];
 
     if (
       !portObj.linkUp &&
-      (isCapUp || lowerUpIfaces.has(portObj.iface) || portObj.connectedMacs.length > 0 || hasLiveTraffic)
+      (isCapUp ||
+        lowerUpIfaces.has(portObj.iface) ||
+        lowerUpIfaces.has(baseIface) ||
+        portObj.connectedMacs.length > 0 ||
+        hasLiveTraffic)
     ) {
       portObj.linkUp = true;
       portObj.status = 'up';

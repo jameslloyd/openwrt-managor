@@ -126,10 +126,11 @@ export function renderNodeDetails(node) {
     ? `
       <!-- Physical Switch Ports & Attached Devices -->
       <div class="drawer-section">
-        <div class="drawer-section-title">Physical Switch Ports (${switchPorts.filter((p) => p.linkUp ?? p.status === 'up').length}/${switchPorts.length} Active)</div>
+        <div class="drawer-section-title">Physical Switch Ports (${switchPorts.filter((p) => (p.linkUp ?? p.status === 'up') || (Array.isArray(p.connectedDevices) && p.connectedDevices.length > 0) || (Array.isArray(p.connectedMacs) && p.connectedMacs.length > 0)).length}/${switchPorts.length} Active)</div>
         <div style="display: flex; flex-direction: column; gap: 6px;">
           ${switchPorts.map((p) => {
-            const isPortUp = p.linkUp ?? p.status === 'up';
+            const devices = Array.isArray(p.connectedDevices) ? p.connectedDevices : [];
+            const isPortUp = Boolean((p.linkUp ?? p.status === 'up') || devices.length > 0 || (Array.isArray(p.connectedMacs) && p.connectedMacs.length > 0));
             const curSpd = Number(p.speedMbps) || 0;
             const rawMax = Number(p.maxSpeedMbps) || 0;
             const baseIfn = String(p.iface || '').split('.')[0];
@@ -141,7 +142,6 @@ export function renderNodeDetails(node) {
             const speedStr = isPortUp
               ? (curSpd >= 1000 ? `${curSpd / 1000} Gbps` : curSpd > 0 ? `${curSpd} Mbps` : 'Link Up')
               : `No Carrier (${maxStr} max)`;
-            const devices = Array.isArray(p.connectedDevices) ? p.connectedDevices : [];
             return `
               <div style="background: var(--color-surface-elevated); padding: 9px 11px; border-radius: var(--radius-md); border: 1px solid ${isSuboptimal ? 'var(--color-warning)' : 'var(--color-border-subtle)'}; display: flex; flex-direction: column; gap: 4px;">
                 <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap;">
