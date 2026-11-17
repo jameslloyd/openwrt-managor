@@ -337,63 +337,181 @@ export class TopologyGraph {
       nodePositions.set(wanNode.id, { x: centerX, y: 55, node: wanNode });
     }
 
-    // Tier 1: Gateway
-    if (gwNode) {
-      nodePositions.set(gwNode.id, { x: centerX, y: 175, node: gwNode });
-    }
+    // Build a multi-tier hierarchy tree for Gateway, Managed Switches, Dumb Switches, and APs
+    // sorted by upstream switch port number so links fan out monotonically without crossing
+    const infraNodes = [gwNode, ...apNodes].filter(Boolean);
+    const infraById = new Map(infraNodes.map((n) => [n.id, n]));
+    const childrenByParent = new Map();
+    infraNodes.forEach((n) => childrenByParent.set(n.id, []));
 
-    // Tier 2: Access Points / Mesh Nodes & Switches
-    // Compute each AP's required horizontal footprint based on its client grid width
-    const apTierY = gwNode ? 310 : 195;
-    if (apNodes.length > 0) {
-      const apWidths = apNodes.map((ap) => {
-        if (this.collapseClients) return 240;
-        const count = (clientsByHost.get(ap.id) || []).length;
-        const cols = Math.min(maxColsPerCluster, Math.max(1, count));
-        return Math.max(240, cols * clientColSpacing + 48);
+    const extractPortOrder = (str) => {
+      if (!str) return 999;
+      const m = String(str).match(/(\d+)/);
+      return m ? parseInt(m[1], 10) : 999;
+    };
+
+    const assignedChildIds = new Set();
+    if (gwNode) assignedChildIds.add(gwNode.id);
+
+    // Connect each non-gateway infra node to its upstream parent infra node
+    apNodes.forEach((node, idx) => {
+      const incomingLink = this.links.find(
+        (l) => l.target === node.id && l.source !== 'wan-internet' && infraById.has(l.source)
+      );
+      let parentId =
+        incomingLink?.source ||
+        node.parentHostId ||
+        node.nicInfo?.upstreamHostId ||
+        gwNode?.id ||
+        null;
+
+      if (!parentId || !infraById.has(parentId) || parentId === node.id) {
+        parentId = gwNode?.id || null;
+      }
+
+      if (parentId && childrenByParent.has(parentId)) {
+        const portStr =
+          incomingLink?.sourcePort ||
+          incomingLink?.sourceIface ||
+          node.parentPort ||
+          node.parentIface ||
+          node.nicInfo?.upstreamPort ||
+          node.nicInfo?.upstreamIface ||
+          '';
+        childrenByParent.get(parentId).push({
+          node,
+          portOrder: extractPortOrder(portStr),
+          origIdx: idx,
+        });
+        assignedChildIds.add(node.id);
+      }
+    });
+
+    // Sort every parent's children by upstream port number so links never cross horizontally
+    childrenByParent.forEach((list) => {
+      list.sort((a, b) => {
+        if (a.portOrder !== b.portOrder) return a.portOrder - b.portOrder;
+        return a.origIdx - b.origIdx;
+      });
+    });
+
+    const getDirectClientClusterWidth = (hostId) => {
+      if (this.collapseClients) return 0;
+      const count = (clientsByHost.get(hostId) || []).length;
+      if (count === 0) return 0;
+      const cols = Math.min(maxColsPerCluster, Math.max(1, count));
+      return Math.max(240, cols * clientColSpacing + 48);
+    };
+
+    const subtreeWidths = new Map();
+    const visitedWidth = new Set();
+    const computeSubtreeWidth = (nodeId) => {
+      if (visitedWidth.has(nodeId)) return 240;
+      visitedWidth.add(nodeId);
+      const children = childrenByParent.get(nodeId) || [];
+      const directClientW = getDirectClientClusterWidth(nodeId);
+
+      if (children.length === 0) {
+        const w = Math.max(240, directClientW);
+        subtreeWidths.set(nodeId, w);
+        return w;
+      }
+
+      let totalChildrenW = 0;
+      children.forEach(({ node: child }) => {
+        totalChildrenW += computeSubtreeWidth(child.id);
+      });
+      if (directClientW > 0) {
+        totalChildrenW += directClientW;
+      }
+      const w = Math.max(240, totalChildrenW);
+      subtreeWidths.set(nodeId, w);
+      return w;
+    };
+
+    const clientClusterCenters = new Map();
+    const tierStepY = 140;
+    const visitedLayout = new Set();
+
+    const layoutSubtree = (nodeId, leftX, y) => {
+      if (visitedLayout.has(nodeId)) return;
+      visitedLayout.add(nodeId);
+      const node = infraById.get(nodeId);
+      if (!node) return;
+
+      const totalW = subtreeWidths.get(nodeId) || 240;
+      const children = childrenByParent.get(nodeId) || [];
+      const directClientW = getDirectClientClusterWidth(nodeId);
+
+      if (children.length === 0) {
+        const cx = leftX + totalW / 2;
+        nodePositions.set(nodeId, { x: cx, y, node });
+        if (directClientW > 0) {
+          clientClusterCenters.set(nodeId, { x: cx, y: y + 148 });
+        }
+        return;
+      }
+
+      let cursorX = leftX;
+      const childCenters = [];
+      children.forEach(({ node: child }) => {
+        const cw = subtreeWidths.get(child.id) || 240;
+        layoutSubtree(child.id, cursorX, y + tierStepY);
+        const cPos = nodePositions.get(child.id);
+        if (cPos) childCenters.push(cPos.x);
+        cursorX += cw;
       });
 
-      const totalApSpan = apWidths.reduce((acc, w) => acc + w, 0);
-      let cursorX = centerX - totalApSpan / 2;
-
-      apNodes.forEach((ap, idx) => {
-        const w = apWidths[idx];
-        const apCenterX = cursorX + w / 2;
-        nodePositions.set(ap.id, {
-          x: apCenterX,
-          y: apTierY,
-          node: ap,
+      if (directClientW > 0) {
+        clientClusterCenters.set(nodeId, {
+          x: cursorX + directClientW / 2,
+          y: y + tierStepY,
         });
+        cursorX += directClientW;
+      }
+
+      // Center parent above its child infrastructure nodes (or total span if single child)
+      const parentX =
+        childCenters.length > 0
+          ? (childCenters[0] + childCenters[childCenters.length - 1]) / 2
+          : leftX + totalW / 2;
+      nodePositions.set(nodeId, { x: parentX, y, node });
+    };
+
+    if (gwNode) {
+      const rootW = computeSubtreeWidth(gwNode.id);
+      layoutSubtree(gwNode.id, centerX - rootW / 2, 175);
+      // Keep WAN node aligned directly above Gateway
+      const gwPos = nodePositions.get(gwNode.id);
+      if (wanNode && gwPos) {
+        nodePositions.set(wanNode.id, { x: gwPos.x, y: 55, node: wanNode });
+      }
+    }
+
+    // Lay out any remaining unattached infra nodes if present
+    const unplacedInfra = infraNodes.filter((n) => !nodePositions.has(n.id));
+    if (unplacedInfra.length > 0) {
+      unplacedInfra.forEach((n) => computeSubtreeWidth(n.id));
+      const span = unplacedInfra.reduce((acc, n) => acc + (subtreeWidths.get(n.id) || 240), 0);
+      let cursorX = centerX - span / 2;
+      const baseY = gwNode ? 315 : 195;
+      unplacedInfra.forEach((n) => {
+        const w = subtreeWidths.get(n.id) || 240;
+        layoutSubtree(n.id, cursorX, baseY);
         cursorX += w;
       });
     }
 
-    // Tier 3: Clients arranged in non-overlapping multi-row grids beneath their parent AP / Gateway
+    // Place Clients in non-overlapping multi-row grids beneath their parent AP / Dumb Switch / Switch / Gateway
     if (!this.collapseClients) {
-      // If Gateway also has direct clients and there are APs on Tier 2, place Gateway's direct clients to the right of the AP row or below if no APs
-      let gwClientBaseX = centerX;
-      let gwClientBaseY = apNodes.length > 0 ? apTierY + 150 : (gwNode ? 320 : 200);
-      if (gwNode && apNodes.length > 0 && clientsByHost.has(gwNode.id)) {
-        // Find rightmost AP edge so Gateway clients don't collide with the middle AP's clients
-        let maxApRight = centerX;
-        apNodes.forEach((ap) => {
-          const p = nodePositions.get(ap.id);
-          const count = (clientsByHost.get(ap.id) || []).length;
-          const cols = Math.min(maxColsPerCluster, Math.max(1, count));
-          const halfW = Math.max(120, (cols * clientColSpacing) / 2);
-          if (p && p.x + halfW > maxApRight) maxApRight = p.x + halfW;
-        });
-        const gwClientCount = (clientsByHost.get(gwNode.id) || []).length;
-        const gwCols = Math.min(maxColsPerCluster, Math.max(1, gwClientCount));
-        gwClientBaseX = maxApRight + 80 + (gwCols * clientColSpacing) / 2;
-        gwClientBaseY = apTierY + 150;
-      }
-
       clientsByHost.forEach((hostClients, hostId) => {
-        const parentPos = nodePositions.get(hostId) || { x: centerX, y: apTierY };
-        const isGwHost = gwNode && hostId === gwNode.id;
-        const clusterCenterX = isGwHost ? gwClientBaseX : parentPos.x;
-        const baseTierY = isGwHost ? gwClientBaseY : parentPos.y + 150;
+        const parentPos = nodePositions.get(hostId) || { x: centerX, y: 315 };
+        const clusterSlot = clientClusterCenters.get(hostId) || {
+          x: parentPos.x,
+          y: parentPos.y + 148,
+        };
+        const clusterCenterX = clusterSlot.x;
+        const baseTierY = clusterSlot.y;
 
         const cCount = hostClients.length;
         const cols = Math.min(maxColsPerCluster, Math.max(1, cCount));
@@ -430,8 +548,19 @@ export class TopologyGraph {
       this.bounds = { minX, maxX, minY, maxY };
     }
 
+    const evalCubicBezier = (v0, v1, v2, v3, t) => {
+      const u = 1 - t;
+      return (
+        u * u * u * v0 +
+        3 * u * u * t * v1 +
+        3 * u * t * t * v2 +
+        t * t * t * v3
+      );
+    };
+
     // Generate Infrastructure Links SVG (skip client links here; client links are rendered below)
     let linksSvg = '';
+    const placedLinkPills = [];
     for (const link of this.links) {
       if (String(link.target || '').startsWith('client-')) continue;
       const srcPos = nodePositions.get(link.source);
@@ -447,9 +576,10 @@ export class TopologyGraph {
       if (link.medium === 'wifi_mesh') mediumClass = 'wifi-mesh';
       else if (link.medium === 'wifi_station') mediumClass = 'wifi-station';
 
-      const midY = (srcPos.y + tgtPos.y) / 2;
-      const midX = (srcPos.x + tgtPos.x) / 2;
-      const pathD = `M ${srcPos.x} ${srcPos.y} C ${srcPos.x} ${midY}, ${tgtPos.x} ${midY}, ${tgtPos.x} ${tgtPos.y}`;
+      const y1 = tgtPos.y > srcPos.y ? srcPos.y + 26 : srcPos.y;
+      const y2 = tgtPos.y > srcPos.y ? tgtPos.y - 26 : tgtPos.y;
+      const midY = (y1 + y2) / 2;
+      const pathD = `M ${srcPos.x} ${y1} C ${srcPos.x} ${midY}, ${tgtPos.x} ${midY}, ${tgtPos.x} ${y2}`;
       const speedText = link.speedMbps >= 1000 ? `${link.speedMbps / 1000}G` : `${link.speedMbps}M`;
       let pillLabel = speedText;
       if (link.sourcePort && link.targetPort && link.source !== 'wan-internet') {
@@ -460,6 +590,25 @@ export class TopologyGraph {
         pillLabel = `${link.targetPort} • ${speedText}`;
       }
       const pillWidth = pillLabel !== speedText ? Math.max(68, pillLabel.length * 6.0) : 36;
+      const pillHeight = 16;
+
+      let pillX = (srcPos.x + tgtPos.x) / 2;
+      let pillY = midY;
+      for (const t of [0.5, 0.34, 0.66, 0.24, 0.76]) {
+        const cx = evalCubicBezier(srcPos.x, srcPos.x, tgtPos.x, tgtPos.x, t);
+        const cy = evalCubicBezier(y1, midY, midY, y2, t);
+        const collides = placedLinkPills.some(
+          (p) =>
+            Math.abs(cy - p.y) < pillHeight + 3 &&
+            Math.abs(cx - p.x) < (pillWidth + p.w) / 2 + 6
+        );
+        if (!collides) {
+          pillX = cx;
+          pillY = cy;
+          break;
+        }
+      }
+      placedLinkPills.push({ x: pillX, y: pillY, w: pillWidth, h: pillHeight });
 
       linksSvg += `
         <g class="topo-link-group">
@@ -467,8 +616,8 @@ export class TopologyGraph {
           ${
             link.speedMbps
               ? `
-            <rect x="${midX - pillWidth / 2}" y="${midY - 10}" width="${pillWidth}" height="16" class="topo-link-pill" />
-            <text x="${midX}" y="${midY + 1}" class="topo-link-label">
+            <rect x="${pillX - pillWidth / 2}" y="${pillY - 10}" width="${pillWidth}" height="${pillHeight}" class="topo-link-pill" />
+            <text x="${pillX}" y="${pillY + 1}" class="topo-link-label">
               ${escapeHtml(pillLabel)}
             </text>
           `

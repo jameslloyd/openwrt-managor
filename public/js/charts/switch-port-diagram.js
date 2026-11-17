@@ -591,27 +591,146 @@ export class SwitchPortDiagram {
     // Separate non-gateway hosts into Middle Tier (Core Switches) and Bottom Tier (Access Points / Mesh Nodes)
     const switchSpecs = nonGwSpecs.filter((s) => s.isCoreSwitch);
     const apSpecs = nonGwSpecs.filter((s) => !s.isCoreSwitch);
-
-    const tiers = [[gwSpec]];
-    if (switchSpecs.length > 0 && apSpecs.length > 0) {
-      tiers.push(switchSpecs);
-      tiers.push(apSpecs);
-    } else if (nonGwSpecs.length > 0) {
-      tiers.push(nonGwSpecs);
-    }
+    const defaultSwitchHost = switchSpecs[0]?.host || null;
 
     const hostGapX = 32;
     const tierGapY = 86;
-    const maxTierW = tiers.reduce((maxW, tier) => {
-      const tW = tier.reduce((acc, s) => acc + s.w, 0) + Math.max(0, tier.length - 1) * hostGapX;
-      return Math.max(maxW, tW);
-    }, 0);
+    const dumbBoxW = 205;
+    const dumbBoxH = 54;
 
-    const svgW = Math.max(920, maxTierW + 80);
+    // Count total potential width per tier so svgW is wide enough for all chassis and dumb switches
+    const totalDumbSwitches = this.hosts.reduce((acc, h) => {
+      const ports = this.normalizeHostPorts(h);
+      return acc + ports.filter((p) => p.hasUnmanagedSwitch).length;
+    }, 0);
+    const switchTierEstW =
+      switchSpecs.reduce((acc, s) => acc + s.w, 0) + Math.max(0, switchSpecs.length - 1) * hostGapX;
+    const apAndDumbEstW =
+      apSpecs.reduce((acc, s) => acc + s.w, 0) +
+      totalDumbSwitches * dumbBoxW +
+      Math.max(0, apSpecs.length + totalDumbSwitches - 1) * hostGapX;
+    const maxTierW = Math.max(gwSpec.w, switchTierEstW, apAndDumbEstW);
+
+    const svgW = Math.max(920, maxTierW + 96);
     const centerX = svgW / 2;
 
-    // Position coordinates of every (hostId, iface/switchPort) jack so we can route exact patch cables
+    // Position coordinates of every (hostId, iface/switchPort) jack and rendered dumb switch
     const portJackCoords = new Map();
+    const dumbSwitchCoords = new Map();
+
+    // Helper: resolve which upstream port jack a child host plugs into
+    const findUpstreamCoordForHost = (secHost) => {
+      const nic = secHost.nicInfo || {};
+      let parentId = nic.upstreamHostId || gwHost.id;
+      if (
+        defaultSwitchHost &&
+        secHost.id !== defaultSwitchHost.id &&
+        parentId === gwHost.id &&
+        !nic.upstreamIface
+      ) {
+        parentId = defaultSwitchHost.id;
+      }
+
+      const srcCoord =
+        (nic.upstreamIface && portJackCoords.get(`${parentId}:${nic.upstreamIface}`)) ||
+        (nic.upstreamPort && portJackCoords.get(`${parentId}:${nic.upstreamPort}`)) ||
+        Array.from(portJackCoords.values()).find(
+          (c) =>
+            c.host.id === parentId &&
+            Array.isArray(c.port.connectedDevices) &&
+            c.port.connectedDevices.some((d) => d.id === secHost.id)
+        ) ||
+        Array.from(portJackCoords.values()).find(
+          (c) => c.host.id === parentId && c.port.portRole !== 'wan' && (c.port.linkUp ?? c.port.status === 'up')
+        ) ||
+        Array.from(portJackCoords.values()).find((c) => c.host.id === parentId) ||
+        null;
+
+      return { parentId, srcCoord };
+    };
+
+    // Helper: 1D crossing-minimizing row solver that preserves sorted port order and anchors items near targetX
+    const resolveHorizontalRow = (items, gap = hostGapX, margin = 28) => {
+      if (items.length === 0) return [];
+      const sorted = [...items].sort((a, b) => {
+        if (Math.abs(a.targetX - b.targetX) > 1) return a.targetX - b.targetX;
+        if ((a.targetRow ?? 0) !== (b.targetRow ?? 0)) return (a.targetRow ?? 0) - (b.targetRow ?? 0);
+        return (a.orderIdx ?? 0) - (b.orderIdx ?? 0);
+      });
+
+      // Block-pool adjacent violators so items sit directly beneath their parent ports without colliding
+      const blocks = sorted.map((item) => ({
+        items: [item],
+        width: item.w,
+        desiredCenter: item.targetX,
+      }));
+
+      let merged = true;
+      while (merged) {
+        merged = false;
+        for (let i = 0; i < blocks.length - 1; i++) {
+          const left = blocks[i];
+          const right = blocks[i + 1];
+          const minDistance = left.width / 2 + right.width / 2 + gap;
+          if (right.desiredCenter - left.desiredCenter < minDistance) {
+            const combinedItems = [...left.items, ...right.items];
+            const combinedW = left.width + right.width + gap;
+            const avgCenter =
+              combinedItems.reduce((sum, it) => sum + it.targetX, 0) / combinedItems.length;
+            blocks.splice(i, 2, {
+              items: combinedItems,
+              width: combinedW,
+              desiredCenter: avgCenter,
+            });
+            merged = true;
+            break;
+          }
+        }
+      }
+
+      const placements = [];
+      blocks.forEach((block) => {
+        let cursor = block.desiredCenter - block.width / 2;
+        block.items.forEach((it) => {
+          placements.push({ item: it, x: cursor, centerX: cursor + it.w / 2 });
+          cursor += it.w + gap;
+        });
+      });
+
+      // Clamp within [margin, svgW - margin] while preserving relative spacing
+      const minLeft = placements[0].x;
+      if (minLeft < margin) {
+        const shiftRight = margin - minLeft;
+        placements.forEach((p) => {
+          p.x += shiftRight;
+          p.centerX += shiftRight;
+        });
+      }
+      const last = placements[placements.length - 1];
+      const maxRight = last.x + last.item.w;
+      if (maxRight > svgW - margin) {
+        const shiftLeft = maxRight - (svgW - margin);
+        placements.forEach((p) => {
+          p.x -= shiftLeft;
+          p.centerX -= shiftLeft;
+        });
+      }
+      // Final forward sweep in case clamping compressed the left edge
+      for (let i = 0; i < placements.length; i++) {
+        if (i === 0 && placements[0].x < margin) {
+          placements[0].x = margin;
+          placements[0].centerX = margin + placements[0].item.w / 2;
+        } else if (i > 0) {
+          const minX = placements[i - 1].x + placements[i - 1].item.w + gap;
+          if (placements[i].x < minX) {
+            placements[i].x = minX;
+            placements[i].centerX = minX + placements[i].item.w / 2;
+          }
+        }
+      }
+
+      return placements;
+    };
 
     const renderChassisSvg = (spec, x, y, tierIdx) => {
       const { host, ports, rows, cols, portBoxW, portBoxH, portGapX, portGapY, chassisHeaderH, w, h } = spec;
@@ -738,28 +857,80 @@ export class SwitchPortDiagram {
     };
 
     let chassisSvg = '';
+    let dumbSwNodesSvg = '';
+    let dumbSwCablesSvg = '';
     let currentY = 18;
-    tiers.forEach((tier, tierIdx) => {
-      const tierW = tier.reduce((acc, s) => acc + s.w, 0) + Math.max(0, tier.length - 1) * hostGapX;
-      let cursorX = centerX - tierW / 2;
-      let maxTierH = 0;
-      tier.forEach((spec) => {
-        chassisSvg += renderChassisSvg(spec, cursorX, currentY, tierIdx);
-        cursorX += spec.w + hostGapX;
-        if (spec.h > maxTierH) maxTierH = spec.h;
-      });
-      currentY += maxTierH + tierGapY;
-    });
 
-    // Collect any detected Unmanaged ("Dumb") Switches across all rendered host ports and render them as visual nodes
-    const detectedDumbSwitches = [];
-    for (const tier of tiers) {
-      for (const spec of tier) {
-        for (const p of spec.ports) {
+    const renderDumbSwitchItem = (item, bx, by) => {
+      const { host, port, coord, usw } = item;
+      const devNames = (usw.devices || [])
+        .map((d) => d.hostname || d.ip || d.mac)
+        .filter(Boolean)
+        .join(', ');
+      const bCenterX = bx + dumbBoxW / 2;
+      const swCoord = {
+        x: bx,
+        y: by,
+        centerX: bCenterX,
+        topY: by,
+        bottomY: by + dumbBoxH,
+        host,
+        port,
+        usw,
+      };
+      dumbSwitchCoords.set(`${host.id}:${port.iface}`, swCoord);
+      if (port.switchPort) {
+        dumbSwitchCoords.set(`${host.id}:${port.switchPort}`, swCoord);
+      }
+
+      const x1 = coord.x;
+      const y1 = coord.bottomY;
+      const x2 = bCenterX;
+      const y2 = by;
+      const midY = (y1 + y2) / 2;
+
+      dumbSwCablesSvg += `
+        <g class="sw-svg-dumb-cable">
+          <path d="M ${x1} ${y1} C ${x1} ${midY}, ${x2} ${midY}, ${x2} ${y2}"
+                fill="none" stroke="var(--color-warning)" stroke-width="2" stroke-dasharray="5,3" opacity="0.9" />
+          <circle cx="${x1}" cy="${y1}" r="3.5" fill="var(--color-warning)" />
+          <circle cx="${x2}" cy="${y2}" r="3.5" fill="var(--color-warning)" />
+        </g>
+      `;
+
+      dumbSwNodesSvg += `
+        <g class="sw-svg-dumb-switch" data-host-id="${escapeHtml(host.id)}" style="cursor: pointer;">
+          <title>${escapeHtml(`${usw.name} on ${host.name || host.hostname} (${port.portLabel || port.iface}) — ${usw.deviceCount} hosts: ${devNames}`)}</title>
+          <rect x="${bx}" y="${by}" width="${dumbBoxW}" height="${dumbBoxH}" rx="8"
+                fill="var(--color-surface-elevated)" stroke="var(--color-warning)" stroke-width="1.8" stroke-dasharray="5,3" />
+          <circle cx="${bx + 14}" cy="${by + 16}" r="4" fill="var(--color-warning)" />
+          <text x="${bx + 24}" y="${by + 19}" font-size="11" font-weight="700" fill="var(--color-text-primary)">
+            ${escapeHtml(truncateText(`Dumb Switch (${port.switchPort || port.iface})`, 25))}
+          </text>
+          <text x="${bx + 14}" y="${by + 33}" font-size="9.5" font-weight="600" fill="var(--color-warning)" font-family="var(--font-mono)">
+            ${escapeHtml(`${usw.deviceCount} Hosts on ${host.name || host.hostname}`)}
+          </text>
+          <text x="${bx + 14}" y="${by + 45}" font-size="9" fill="var(--color-text-muted)">
+            ${escapeHtml(truncateText(devNames, 29))}
+          </text>
+        </g>
+      `;
+    };
+
+    const collectDumbSwitchItemsForSpecs = (specs) => {
+      const items = [];
+      specs.forEach((spec) => {
+        spec.ports.forEach((p, pIdx) => {
           if (p.hasUnmanagedSwitch) {
             const coord = portJackCoords.get(`${spec.host.id}:${p.iface}`);
             if (coord) {
-              detectedDumbSwitches.push({
+              items.push({
+                kind: 'dumb_switch',
+                w: dumbBoxW,
+                h: dumbBoxH,
+                targetX: coord.x,
+                targetRow: coord.row ?? 0,
+                orderIdx: pIdx,
                 host: spec.host,
                 port: p,
                 coord,
@@ -772,99 +943,128 @@ export class SwitchPortDiagram {
               });
             }
           }
+        });
+      });
+      return items;
+    };
+
+    const renderMixedRow = (rowItems, tierIdx) => {
+      if (rowItems.length === 0) return;
+      const placements = resolveHorizontalRow(rowItems, hostGapX, 28);
+      let maxH = 0;
+      placements.forEach(({ item, x }) => {
+        if (item.kind === 'dumb_switch') {
+          renderDumbSwitchItem(item, x, currentY);
+        } else {
+          chassisSvg += renderChassisSvg(item.spec, x, currentY, tierIdx);
         }
-      }
+        if (item.h > maxH) maxH = item.h;
+      });
+      currentY += maxH + tierGapY;
+    };
+
+    // Tier 0: Gateway centered at top
+    chassisSvg += renderChassisSvg(gwSpec, centerX - gwSpec.w / 2, currentY, 0);
+    currentY += gwSpec.h + tierGapY;
+
+    let tierCounter = 1;
+
+    // Tier 1 (if Core Managed Switches exist): Core Switches + any Dumb Switches attached directly to Gateway
+    if (switchSpecs.length > 0) {
+      const gwDumbItems = collectDumbSwitchItemsForSpecs([gwSpec]);
+      const switchRowItems = [
+        ...switchSpecs.map((spec, idx) => {
+          const { srcCoord } = findUpstreamCoordForHost(spec.host);
+          return {
+            kind: 'chassis',
+            spec,
+            w: spec.w,
+            h: spec.h,
+            targetX: srcCoord ? srcCoord.x : centerX,
+            targetRow: srcCoord ? srcCoord.row : 0,
+            orderIdx: idx,
+          };
+        }),
+        ...gwDumbItems,
+      ];
+      renderMixedRow(switchRowItems, tierCounter++);
     }
 
-    let dumbSwNodesSvg = '';
-    let dumbSwCablesSvg = '';
-    if (detectedDumbSwitches.length > 0) {
-      const boxW = 205;
-      const boxH = 54;
-      const boxGap = 24;
-      const rowW = detectedDumbSwitches.length * boxW + Math.max(0, detectedDumbSwitches.length - 1) * boxGap;
-      let dCursorX = centerX - rowW / 2;
-      const dTopY = currentY;
+    // Collect Dumb Switches from the active switch layer (Core Switches if present, otherwise Gateway)
+    const upstreamSwitchLayerSpecs = switchSpecs.length > 0 ? switchSpecs : [gwSpec];
+    const midDumbItems = collectDumbSwitchItemsForSpecs(upstreamSwitchLayerSpecs);
 
-      detectedDumbSwitches.forEach((item) => {
-        const { host, port, coord, usw } = item;
-        const devNames = (usw.devices || [])
-          .map((d) => d.hostname || d.ip || d.mac)
-          .filter(Boolean)
-          .join(', ');
-        const bx = dCursorX;
-        const by = dTopY;
-        const bCenterX = bx + boxW / 2;
-        dCursorX += boxW + boxGap;
+    // Separate APs into:
+    //  - Direct APs (connected to a port WITHOUT a dumb switch) -> placed in the same tier as midDumbItems, sorted by parent port X
+    //  - Downstream APs (connected via a port WITH a dumb switch) -> placed in the sub-tier directly below that dumb switch
+    const directApItems = [];
+    const behindDumbSwApSpecs = [];
+    apSpecs.forEach((spec, idx) => {
+      const { srcCoord } = findUpstreamCoordForHost(spec.host);
+      if (srcCoord?.port?.hasUnmanagedSwitch) {
+        behindDumbSwApSpecs.push({ spec, idx });
+      } else {
+        directApItems.push({
+          kind: 'chassis',
+          spec,
+          w: spec.w,
+          h: spec.h,
+          targetX: srcCoord ? srcCoord.x : centerX,
+          targetRow: srcCoord ? srcCoord.row : 0,
+          orderIdx: 100 + idx,
+        });
+      }
+    });
 
-        const x1 = coord.x;
-        const y1 = coord.bottomY;
-        const x2 = bCenterX;
-        const y2 = by;
-        const midY = (y1 + y2) / 2;
+    if (midDumbItems.length > 0 || directApItems.length > 0) {
+      renderMixedRow([...midDumbItems, ...directApItems], tierCounter++);
+    }
 
-        dumbSwCablesSvg += `
-          <g class="sw-svg-dumb-cable">
-            <path d="M ${x1} ${y1} C ${x1} ${midY}, ${x2} ${midY}, ${x2} ${y2}"
-                  fill="none" stroke="var(--color-warning)" stroke-width="2" stroke-dasharray="5,3" opacity="0.9" />
-            <circle cx="${x1}" cy="${y1}" r="3.5" fill="var(--color-warning)" />
-            <circle cx="${x2}" cy="${y2}" r="3.5" fill="var(--color-warning)" />
-          </g>
-        `;
-
-        dumbSwNodesSvg += `
-          <g class="sw-svg-dumb-switch" data-host-id="${escapeHtml(host.id)}" style="cursor: pointer;">
-            <title>${escapeHtml(`${usw.name} on ${host.name || host.hostname} (${port.portLabel || port.iface}) — ${usw.deviceCount} hosts: ${devNames}`)}</title>
-            <rect x="${bx}" y="${by}" width="${boxW}" height="${boxH}" rx="8"
-                  fill="var(--color-surface-elevated)" stroke="var(--color-warning)" stroke-width="1.8" stroke-dasharray="5,3" />
-            <circle cx="${bx + 14}" cy="${by + 16}" r="4" fill="var(--color-warning)" />
-            <text x="${bx + 24}" y="${by + 19}" font-size="11" font-weight="700" fill="var(--color-text-primary)">
-              ${escapeHtml(truncateText(`Dumb Switch (${port.switchPort || port.iface})`, 25))}
-            </text>
-            <text x="${bx + 14}" y="${by + 33}" font-size="9.5" font-weight="600" fill="var(--color-warning)" font-family="var(--font-mono)">
-              ${escapeHtml(`${usw.deviceCount} Hosts on ${host.name || host.hostname}`)}
-            </text>
-            <text x="${bx + 14}" y="${by + 45}" font-size="9" fill="var(--color-text-muted)">
-              ${escapeHtml(truncateText(devNames, 29))}
-            </text>
-          </g>
-        `;
+    if (behindDumbSwApSpecs.length > 0) {
+      const subApItems = behindDumbSwApSpecs.map(({ spec, idx }) => {
+        const { parentId, srcCoord } = findUpstreamCoordForHost(spec.host);
+        const dumbSw =
+          srcCoord?.port &&
+          (dumbSwitchCoords.get(`${parentId}:${srcCoord.port.iface}`) ||
+            dumbSwitchCoords.get(`${parentId}:${srcCoord.port.switchPort}`));
+        return {
+          kind: 'chassis',
+          spec,
+          w: spec.w,
+          h: spec.h,
+          targetX: dumbSw ? dumbSw.centerX : srcCoord ? srcCoord.x : centerX,
+          targetRow: 0,
+          orderIdx: idx,
+        };
       });
+      renderMixedRow(subApItems, tierCounter++);
+    }
 
-      currentY += boxH + tierGapY;
+    // Finally, if any rendered Access Point itself has a port with a detected Dumb Switch, render it below the AP tier
+    const apDumbItems = collectDumbSwitchItemsForSpecs(apSpecs);
+    if (apDumbItems.length > 0) {
+      renderMixedRow(apDumbItems, tierCounter++);
     }
 
     const svgH = Math.max(195, currentY - tierGapY + 22);
 
-    // Render SVG Patch Cables between OpenWrt Hosts' NIC Ports
+    // Render SVG Patch Cables between OpenWrt Hosts' NIC Ports (with pill collision avoidance)
     let cablesSvg = dumbSwCablesSvg;
-    const defaultSwitchHost = switchSpecs[0]?.host || null;
+    const placedPills = [];
+
+    const evalCubicBezier = (v0, v1, v2, v3, t) => {
+      const u = 1 - t;
+      return (
+        u * u * u * v0 +
+        3 * u * u * t * v1 +
+        3 * u * t * t * v2 +
+        t * t * t * v3
+      );
+    };
+
     nonGwHosts.forEach((secHost) => {
       const nic = secHost.nicInfo || {};
-      let parentId = nic.upstreamHostId || gwHost.id;
-      // If an AP defaults to gateway because FDB hasn't resolved yet, but a Core Switch is present in Tier 2, connect via Core Switch
-      if (
-        defaultSwitchHost &&
-        secHost.id !== defaultSwitchHost.id &&
-        parentId === gwHost.id &&
-        !nic.upstreamIface
-      ) {
-        parentId = defaultSwitchHost.id;
-      }
-
-      const srcCoord =
-        (nic.upstreamIface && portJackCoords.get(`${parentId}:${nic.upstreamIface}`)) ||
-        (nic.upstreamPort && portJackCoords.get(`${parentId}:${nic.upstreamPort}`)) ||
-        Array.from(portJackCoords.values()).find(
-          (c) =>
-            c.host.id === parentId &&
-            Array.isArray(c.port.connectedDevices) &&
-            c.port.connectedDevices.some((d) => d.id === secHost.id)
-        ) ||
-        Array.from(portJackCoords.values()).find(
-          (c) => c.host.id === parentId && c.port.portRole !== 'wan' && (c.port.linkUp ?? c.port.status === 'up')
-        ) ||
-        Array.from(portJackCoords.values()).find((c) => c.host.id === parentId);
+      const { parentId, srcCoord } = findUpstreamCoordForHost(secHost);
 
       const tgtCoord =
         (nic.localIface && portJackCoords.get(`${secHost.id}:${nic.localIface}`)) ||
@@ -876,12 +1076,17 @@ export class SwitchPortDiagram {
 
       if (!srcCoord || !tgtCoord) return;
 
-      const x1 = srcCoord.x;
-      const y1 = srcCoord.bottomY;
+      // If this host connects through a rendered Dumb Switch node, route the patch cable from the Dumb Switch to the host
+      const viaDumbNode =
+        srcCoord.port?.hasUnmanagedSwitch &&
+        (dumbSwitchCoords.get(`${parentId}:${srcCoord.port.iface}`) ||
+          dumbSwitchCoords.get(`${parentId}:${srcCoord.port.switchPort}`));
+
+      const x1 = viaDumbNode ? viaDumbNode.centerX : srcCoord.x;
+      const y1 = viaDumbNode ? viaDumbNode.bottomY : srcCoord.bottomY;
       const x2 = tgtCoord.x;
       const y2 = tgtCoord.topY;
       const midY = (y1 + y2) / 2;
-      const midX = (x1 + x2) / 2;
 
       const spd = nic.upstreamSpeedMbps || nic.localSpeedMbps || srcCoord.port?.speedMbps || 1000;
       const maxCap = Math.max(
@@ -897,11 +1102,33 @@ export class SwitchPortDiagram {
       const strokeColor = spd >= 10000 ? '#a855f7' : spd >= 2500 ? '#06b6d4' : spd >= 1000 ? 'var(--color-success)' : 'var(--color-warning)';
       const isMesh = secHost.role === 'mesh' || nic.upstreamIface === 'mesh0';
 
-      const srcPortText = srcCoord.port?.iface || nic.upstreamPort || 'LAN';
+      const srcPortText = viaDumbNode
+        ? `Dumb SW (${srcCoord.port?.switchPort || srcCoord.port?.iface || 'LAN'})`
+        : srcCoord.port?.iface || nic.upstreamPort || 'LAN';
       const tgtPortText = tgtCoord.port?.iface || nic.localPort || 'LAN';
-      const viaDumbSw = srcCoord.port?.hasUnmanagedSwitch ? ' via Dumb SW' : '';
-      const cableLabel = `${srcPortText}${viaDumbSw} ⟷ ${tgtPortText} (${spdLabel})`;
+      const cableLabel = `${srcPortText} ⟷ ${tgtPortText} (${spdLabel})`;
       const pillW = Math.max(96, cableLabel.length * 6.2);
+      const pillH = 18;
+
+      // Choose a parameter t along the cubic Bezier curve so the label pill never overlaps an existing pill
+      const candidateTs = [0.5, 0.34, 0.66, 0.24, 0.76];
+      let chosenX = (x1 + x2) / 2;
+      let chosenY = midY;
+      for (const t of candidateTs) {
+        const cx = evalCubicBezier(x1, x1, x2, x2, t);
+        const cy = evalCubicBezier(y1, midY, midY, y2, t);
+        const collides = placedPills.some(
+          (p) =>
+            Math.abs(cy - p.y) < pillH + 3 &&
+            Math.abs(cx - p.x) < (pillW + p.w) / 2 + 6
+        );
+        if (!collides) {
+          chosenX = cx;
+          chosenY = cy;
+          break;
+        }
+      }
+      placedPills.push({ x: chosenX, y: chosenY, w: pillW, h: pillH });
 
       cablesSvg += `
         <g class="sw-svg-cable">
@@ -910,9 +1137,9 @@ export class SwitchPortDiagram {
                 ${isMesh ? 'stroke-dasharray="5,4"' : ''} opacity="0.88" />
           <circle cx="${x1}" cy="${y1}" r="4" fill="${strokeColor}" />
           <circle cx="${x2}" cy="${y2}" r="4" fill="${strokeColor}" />
-          <rect x="${midX - pillW / 2}" y="${midY - 10}" width="${pillW}" height="18" rx="9"
+          <rect x="${chosenX - pillW / 2}" y="${chosenY - 10}" width="${pillW}" height="${pillH}" rx="9"
                 fill="var(--color-surface-elevated)" stroke="${strokeColor}" stroke-width="1.2" />
-          <text x="${midX}" y="${midY + 2}" font-size="9.5" font-weight="700" fill="var(--color-text-primary)" text-anchor="middle" font-family="var(--font-mono)">
+          <text x="${chosenX}" y="${chosenY + 2}" font-size="9.5" font-weight="700" fill="var(--color-text-primary)" text-anchor="middle" font-family="var(--font-mono)">
             ${escapeHtml(cableLabel)}
           </text>
         </g>
