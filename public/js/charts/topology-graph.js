@@ -297,13 +297,33 @@ export class TopologyGraph {
 
     const wanNode = this.nodes.find((n) => n.type === 'wan');
     const gwNode = this.nodes.find((n) => n.type === 'gateway');
-    const apNodes = this.nodes.filter((n) => n.type === 'ap' || n.type === 'mesh' || n.type === 'switch');
+    const apNodes = this.nodes.filter(
+      (n) => n.type === 'ap' || n.type === 'mesh' || n.type === 'switch' || n.type === 'unmanaged_switch'
+    );
     const defaultParentId = gwNode?.id || apNodes[0]?.id || 'wan-internet';
+
+    const unmanagedSwitchByHostPort = new Map();
+    for (const n of this.nodes) {
+      if (n.type === 'unmanaged_switch' && n.parentHostId) {
+        if (n.parentIface) unmanagedSwitchByHostPort.set(`${n.parentHostId}:${n.parentIface}`, n);
+        if (n.parentPort) unmanagedSwitchByHostPort.set(`${n.parentHostId}:${n.parentPort}`, n);
+      }
+    }
+    const resolveClientParentId = (c) => {
+      const rawHostId = c.connectedTo?.hostId || defaultParentId;
+      if (c.connectionType === 'wired' && c.connectedTo) {
+        const usw =
+          unmanagedSwitchByHostPort.get(`${rawHostId}:${c.connectedTo.iface}`) ||
+          unmanagedSwitchByHostPort.get(`${rawHostId}:${c.connectedTo.switchPort}`);
+        if (usw) return usw.id;
+      }
+      return rawHostId;
+    };
 
     // Group clients by connected host first so AP horizontal spacing accounts for client fan-out
     const clientsByHost = new Map();
     displayClients.forEach((c) => {
-      const hostId = c.connectedTo?.hostId || defaultParentId;
+      const hostId = resolveClientParentId(c);
       if (!clientsByHost.has(hostId)) clientsByHost.set(hostId, []);
       clientsByHost.get(hostId).push(c);
     });
@@ -462,8 +482,8 @@ export class TopologyGraph {
     if (!this.collapseClients) {
       displayClients.forEach((c) => {
         const cPos = nodePositions.get(`client-${c.mac}`);
-        const parentHostId = c.connectedTo?.hostId || defaultParentId;
-        const parentPos = nodePositions.get(parentHostId);
+        const parentHostId = resolveClientParentId(c);
+        const parentPos = nodePositions.get(parentHostId) || nodePositions.get(c.connectedTo?.hostId || defaultParentId);
         if (cPos && parentPos) {
           const midY = parentPos.y + (cPos.y - parentPos.y) * 0.45;
           const isWired = c.connectionType === 'wired';
@@ -479,9 +499,10 @@ export class TopologyGraph {
     let nodesSvg = '';
     nodePositions.forEach((pos) => {
       if (pos.node) {
-        // Core Infra Node (WAN, Gateway, AP, Switch)
+        // Core Infra Node (WAN, Gateway, AP, Switch, Unmanaged Switch)
         const n = pos.node;
         const isWan = n.type === 'wan';
+        const isDumbSw = n.type === 'unmanaged_switch';
         const isSelected = this.selectedNodeId === n.id;
         const w = 176;
         const h = 60;
@@ -500,8 +521,8 @@ export class TopologyGraph {
              aria-label="${escapeHtml(fullTitle)}"
              transform="translate(${pos.x - w / 2}, ${pos.y - h / 2})">
             <title>${escapeHtml(fullTitle)}</title>
-            <rect width="${w}" height="${h}" class="topo-node-card" />
-            <circle cx="16" cy="22" r="5" fill="${n.status === 'online' ? 'var(--color-success)' : 'var(--color-danger)'}" />
+            <rect width="${w}" height="${h}" class="topo-node-card" ${isDumbSw ? 'style="stroke: var(--color-warning); stroke-dasharray: 5,3;"' : ''} />
+            <circle cx="16" cy="22" r="5" fill="${isDumbSw ? 'var(--color-warning)' : n.status === 'online' ? 'var(--color-success)' : 'var(--color-danger)'}" />
             <text x="28" y="25" class="topo-node-label" text-anchor="start">${escapeHtml(titleText)}</text>
             <text x="28" y="44" class="topo-node-subtext" text-anchor="start">${escapeHtml(subText)}</text>
           </g>
@@ -509,7 +530,7 @@ export class TopologyGraph {
 
         // If clients are collapsed, show a cluster badge
         if (this.collapseClients && !isWan) {
-          const clientCount = displayClients.filter((c) => (c.connectedTo?.hostId || defaultParentId) === n.id).length;
+          const clientCount = displayClients.filter((c) => resolveClientParentId(c) === n.id).length;
           if (clientCount > 0) {
             nodesSvg += `
               <g class="client-cluster-badge-group" data-host-id="${escapeHtml(n.id)}" transform="translate(${pos.x + w / 2 - 22}, ${pos.y + h / 2 - 10})">

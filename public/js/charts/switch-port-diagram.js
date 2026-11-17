@@ -90,6 +90,7 @@ function getPortRoleMeta(port) {
   const role = port.portRole || (isUp ? 'access' : 'down');
   if (role === 'wan') return { label: 'WAN', bg: 'rgba(59, 130, 246, 0.16)', fg: '#3b82f6' };
   if (role === 'uplink') return { label: 'UPLINK', bg: 'rgba(6, 182, 212, 0.16)', fg: '#06b6d4' };
+  if (port.hasUnmanagedSwitch) return { label: 'DUMB SW', bg: 'rgba(245, 158, 11, 0.18)', fg: 'var(--color-warning)' };
   if (role === 'trunk') return { label: 'TRUNK', bg: 'rgba(168, 85, 247, 0.16)', fg: '#a855f7' };
   if (!isUp || role === 'down') return { label: 'DOWN', bg: 'rgba(100, 116, 139, 0.14)', fg: 'var(--color-text-muted)' };
   if (role === 'access' || (Array.isArray(port.connectedDevices) && port.connectedDevices.length > 0)) {
@@ -458,6 +459,45 @@ export class SwitchPortDiagram {
         }
       }
 
+      // Evaluate Unmanaged ("Dumb") Switch presence on each enriched port
+      for (const p of enrichedPorts) {
+        const isUplinkOrWan =
+          p.portRole === 'uplink' ||
+          p.portRole === 'wan' ||
+          (isHostOnline &&
+            ((nic.localIface && p.iface === nic.localIface) || (nic.localPort && p.switchPort === nic.localPort)));
+        const hasDownstreamManagedSwitch = p.connectedDevices.some((d) => {
+          if (d.type === 'switch') return true;
+          if (d.id) {
+            const peer = this.hosts.find((ph) => ph.id === d.id);
+            if (peer && (peer.role === 'switch' || inferSwitchPortCapacity(peer) >= 8 || (Array.isArray(peer.switchPorts) && peer.switchPorts.length >= 8))) {
+              return true;
+            }
+          }
+          return false;
+        });
+        const directEndpoints = p.connectedDevices.filter(
+          (d) => d.type !== 'wan' && d.type !== 'gateway' && !(d.hostname && String(d.hostname).includes('(Uplink)'))
+        );
+        if (!isUplinkOrWan && !hasDownstreamManagedSwitch && (p.hasUnmanagedSwitch || directEndpoints.length >= 2)) {
+          p.hasUnmanagedSwitch = true;
+          p.unmanagedSwitch = p.unmanagedSwitch || {
+            id: `unmanaged-switch-${host.id}-${p.iface}`,
+            name: `Unmanaged Switch (${p.switchPort || p.iface})`,
+            parentHostId: host.id,
+            parentHostName: host.name || host.hostname || host.id,
+            parentIface: p.iface,
+            parentPort: p.switchPort || p.iface,
+            parentPortLabel: p.portLabel || p.switchPort || p.iface,
+            speedMbps: p.speedMbps || 1000,
+            deviceCount: directEndpoints.length,
+            devices: directEndpoints,
+          };
+          p.unmanagedSwitch.deviceCount = Math.max(p.unmanagedSwitch.deviceCount || 0, directEndpoints.length);
+          p.unmanagedSwitch.devices = directEndpoints;
+        }
+      }
+
       if (this.showActiveOnly) {
         const filtered = enrichedPorts.filter(
           (p) => p.linkUp || (Array.isArray(p.connectedDevices) && p.connectedDevices.length > 0)
@@ -616,16 +656,24 @@ export class SwitchPortDiagram {
         const spdShort = getPortSpeedShort(p);
         const roleMeta = getPortRoleMeta(p);
         const isUp = p.linkUp ?? p.status === 'up';
-        const devFirst = Array.isArray(p.connectedDevices) && p.connectedDevices[0] ? p.connectedDevices[0] : null;
-        const devLabel = devFirst
-          ? truncateText(devFirst.hostname || devFirst.ip || devFirst.mac, spec.isMultiRow ? 8 : 11)
-          : isUp
-            ? roleMeta.label
-            : 'Down';
+        const isDumbSw = Boolean(p.hasUnmanagedSwitch);
+        const devCount = Array.isArray(p.connectedDevices) ? p.connectedDevices.length : 0;
+        const devFirst = devCount > 0 ? p.connectedDevices[0] : null;
+        const devLabel = isDumbSw
+          ? spec.isMultiRow
+            ? `SW(${devCount})`
+            : `DUMB SW (${devCount})`
+          : devFirst
+            ? truncateText(devFirst.hostname || devFirst.ip || devFirst.mac, spec.isMultiRow ? 8 : 11)
+            : isUp
+              ? roleMeta.label
+              : 'Down';
 
         const spdDetail = getPortSpeedDetail(p);
         const tooltip = `${hostName} • ${p.portLabel || p.iface} [${spdDetail}]${
-          Array.isArray(p.connectedDevices) && p.connectedDevices.length > 0
+          isDumbSw ? ` • Unmanaged (Dumb) Switch (${devCount} hosts)` : ''
+        }${
+          devCount > 0
             ? ' — Attached: ' + p.connectedDevices.map((d) => d.hostname || d.ip || d.mac).join(', ')
             : ''
         }`;
@@ -636,7 +684,7 @@ export class SwitchPortDiagram {
             <g class="sw-svg-port" data-host-id="${escapeHtml(host.id)}" data-iface="${escapeHtml(p.iface)}" style="cursor: pointer;">
               <title>${escapeHtml(tooltip)}</title>
               <rect x="${px}" y="${py}" width="${portBoxW}" height="${portBoxH}" rx="5"
-                    fill="var(--color-surface)" stroke="${isUp ? color : 'var(--color-border)'}" stroke-width="${isUp ? '1.6' : '1'}" />
+                    fill="var(--color-surface)" stroke="${isDumbSw ? 'var(--color-warning)' : isUp ? color : 'var(--color-border)'}" stroke-width="${isDumbSw ? '1.8' : isUp ? '1.6' : '1'}" />
               <circle cx="${px + 8}" cy="${py + 9}" r="3" fill="${color}" />
               <text x="${px + portBoxW - 5}" y="${py + 12}" font-size="8" font-weight="700" fill="${color}" text-anchor="end" font-family="var(--font-mono)">
                 ${escapeHtml(spdShort)}
@@ -644,7 +692,7 @@ export class SwitchPortDiagram {
               <text x="${px + portBoxW / 2}" y="${py + 25}" font-size="9.5" font-weight="700" fill="var(--color-text-primary)" text-anchor="middle">
                 ${escapeHtml(truncateText(p.switchPort || p.iface, 8))}
               </text>
-              <text x="${px + portBoxW / 2}" y="${py + 37}" font-size="7.5" font-weight="600" fill="${devFirst ? 'var(--color-primary)' : 'var(--color-text-muted)'}" text-anchor="middle">
+              <text x="${px + portBoxW / 2}" y="${py + 37}" font-size="7.5" font-weight="700" fill="${isDumbSw ? 'var(--color-warning)' : devFirst ? 'var(--color-primary)' : 'var(--color-text-muted)'}" text-anchor="middle">
                 ${escapeHtml(devLabel)}
               </text>
             </g>
@@ -654,7 +702,7 @@ export class SwitchPortDiagram {
             <g class="sw-svg-port" data-host-id="${escapeHtml(host.id)}" data-iface="${escapeHtml(p.iface)}" style="cursor: pointer;">
               <title>${escapeHtml(tooltip)}</title>
               <rect x="${px}" y="${py}" width="${portBoxW}" height="${portBoxH}" rx="6"
-                    fill="var(--color-surface)" stroke="${isUp ? color : 'var(--color-border)'}" stroke-width="${isUp ? '1.8' : '1'}" />
+                    fill="var(--color-surface)" stroke="${isDumbSw ? 'var(--color-warning)' : isUp ? color : 'var(--color-border)'}" stroke-width="${isDumbSw ? '2' : isUp ? '1.8' : '1'}" />
               <circle cx="${px + 10}" cy="${py + 11}" r="3.5" fill="${color}" />
               <text x="${px + portBoxW - 6}" y="${py + 14}" font-size="9" font-weight="700" fill="${color}" text-anchor="end" font-family="var(--font-mono)">
                 ${escapeHtml(spdShort)}
@@ -665,7 +713,7 @@ export class SwitchPortDiagram {
               <text x="${px + portBoxW / 2}" y="${py + 40}" font-size="8.5" fill="var(--color-text-muted)" text-anchor="middle" font-family="var(--font-mono)">
                 ${escapeHtml(truncateText(p.iface, 11))}
               </text>
-              <text x="${px + portBoxW / 2}" y="${py + 50}" font-size="8.5" font-weight="600" fill="${devFirst ? 'var(--color-primary)' : 'var(--color-text-secondary)'}" text-anchor="middle">
+              <text x="${px + portBoxW / 2}" y="${py + 50}" font-size="8.5" font-weight="700" fill="${isDumbSw ? 'var(--color-warning)' : devFirst ? 'var(--color-primary)' : 'var(--color-text-secondary)'}" text-anchor="middle">
                 ${escapeHtml(devLabel)}
               </text>
             </g>
@@ -703,10 +751,93 @@ export class SwitchPortDiagram {
       currentY += maxTierH + tierGapY;
     });
 
+    // Collect any detected Unmanaged ("Dumb") Switches across all rendered host ports and render them as visual nodes
+    const detectedDumbSwitches = [];
+    for (const tier of tiers) {
+      for (const spec of tier) {
+        for (const p of spec.ports) {
+          if (p.hasUnmanagedSwitch) {
+            const coord = portJackCoords.get(`${spec.host.id}:${p.iface}`);
+            if (coord) {
+              detectedDumbSwitches.push({
+                host: spec.host,
+                port: p,
+                coord,
+                usw: p.unmanagedSwitch || {
+                  id: `unmanaged-switch-${spec.host.id}-${p.iface}`,
+                  name: `Unmanaged Switch (${p.switchPort || p.iface})`,
+                  deviceCount: Array.isArray(p.connectedDevices) ? p.connectedDevices.length : 2,
+                  devices: p.connectedDevices || [],
+                },
+              });
+            }
+          }
+        }
+      }
+    }
+
+    let dumbSwNodesSvg = '';
+    let dumbSwCablesSvg = '';
+    if (detectedDumbSwitches.length > 0) {
+      const boxW = 205;
+      const boxH = 54;
+      const boxGap = 24;
+      const rowW = detectedDumbSwitches.length * boxW + Math.max(0, detectedDumbSwitches.length - 1) * boxGap;
+      let dCursorX = centerX - rowW / 2;
+      const dTopY = currentY;
+
+      detectedDumbSwitches.forEach((item) => {
+        const { host, port, coord, usw } = item;
+        const devNames = (usw.devices || [])
+          .map((d) => d.hostname || d.ip || d.mac)
+          .filter(Boolean)
+          .join(', ');
+        const bx = dCursorX;
+        const by = dTopY;
+        const bCenterX = bx + boxW / 2;
+        dCursorX += boxW + boxGap;
+
+        const x1 = coord.x;
+        const y1 = coord.bottomY;
+        const x2 = bCenterX;
+        const y2 = by;
+        const midY = (y1 + y2) / 2;
+
+        dumbSwCablesSvg += `
+          <g class="sw-svg-dumb-cable">
+            <path d="M ${x1} ${y1} C ${x1} ${midY}, ${x2} ${midY}, ${x2} ${y2}"
+                  fill="none" stroke="var(--color-warning)" stroke-width="2" stroke-dasharray="5,3" opacity="0.9" />
+            <circle cx="${x1}" cy="${y1}" r="3.5" fill="var(--color-warning)" />
+            <circle cx="${x2}" cy="${y2}" r="3.5" fill="var(--color-warning)" />
+          </g>
+        `;
+
+        dumbSwNodesSvg += `
+          <g class="sw-svg-dumb-switch" data-host-id="${escapeHtml(host.id)}" style="cursor: pointer;">
+            <title>${escapeHtml(`${usw.name} on ${host.name || host.hostname} (${port.portLabel || port.iface}) — ${usw.deviceCount} hosts: ${devNames}`)}</title>
+            <rect x="${bx}" y="${by}" width="${boxW}" height="${boxH}" rx="8"
+                  fill="var(--color-surface-elevated)" stroke="var(--color-warning)" stroke-width="1.8" stroke-dasharray="5,3" />
+            <circle cx="${bx + 14}" cy="${by + 16}" r="4" fill="var(--color-warning)" />
+            <text x="${bx + 24}" y="${by + 19}" font-size="11" font-weight="700" fill="var(--color-text-primary)">
+              ${escapeHtml(truncateText(`Dumb Switch (${port.switchPort || port.iface})`, 25))}
+            </text>
+            <text x="${bx + 14}" y="${by + 33}" font-size="9.5" font-weight="600" fill="var(--color-warning)" font-family="var(--font-mono)">
+              ${escapeHtml(`${usw.deviceCount} Hosts on ${host.name || host.hostname}`)}
+            </text>
+            <text x="${bx + 14}" y="${by + 45}" font-size="9" fill="var(--color-text-muted)">
+              ${escapeHtml(truncateText(devNames, 29))}
+            </text>
+          </g>
+        `;
+      });
+
+      currentY += boxH + tierGapY;
+    }
+
     const svgH = Math.max(195, currentY - tierGapY + 22);
 
     // Render SVG Patch Cables between OpenWrt Hosts' NIC Ports
-    let cablesSvg = '';
+    let cablesSvg = dumbSwCablesSvg;
     const defaultSwitchHost = switchSpecs[0]?.host || null;
     nonGwHosts.forEach((secHost) => {
       const nic = secHost.nicInfo || {};
@@ -768,7 +899,8 @@ export class SwitchPortDiagram {
 
       const srcPortText = srcCoord.port?.iface || nic.upstreamPort || 'LAN';
       const tgtPortText = tgtCoord.port?.iface || nic.localPort || 'LAN';
-      const cableLabel = `${srcPortText} ⟷ ${tgtPortText} (${spdLabel})`;
+      const viaDumbSw = srcCoord.port?.hasUnmanagedSwitch ? ' via Dumb SW' : '';
+      const cableLabel = `${srcPortText}${viaDumbSw} ⟷ ${tgtPortText} (${spdLabel})`;
       const pillW = Math.max(96, cableLabel.length * 6.2);
 
       cablesSvg += `
@@ -790,11 +922,11 @@ export class SwitchPortDiagram {
     svgWrap.innerHTML = `
       <svg viewBox="0 0 ${svgW} ${svgH}" width="100%" height="${svgH}" style="min-width: 680px; display: block;" role="img" aria-label="Physical NIC and Switch Port Wiring Diagram">
         <g class="sw-cables-layer">${cablesSvg}</g>
-        <g class="sw-chassis-layer">${chassisSvg}</g>
+        <g class="sw-chassis-layer">${chassisSvg}${dumbSwNodesSvg}</g>
       </svg>
     `;
 
-    svgWrap.querySelectorAll('.sw-svg-chassis').forEach((el) => {
+    svgWrap.querySelectorAll('.sw-svg-chassis, .sw-svg-dumb-switch').forEach((el) => {
       el.addEventListener('click', () => {
         const hostId = el.getAttribute('data-host-id');
         const host = this.hosts.find((h) => h.id === hostId);
@@ -809,6 +941,7 @@ export class SwitchPortDiagram {
         const ports = this.normalizeHostPorts(host);
         const isMultiPortSwitch = ports.length >= 8;
         const activeCount = ports.filter((p) => p.linkUp ?? p.status === 'up').length;
+        const dumbSwitchCount = ports.filter((p) => p.hasUnmanagedSwitch).length;
         const nic = host.nicInfo || {};
         const nicBanner =
           host.role === 'gateway'
@@ -826,12 +959,13 @@ export class SwitchPortDiagram {
             <div class="sw-faceplate-strip" style="background: var(--color-bg-primary); border: 1px solid var(--color-border-subtle); border-radius: var(--radius-sm); padding: 10px; overflow-x: auto;">
               <div style="font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: var(--color-text-muted); margin-bottom: 6px; display: flex; justify-content: space-between;">
                 <span>Hardware Switch Faceplate (${ports.length} Ports)</span>
-                <span>${activeCount} Active / ${ports.length - activeCount} Down</span>
+                <span>${activeCount} Active / ${ports.length - activeCount} Down${dumbSwitchCount > 0 ? ` • ${dumbSwitchCount} Dumb Switch${dumbSwitchCount > 1 ? 'es' : ''}` : ''}</span>
               </div>
               <div style="display: grid; grid-template-columns: repeat(${faceplateCols}, minmax(44px, 1fr)); gap: 5px;">
                 ${ports
                   .map((p, idx) => {
                     const isUp = p.linkUp ?? p.status === 'up';
+                    const isDumbSw = Boolean(p.hasUnmanagedSwitch);
                     const spdColor = getPortSpeedColor(p);
                     const spdShort = getPortSpeedShort(p);
                     const spdDetail = getPortSpeedDetail(p);
@@ -839,11 +973,13 @@ export class SwitchPortDiagram {
                     const shortNum = p.portNumber ?? idx + 1;
                     const devCount = Array.isArray(p.connectedDevices) ? p.connectedDevices.length : 0;
                     const titleText = `${p.portLabel || p.iface} [${spdDetail}]${
+                      isDumbSw ? ` • Unmanaged (Dumb) Switch (${devCount} hosts)` : ''
+                    }${
                       devCount > 0 ? ' — ' + p.connectedDevices.map((d) => d.hostname || d.ip || d.mac).join(', ') : ''
                     }`;
                     return `
                       <div title="${escapeHtml(titleText)}"
-                           style="background: var(--color-surface); border: 1.5px solid ${isUp ? spdColor : 'var(--color-border)'}; border-radius: ${isSfp ? '3px' : '5px'}; padding: 4px 3px; display: flex; flex-direction: column; align-items: center; gap: 2px; opacity: ${isUp ? '1' : '0.62'};">
+                           style="background: var(--color-surface); border: 1.5px solid ${isDumbSw ? 'var(--color-warning)' : isUp ? spdColor : 'var(--color-border)'}; border-radius: ${isSfp ? '3px' : '5px'}; padding: 4px 3px; display: flex; flex-direction: column; align-items: center; gap: 2px; opacity: ${isUp ? '1' : '0.62'};">
                         <div style="display: flex; align-items: center; justify-content: space-between; width: 100%; padding: 0 2px;">
                           <span style="width: 5px; height: 5px; border-radius: 50%; background: ${spdColor};"></span>
                           <span class="font-mono" style="font-size: 8.5px; font-weight: 700; color: ${spdColor};">${escapeHtml(spdShort)}</span>
@@ -851,8 +987,8 @@ export class SwitchPortDiagram {
                         <span class="font-mono" style="font-size: 10px; font-weight: 700; color: var(--color-text-primary);">
                           ${isSfp ? `SFP${shortNum}` : shortNum}
                         </span>
-                        <span style="font-size: 8px; color: ${devCount > 0 ? 'var(--color-primary)' : 'var(--color-text-muted)'}; font-weight: 600;">
-                          ${devCount > 0 ? `${devCount} dev` : isUp ? 'UP' : '—'}
+                        <span style="font-size: 8px; color: ${isDumbSw ? 'var(--color-warning)' : devCount > 0 ? 'var(--color-primary)' : 'var(--color-text-muted)'}; font-weight: 700;">
+                          ${isDumbSw ? `SW(${devCount})` : devCount > 0 ? `${devCount} dev` : isUp ? 'UP' : '—'}
                         </span>
                       </div>
                     `;
@@ -878,9 +1014,16 @@ export class SwitchPortDiagram {
                   🔌 ${nicBanner}
                 </div>
               </div>
-              <span class="status-pill ${activeCount > 0 ? 'online' : ''}" style="font-size: 11px;">
-                ${activeCount}/${ports.length} NICs Up
-              </span>
+              <div style="display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap;">
+                ${dumbSwitchCount > 0 ? `
+                  <span style="font-size: 10.5px; font-weight: 700; padding: 2px 8px; border-radius: 999px; background: rgba(245, 158, 11, 0.16); color: var(--color-warning); border: 1px solid rgba(245, 158, 11, 0.35);">
+                    🔀 ${dumbSwitchCount} Dumb Switch${dumbSwitchCount > 1 ? 'es' : ''} Detected
+                  </span>
+                ` : ''}
+                <span class="status-pill ${activeCount > 0 ? 'online' : ''}" style="font-size: 11px;">
+                  ${activeCount}/${ports.length} NICs Up
+                </span>
+              </div>
             </div>
 
             ${faceplateHtml}
@@ -894,6 +1037,7 @@ export class SwitchPortDiagram {
               ${ports
                 .map((p) => {
                   const isUp = p.linkUp ?? p.status === 'up';
+                  const isDumbSw = Boolean(p.hasUnmanagedSwitch);
                   const spdColor = getPortSpeedColor(p);
                   const curSpd = Number(p.speedMbps) || 0;
                   const maxSpd = getPortMaxSpeedMbps(p);
@@ -904,7 +1048,7 @@ export class SwitchPortDiagram {
                   const devices = Array.isArray(p.connectedDevices) ? p.connectedDevices : [];
 
                   return `
-                    <div style="background: var(--color-surface); border: 1px solid var(--color-border-subtle); border-left: 3px solid ${spdColor}; border-radius: 6px; padding: 7px 10px; display: flex; flex-direction: column; gap: 4px;">
+                    <div style="background: var(--color-surface); border: 1px solid ${isDumbSw ? 'rgba(245, 158, 11, 0.4)' : 'var(--color-border-subtle)'}; border-left: 3px solid ${isDumbSw ? 'var(--color-warning)' : spdColor}; border-radius: 6px; padding: 7px 10px; display: flex; flex-direction: column; gap: 4px;">
                       <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap;">
                         <div style="display: inline-flex; align-items: center; gap: 6px;">
                           <span style="font-weight: 700; font-size: 12px;">${escapeHtml(p.switchPort || p.iface)}</span>
@@ -928,6 +1072,13 @@ export class SwitchPortDiagram {
                           }
                         </div>
                       </div>
+                      ${
+                        isDumbSw
+                          ? `<div style="font-size: 10.5px; font-weight: 600; color: var(--color-warning); background: rgba(245, 158, 11, 0.1); border-radius: 4px; padding: 3px 6px;">
+                              🔀 Unmanaged (Dumb) Switch • ${devices.length} hosts on this port
+                            </div>`
+                          : ''
+                      }
                       ${
                         devices.length > 0
                           ? `

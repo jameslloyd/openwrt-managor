@@ -368,6 +368,7 @@ export class HostManager {
       const cached = this.hostsCacheById.get(h.id);
       if (cached?.mac) addMac(cached.mac);
       for (const m of h.allMacs || cached?.allMacs || []) addMac(m);
+      for (const hi of h.hostInterfaces || cached?.hostInterfaces || []) addMac(hi?.mac);
       for (const p of h.switchPorts || this.switchPortsByHost.get(h.id) || []) addMac(p?.mac);
       for (const r of h.radios || this.liveRadiosByHost.get(h.id) || []) addMac(r?.bssid);
       if (h.ip && ipToMacFromArp.has(h.ip)) {
@@ -384,8 +385,17 @@ export class HostManager {
 
   resolveBestSwitchPortForMac(macLower) {
     if (!macLower) return null;
-    const { macToHostId } = this.getManagedHostMacMap();
+    const { macToHostId, macsByHostId } = this.getManagedHostMacMap();
     const targetOwnerHostId = macToHostId.get(macLower) || null;
+
+    let gwHostId = null;
+    for (const [id, meta] of this.hostsCacheById.entries()) {
+      if (meta?.role === 'gateway') {
+        gwHostId = id;
+        break;
+      }
+    }
+    const gwMacSet = gwHostId ? macsByHostId.get(gwHostId) || new Set() : new Set();
 
     const wifiOwnerByMac = new Map();
     for (const [hId, clients] of this.liveClientsByHost.entries()) {
@@ -404,16 +414,23 @@ export class HostManager {
       const entry = fdbMap[macLower];
       if (!entry || !entry.iface) continue;
 
-      // Check if this same switch port on this host also carries ANOTHER managed OpenWrt host's MAC or another AP's WiFi clients (trunk/uplink port)
-      let isTrunkToManagedHost = false;
+      // Check how many OTHER managed OpenWrt hosts (or their WiFi clients) are seen on this same switch port,
+      // and whether this port is a non-gateway host's uplink port pointing back toward the gateway
+      const seenManagedOwners = new Set();
+      let seesGatewayOnPort = false;
       for (const [otherMac, otherEntry] of Object.entries(fdbMap)) {
-        if (otherMac === macLower || otherEntry?.iface !== entry.iface) continue;
+        if (otherEntry?.iface !== entry.iface) continue;
+        if (hostId !== gwHostId && gwMacSet.has(otherMac)) {
+          seesGatewayOnPort = true;
+        }
+        if (otherMac === macLower) continue;
         const otherOwnerId = macToHostId.get(otherMac) || wifiOwnerByMac.get(otherMac);
         if (otherOwnerId && otherOwnerId !== hostId && otherOwnerId !== targetOwnerHostId) {
-          isTrunkToManagedHost = true;
-          break;
+          seenManagedOwners.add(otherOwnerId);
         }
       }
+      const managedHostCountOnPort = seenManagedOwners.size;
+      const isTrunkToManagedHost = managedHostCountOnPort > 0;
 
       const hostMeta = this.hostsCacheById.get(hostId);
       const isSwitchHost =
@@ -430,6 +447,8 @@ export class HostManager {
         maxSpeedMbps: entry.maxSpeedMbps || fmt?.maxSpeedMbps || entry.speedMbps || 1000,
         vlan: entry.vlan || 1,
         portMacCount: entry.portMacCount || 1,
+        managedHostCountOnPort,
+        seesGatewayOnPort,
         isTrunkToManagedHost,
         isSwitchHost,
       });
@@ -437,10 +456,13 @@ export class HostManager {
 
     if (candidates.length === 0) return null;
 
-    // Prefer non-trunk access ports first, then lowest portMacCount, then dedicated switches over gateways
+    // Prefer downstream ports (!seesGatewayOnPort) first, then fewest managed hosts on port (0 = leaf access port, 1 = dumb switch with 1 AP, etc.), then lowest portMacCount, then dedicated switches over gateways
     candidates.sort((a, b) => {
-      if (a.isTrunkToManagedHost !== b.isTrunkToManagedHost) {
-        return a.isTrunkToManagedHost ? 1 : -1;
+      if (a.seesGatewayOnPort !== b.seesGatewayOnPort) {
+        return a.seesGatewayOnPort ? 1 : -1;
+      }
+      if (a.managedHostCountOnPort !== b.managedHostCountOnPort) {
+        return a.managedHostCountOnPort - b.managedHostCountOnPort;
       }
       if ((a.portMacCount || 1) !== (b.portMacCount || 1)) {
         return (a.portMacCount || 1) - (b.portMacCount || 1);
@@ -1288,9 +1310,10 @@ export class HostManager {
       }
     }
 
-    // Step 4: Finalize portRole and surface any FDB-learned wired devices on non-trunk access ports
+    // Step 4: Finalize portRole, surface FDB-learned wired devices on non-trunk access ports, and detect Unmanaged ("Dumb") Switches
     for (const h of hosts) {
       const myPorts = portsByHostId.get(h.id) || [];
+      const hostUnmanagedSwitches = [];
       for (const p of myPorts) {
         const isTrunkOrUplink = p.portRole === 'trunk' || p.portRole === 'uplink' || p.portRole === 'wan';
         if (!isTrunkOrUplink && Array.isArray(p.connectedMacs) && p.connectedMacs.length > 0) {
@@ -1300,21 +1323,26 @@ export class HostManager {
             if (p.connectedDevices.some((d) => d.mac && d.mac.toLowerCase() === m)) continue;
             const knownClient = wiredClientByMac.get(m);
             if (knownClient) {
-              p.connectedDevices.push({
-                mac: knownClient.mac,
-                ip: knownClient.ip,
-                hostname: knownClient.hostname,
-                vendor: knownClient.vendor || null,
-                type: 'client',
-              });
+              if (!knownClient.connectedTo?.hostId || (knownClient.connectedTo.hostId === h.id && knownClient.connectedTo.iface === p.iface)) {
+                p.connectedDevices.push({
+                  mac: knownClient.mac,
+                  ip: knownClient.ip,
+                  hostname: knownClient.hostname,
+                  vendor: knownClient.vendor || null,
+                  type: 'client',
+                });
+              }
             } else {
-              p.connectedDevices.push({
-                mac: m,
-                ip: null,
-                hostname: lookupVendor(m) !== 'Unknown Manufacturer' ? `${lookupVendor(m)} (${m.slice(-5)})` : m,
-                vendor: lookupVendor(m),
-                type: 'client',
-              });
+              const bestForMac = this.resolveBestSwitchPortForMac(m);
+              if (!bestForMac || (bestForMac.hostId === h.id && bestForMac.iface === p.iface)) {
+                p.connectedDevices.push({
+                  mac: m,
+                  ip: null,
+                  hostname: lookupVendor(m) !== 'Unknown Manufacturer' ? `${lookupVendor(m)} (${m.slice(-5)})` : m,
+                  vendor: lookupVendor(m),
+                  type: 'client',
+                });
+              }
             }
           }
         }
@@ -1346,8 +1374,48 @@ export class HostManager {
           else if (p.connectedDevices.length > 0) p.portRole = 'access';
           else p.portRole = 'idle';
         }
+
+        // Detect Unmanaged ("Dumb") Switch on this port:
+        // A non-uplink, non-WAN port that sees >= 2 direct wired hosts/endpoints (client devices and/or OpenWrt APs)
+        // that are NOT downstream of a managed OpenWrt switch on this port.
+        const isUplinkOrWan = p.portRole === 'uplink' || p.portRole === 'wan' || isLocalUplinkOnOnlineHost;
+        const hasDownstreamManagedSwitch = p.connectedDevices.some((d) => {
+          if (d.type === 'switch') return true;
+          if (d.id) {
+            const peerHost = hosts.find((ph) => ph.id === d.id);
+            if (peerHost && (peerHost.role === 'switch' || (Array.isArray(peerHost.switchPorts) && peerHost.switchPorts.length >= 8))) {
+              return true;
+            }
+          }
+          return false;
+        });
+        const directEndpoints = p.connectedDevices.filter(
+          (d) => d.type !== 'wan' && d.type !== 'gateway' && !(d.hostname && String(d.hostname).includes('(Uplink)'))
+        );
+
+        if (!isUplinkOrWan && !hasDownstreamManagedSwitch && directEndpoints.length >= 2) {
+          p.hasUnmanagedSwitch = true;
+          p.unmanagedSwitch = {
+            id: `unmanaged-switch-${h.id}-${p.iface}`,
+            name: `Unmanaged Switch (${p.switchPort || p.iface})`,
+            parentHostId: h.id,
+            parentHostName: h.name || h.hostname || h.id,
+            parentIface: p.iface,
+            parentPort: p.switchPort || p.iface,
+            parentPortLabel: p.portLabel || p.switchPort || p.iface,
+            speedMbps: p.speedMbps || 1000,
+            maxSpeedMbps: p.maxSpeedMbps || p.speedMbps || 1000,
+            deviceCount: directEndpoints.length,
+            devices: directEndpoints,
+          };
+          hostUnmanagedSwitches.push(p.unmanagedSwitch);
+        } else {
+          p.hasUnmanagedSwitch = false;
+          p.unmanagedSwitch = null;
+        }
       }
       h.switchPorts = myPorts;
+      h.unmanagedSwitches = hostUnmanagedSwitches;
     }
   }
 

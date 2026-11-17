@@ -1594,3 +1594,99 @@ test('LAN Port Hardware Capability (maxSpeedMbps): parses PORTCAP and infers def
 
   await hostManager.deleteHost('sw-netdev-test', true);
 });
+
+test('Dumb Switch Detection: identifies switch ports seeing multiple hosts not on a downstream managed switch', async () => {
+  await hostManager.createHost({
+    id: 'gw-dumb-test',
+    name: 'Main Gateway',
+    ip: '192.168.10.1',
+    role: 'gateway',
+  });
+  await hostManager.createHost({
+    id: 'sw-dumb-test',
+    name: 'Managed Switch 24P',
+    ip: '192.168.10.2',
+    role: 'switch',
+  });
+
+  const gwOut = [
+    '===BOARD===',
+    JSON.stringify({ hostname: 'Main-Gateway', model: 'OpenWrt One' }),
+    '===UPTIME===',
+    '7200.00 6000.00',
+    '===DHCP===',
+    '1700000000 00:11:22:aa:bb:01 192.168.10.50 Desk-PC-1 *',
+    '1700000000 00:11:22:aa:bb:02 192.168.10.51 Desk-PC-2 *',
+    '1700000000 00:11:22:aa:bb:03 192.168.10.52 Solo-NAS *',
+    '===SWITCH_FDB===',
+    'HOSTIF|br-lan|aa:00:00:00:00:01|192.168.10.1',
+    'BRPORT|br-lan|lan1|0x1|1000|full|up|1|aa:00:00:00:00:01|3',
+    // Gateway lan1 connects to Managed Switch (aa:00:00:00:00:02) and sees all 3 wired clients through it
+    'FDB|aa:00:00:00:00:02|lan1|br-lan|1',
+    'FDB|00:11:22:aa:bb:01|lan1|br-lan|1',
+    'FDB|00:11:22:aa:bb:02|lan1|br-lan|1',
+    'FDB|00:11:22:aa:bb:03|lan1|br-lan|1',
+  ].join('\n');
+
+  const swOut = [
+    '===BOARD===',
+    JSON.stringify({ hostname: 'Managed-Switch', model: 'ZyXEL GS1900-24' }),
+    '===UPTIME===',
+    '7200.00 6500.00',
+    '===SWITCH_FDB===',
+    'HOSTIF|switch.1|aa:00:00:00:00:02|192.168.10.2',
+    "UCINET|network.@device[0].ports='lan1' 'lan2' 'lan3' 'lan4' 'lan5' 'lan6' 'lan7' 'lan8'",
+    'BRPORT|switch|lan1|0x1|1000|full|up|1|aa:00:00:00:00:02|3',
+    'BRPORT|switch|lan2|0x2|1000|full|up|1|aa:00:00:00:00:02|3',
+    'BRPORT|switch|lan3|0x3|1000|full|up|1|aa:00:00:00:00:02|3',
+    // lan1 is uplink to Gateway
+    'FDB|aa:00:00:00:00:01|lan1|switch|1',
+    // lan2 has a 5-port dumb switch with 2 wired hosts (Desk-PC-1 and Desk-PC-2)
+    'FDB|00:11:22:aa:bb:01|lan2|switch|1',
+    'FDB|00:11:22:aa:bb:02|lan2|switch|1',
+    // lan3 has a single wired host (Solo-NAS)
+    'FDB|00:11:22:aa:bb:03|lan3|switch|1',
+  ].join('\n');
+
+  const allDb = await db.getHosts();
+  hostManager.applyTelemetryToHost(
+    allDb.find((h) => h.id === 'gw-dumb-test'),
+    parseSshTelemetryOutput({ id: 'gw-dumb-test' }, gwOut)
+  );
+  hostManager.applyTelemetryToHost(
+    allDb.find((h) => h.id === 'sw-dumb-test'),
+    parseSshTelemetryOutput({ id: 'sw-dumb-test' }, swOut)
+  );
+
+  const resolvedHosts = await hostManager.getAllHosts();
+  const gwResolved = resolvedHosts.find((h) => h.id === 'gw-dumb-test');
+  const swResolved = resolvedHosts.find((h) => h.id === 'sw-dumb-test');
+
+  // Gateway lan1 connects to Managed Switch -> NOT a dumb switch
+  const gwLan1 = gwResolved.switchPorts.find((p) => p.iface === 'lan1');
+  assert.equal(gwLan1.hasUnmanagedSwitch, false);
+
+  // Managed Switch lan1 is uplink to Gateway -> NOT a dumb switch
+  const swLan1 = swResolved.switchPorts.find((p) => p.iface === 'lan1');
+  assert.equal(swLan1.hasUnmanagedSwitch, false);
+
+  // Managed Switch lan2 has 2 wired hosts not on a downstream managed switch -> IS a dumb switch!
+  const swLan2 = swResolved.switchPorts.find((p) => p.iface === 'lan2');
+  assert.equal(swLan2.hasUnmanagedSwitch, true);
+  assert.equal(swLan2.unmanagedSwitch.deviceCount, 2);
+
+  // Managed Switch lan3 has only 1 wired host -> NOT a dumb switch
+  const swLan3 = swResolved.switchPorts.find((p) => p.iface === 'lan3');
+  assert.equal(swLan3.hasUnmanagedSwitch, false);
+
+  // Verify topology response includes the unmanaged_switch node
+  const topoRes = await fetch(`${baseUrl}/api/topology`);
+  assert.equal(topoRes.status, 200);
+  const topoBody = await topoRes.json();
+  const dumbNode = topoBody.nodes.find((n) => n.type === 'unmanaged_switch' && n.parentHostId === 'sw-dumb-test');
+  assert.ok(dumbNode, 'Expected unmanaged_switch node in topology');
+  assert.equal(dumbNode.parentIface, 'lan2');
+
+  await hostManager.deleteHost('gw-dumb-test', true);
+  await hostManager.deleteHost('sw-dumb-test', true);
+});
