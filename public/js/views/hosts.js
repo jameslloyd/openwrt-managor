@@ -610,6 +610,11 @@ function renderHostRow(h) {
       </td>
       <td>
         <div class="font-mono" style="font-size: 11.5px;">CPU: ${h.cpuUsagePct ?? 0}% • RAM: ${h.memUsagePct ?? 0}%</div>
+        ${typeof h.cpuCores === 'number' && h.cpuCores > 0 ? `
+          <div style="font-size: 10.5px; color: var(--color-text-muted); margin-top: 2px;">
+            ${h.cpuCores} CPU Core${h.cpuCores === 1 ? '' : 's'}${h.cpuCores === 1 && h.pollIntervalMs ? ` • Low-Rate Poll (${Math.round(h.pollIntervalMs / 1000)}s)` : ''}
+          </div>
+        ` : ''}
       </td>
       <td>
         <strong>${h.clientCount ?? 0}</strong> active

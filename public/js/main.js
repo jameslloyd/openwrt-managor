@@ -203,8 +203,8 @@ function setupKeyboardShortcuts() {
       e.preventDefault();
       openShortcutsHelp();
     } else if (e.key.toLowerCase() === 'r') {
-      store.poll();
-      toast.info('Refreshing', 'Polling OpenWrt routers...');
+      store.forceRefresh();
+      toast.info('Full Refresh', 'Forcing full static & dynamic update from OpenWrt routers...');
     }
   });
 }
@@ -374,8 +374,8 @@ function initApp() {
 
   // Topbar Actions
   document.getElementById('topbar-refresh-btn')?.addEventListener('click', () => {
-    store.poll();
-    toast.info('Updating', 'Querying fleet telemetry...');
+    store.forceRefresh();
+    toast.info('Full Refresh', 'Forcing full static & dynamic update from OpenWrt routers...');
   });
 
   document.getElementById('topbar-backup-all-btn')?.addEventListener('click', async () => {
@@ -383,7 +383,7 @@ function initApp() {
       toast.info('Backup Queued', 'Running concurrent snapshot across all routers...');
       await api.runBackup('all');
       toast.success('Backup Finished', 'Archives safely saved to TrueNAS /backups.');
-      store.poll();
+      store.poll(false, { refreshStatic: true });
     } catch (err) {
       toast.error('Backup Error', err.message);
     }

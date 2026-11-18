@@ -72,7 +72,11 @@ export const api = {
   getOpenApiSpec: () => request('/api/openapi.json'),
 
   // Hosts
-  getHosts: () => request('/api/hosts'),
+  getHosts: (refresh = false) => request(`/api/hosts${refresh ? '?refresh=true' : ''}`),
+  refreshHosts: (hostId = 'all', full = true) =>
+    hostId === 'all'
+      ? request('/api/hosts/refresh', { method: 'POST', body: { hostId: 'all', full } })
+      : request(`/api/hosts/${encodeURIComponent(hostId)}/refresh`, { method: 'POST', body: { full } }),
   getHost: (id) => request(`/api/hosts/${encodeURIComponent(id)}`),
   createHost: (data) => request('/api/hosts', { method: 'POST', body: data }),
   updateHost: (id, data) => request(`/api/hosts/${encodeURIComponent(id)}`, { method: 'PUT', body: data }),

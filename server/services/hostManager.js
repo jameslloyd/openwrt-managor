@@ -53,11 +53,17 @@ export function sanitizeHost(host, activeUpgradeJob = null) {
   };
 }
 
+export const DEFAULT_SINGLE_CORE_POLL_INTERVAL_MS = 60000;
+
 export class HostManager {
   constructor() {
     this.pollTimer = null;
+    this.pollIntervalMs = config.pollIntervalMs || 10000;
+    this.singleCorePollIntervalMs = config.singleCorePollIntervalMs || DEFAULT_SINGLE_CORE_POLL_INTERVAL_MS;
     this.isPolling = false;
-    this.prevSamples = new Map(); // hostId -> { timestamp, cpuStat, netCounters, clientBytes }
+    this.activePollPromise = null;
+    this.lastFullRefreshAt = null;
+    this.prevSamples = new Map(); // hostId -> { timestamp, cpuStat, netCounters, clientBytes, radioSurvey, staticCache }
     this.liveClientsByHost = new Map(); // hostId -> array of client objects
     this.liveRadiosByHost = new Map(); // hostId -> array of radio objects
     this.liveNeighborsByHost = new Map(); // hostId -> array of scanned neighbor BSS objects
@@ -74,6 +80,43 @@ export class HostManager {
     this.pollFailuresByHost = new Map(); // hostId -> consecutive failed poll count
   }
 
+  /**
+   * Invalidates cached static OpenWrt telemetry for one host or all hosts while preserving dynamic delta counters (CPU/net/client bytes).
+   */
+  invalidateStaticCache(hostId = 'all') {
+    if (!hostId || hostId === 'all') {
+      for (const sample of this.prevSamples.values()) {
+        if (sample && typeof sample === 'object') {
+          delete sample.staticCache;
+        }
+      }
+      return;
+    }
+    const sample = this.prevSamples.get(hostId);
+    if (sample && typeof sample === 'object') {
+      delete sample.staticCache;
+    }
+  }
+
+  syncCachedUpdates(hostId, updates, firmware = null) {
+    const sample = this.prevSamples.get(hostId);
+    if (sample?.staticCache && updates) {
+      sample.staticCache.updates = updates;
+      if (updates.lastChecked) {
+        sample.staticCache.updatesLastChecked = updates.lastChecked;
+      }
+      if (firmware && sample.staticCache.board?.release) {
+        sample.staticCache.board = {
+          ...sample.staticCache.board,
+          release: {
+            ...sample.staticCache.board.release,
+            description: firmware,
+          },
+        };
+      }
+    }
+  }
+
   async init() {
     let hosts = (await db.getHosts()) || [];
     if (hosts.some((h) => h.isSimulated)) {
@@ -82,8 +125,16 @@ export class HostManager {
     }
     config.demoMode = false;
     const settings = await db.getSettings();
-    if (settings && settings.demoMode !== false) {
-      await db.saveSettings({ ...settings, demoMode: false });
+    if (settings) {
+      if (typeof settings.pollIntervalMs === 'number' && settings.pollIntervalMs >= 1000) {
+        this.pollIntervalMs = settings.pollIntervalMs;
+      }
+      if (typeof settings.singleCorePollIntervalMs === 'number' && settings.singleCorePollIntervalMs >= 1000) {
+        this.singleCorePollIntervalMs = settings.singleCorePollIntervalMs;
+      }
+      if (settings.demoMode !== false) {
+        await db.saveSettings({ ...settings, demoMode: false });
+      }
     }
 
     // Trigger an initial background poll for any configured hosts
@@ -126,10 +177,64 @@ export class HostManager {
     return realHosts;
   }
 
-  startPolling(intervalMs = 10000) {
+  startPolling(intervalMs = this.pollIntervalMs || 10000, singleCoreIntervalMs = null) {
+    if (typeof intervalMs === 'number' && intervalMs >= 1000) {
+      this.pollIntervalMs = intervalMs;
+    }
+    if (typeof singleCoreIntervalMs === 'number' && singleCoreIntervalMs >= 1000) {
+      this.singleCorePollIntervalMs = singleCoreIntervalMs;
+    }
     if (this.pollTimer) clearInterval(this.pollTimer);
-    this.pollTimer = setInterval(() => this.pollAllHosts(), intervalMs);
+    this.pollTimer = setInterval(() => this.pollAllHosts(), this.pollIntervalMs);
     this.pollTimer.unref();
+  }
+
+  getSingleCorePollIntervalMs(overrideMs = null) {
+    if (typeof overrideMs === 'number' && overrideMs >= 1000) {
+      return overrideMs;
+    }
+    return Math.max(this.pollIntervalMs || 10000, this.singleCorePollIntervalMs || DEFAULT_SINGLE_CORE_POLL_INTERVAL_MS);
+  }
+
+  getHostCpuCores(host) {
+    if (!host) return null;
+    if (typeof host.cpuCores === 'number' && host.cpuCores > 0) {
+      return host.cpuCores;
+    }
+    const sampleCores = this.prevSamples.get(host.id)?.staticCache?.cpuCores;
+    if (typeof sampleCores === 'number' && sampleCores > 0) {
+      return sampleCores;
+    }
+    return null;
+  }
+
+  getHostEffectivePollIntervalMs(host, singleCoreIntervalOverrideMs = null) {
+    const cores = this.getHostCpuCores(host);
+    if (cores === 1) {
+      return this.getSingleCorePollIntervalMs(singleCoreIntervalOverrideMs);
+    }
+    return this.pollIntervalMs || 10000;
+  }
+
+  /**
+   * Determines whether a host should be polled during a background `pollAllHosts` cycle.
+   * Single-core devices (`cpuCores === 1`, such as single-core managed switches) are throttled
+   * to `singleCorePollIntervalMs` (default 60s) unless `forceFull` is true.
+   */
+  shouldPollHost(host, { forceFull = false, nowMs = Date.now(), singleCorePollIntervalMs = null } = {}) {
+    if (!host) return false;
+    if (forceFull) return true;
+    const cpuCores = this.getHostCpuCores(host);
+    if (cpuCores !== 1) return true;
+
+    const minIntervalMs = this.getSingleCorePollIntervalMs(singleCorePollIntervalMs);
+    const prevSample = this.prevSamples.get(host.id);
+    const lastPollMs =
+      prevSample?.timestamp ||
+      (host.lastSeen ? Date.parse(host.lastSeen) || 0 : 0);
+
+    if (!lastPollMs || lastPollMs <= 0) return true;
+    return nowMs - lastPollMs >= minIntervalMs;
   }
 
   stopPolling() {
@@ -150,6 +255,10 @@ export class HostManager {
     if (telemetry.firmware) host.firmware = telemetry.firmware;
     if (typeof telemetry.uptimeSec === 'number') host.uptimeSec = telemetry.uptimeSec;
     if (typeof telemetry.cpuUsagePct === 'number') host.cpuUsagePct = telemetry.cpuUsagePct;
+    if (typeof telemetry.cpuCores === 'number' && telemetry.cpuCores > 0) {
+      host.cpuCores = telemetry.cpuCores;
+    }
+    host.pollIntervalMs = this.getHostEffectivePollIntervalMs(host);
     if (typeof telemetry.memUsagePct === 'number') host.memUsagePct = telemetry.memUsagePct;
     if (telemetry.mac) host.mac = telemetry.mac;
     if (Array.isArray(telemetry.allMacs) && telemetry.allMacs.length > 0) {
@@ -214,6 +323,12 @@ export class HostManager {
     if (telemetry.updates) {
       host.updates = telemetry.updates;
     }
+    if (telemetry.pollMode) {
+      host.pollMode = telemetry.pollMode;
+    }
+    if (telemetry.staticCacheUpdatedAt) {
+      host.staticCacheUpdatedAt = telemetry.staticCacheUpdatedAt;
+    }
     if (telemetry.sample) {
       this.prevSamples.set(host.id, telemetry.sample);
     }
@@ -246,17 +361,26 @@ export class HostManager {
       hasWirelessRadios: radios.length > 0,
       persisted: Boolean(prevCache?.persisted),
     });
-    host.lastSeen = new Date().toISOString();
+    const nowIso = new Date().toISOString();
+    host.lastSeen = nowIso;
+    if (telemetry.pollMode === 'full') {
+      host.lastFullPoll = nowIso;
+      this.lastFullRefreshAt = nowIso;
+    }
     return true;
   }
 
-  async pollSingleHost(hostId) {
+  async pollSingleHost(hostId, options = {}) {
+    const forceFull = Boolean(options?.forceFull || options?.full);
     const hosts = (await db.getHosts()) || [];
     const idx = hosts.findIndex((h) => h.id === hostId);
     if (idx === -1) return null;
 
     const host = hosts[idx];
-    const telemetry = await pollRealHost(host, this.prevSamples.get(host.id));
+    if (forceFull) {
+      this.invalidateStaticCache(host.id);
+    }
+    const telemetry = await pollRealHost(host, this.prevSamples.get(host.id), { forceFull });
     if (telemetry.online) {
       this.applyTelemetryToHost(host, telemetry);
       hosts[idx] = host;
@@ -265,64 +389,90 @@ export class HostManager {
     return sanitizeHost(host);
   }
 
-  async pollAllHosts() {
-    if (this.isPolling) return;
-    this.isPolling = true;
-
-    try {
-      const hosts = await db.getHosts();
-      if (!hosts || hosts.length === 0) return;
-
-      const results = await Promise.all(
-        hosts.map(async (h) => {
-          const telemetry = await pollRealHost(h, this.prevSamples.get(h.id));
-          return { host: h, telemetry };
-        })
-      );
-
-      let updated = false;
-      for (const { host, telemetry } of results) {
-        if (telemetry.online) {
-          this.pollFailuresByHost.set(host.id, 0);
-          this.applyTelemetryToHost(host, telemetry);
-          updated = true;
-        } else {
-          const failures = (this.pollFailuresByHost.get(host.id) || 0) + 1;
-          this.pollFailuresByHost.set(host.id, failures);
-          // Require at least 2 consecutive failed polls before flipping an already-online host to offline
-          if (host.status !== 'online' || failures >= 2) {
-            host.status = 'offline';
-            host.rxRateBps = 0;
-            host.txRateBps = 0;
-            updated = true;
-          }
+  async pollAllHosts(options = {}) {
+    const forceFull = Boolean(options?.forceFull || options?.full);
+    if (this.isPolling) {
+      if (!forceFull) return;
+      if (this.activePollPromise) {
+        try {
+          await this.activePollPromise;
+        } catch {
+          // Proceed with forced full refresh after in-flight poll finishes
         }
       }
-
-      if (updated) {
-        await db.saveHosts(hosts);
-      }
-
-      // Record history snapshot (keep last 120 points)
-      const history = (await db.getHistory()) || [];
-      const now = new Date().toISOString();
-      const totalClients = hosts.reduce((acc, h) => acc + (h.clientCount || 0), 0);
-      const avgCpu = Math.round(hosts.reduce((acc, h) => acc + (h.cpuUsagePct || 0), 0) / (hosts.length || 1));
-
-      history.push({
-        timestamp: now,
-        onlineHosts: hosts.filter((h) => h.status === 'online').length,
-        totalClients,
-        avgCpu,
-      });
-
-      if (history.length > 120) {
-        history.shift();
-      }
-      await db.saveHistory(history);
-    } finally {
-      this.isPolling = false;
     }
+    this.isPolling = true;
+
+    const runPoll = async () => {
+      try {
+        const hosts = await db.getHosts();
+        if (!hosts || hosts.length === 0) return;
+
+        if (forceFull) {
+          this.invalidateStaticCache('all');
+        }
+
+        const nowMs = typeof options?.nowMs === 'number' ? options.nowMs : Date.now();
+        const singleCorePollIntervalMs = options?.singleCorePollIntervalMs ?? null;
+        const hostsToPoll = hosts.filter((h) =>
+          this.shouldPollHost(h, { forceFull, nowMs, singleCorePollIntervalMs })
+        );
+
+        const results = await Promise.all(
+          hostsToPoll.map(async (h) => {
+            const telemetry = await pollRealHost(h, this.prevSamples.get(h.id), { forceFull });
+            return { host: h, telemetry };
+          })
+        );
+
+        let updated = false;
+        for (const { host, telemetry } of results) {
+          if (telemetry.online) {
+            this.pollFailuresByHost.set(host.id, 0);
+            this.applyTelemetryToHost(host, telemetry);
+            updated = true;
+          } else {
+            const failures = (this.pollFailuresByHost.get(host.id) || 0) + 1;
+            this.pollFailuresByHost.set(host.id, failures);
+            // Require at least 2 consecutive failed polls before flipping an already-online host to offline
+            if (host.status !== 'online' || failures >= 2) {
+              host.status = 'offline';
+              host.rxRateBps = 0;
+              host.txRateBps = 0;
+              updated = true;
+            }
+          }
+        }
+
+        if (updated) {
+          await db.saveHosts(hosts);
+        }
+
+        // Record history snapshot (keep last 120 points)
+        const history = (await db.getHistory()) || [];
+        const now = new Date().toISOString();
+        const totalClients = hosts.reduce((acc, h) => acc + (h.clientCount || 0), 0);
+        const avgCpu = Math.round(hosts.reduce((acc, h) => acc + (h.cpuUsagePct || 0), 0) / (hosts.length || 1));
+
+        history.push({
+          timestamp: now,
+          onlineHosts: hosts.filter((h) => h.status === 'online').length,
+          totalClients,
+          avgCpu,
+        });
+
+        if (history.length > 120) {
+          history.shift();
+        }
+        await db.saveHistory(history);
+      } finally {
+        this.isPolling = false;
+        this.activePollPromise = null;
+      }
+    };
+
+    this.activePollPromise = runPoll();
+    return this.activePollPromise;
   }
 
   getManagedHostMacMap(hostsList = null) {
@@ -921,6 +1071,11 @@ export class HostManager {
         }
       }
       const geo = extractHostGeolocation(h);
+      const detectedCores = this.getHostCpuCores(h);
+      if (detectedCores && !h.cpuCores) {
+        h.cpuCores = detectedCores;
+      }
+      h.pollIntervalMs = this.getHostEffectivePollIntervalMs(h);
       this.hostsCacheById.set(h.id, {
         id: h.id,
         name: h.name || h.hostname || h.id,
@@ -1541,7 +1696,8 @@ export class HostManager {
     };
 
     if (updateData.password || updateData.ip || updateData.protocol || updateData.username) {
-      const telemetry = await pollRealHost(updated, this.prevSamples.get(id));
+      this.invalidateStaticCache(id);
+      const telemetry = await pollRealHost(updated, this.prevSamples.get(id), { forceFull: true });
       if (telemetry.online) {
         this.applyTelemetryToHost(updated, telemetry);
       }
@@ -1618,6 +1774,7 @@ export class HostManager {
     const res = await checkHostUpdates(host);
     if (res.firmware) host.firmware = res.firmware;
     if (res.updates) host.updates = res.updates;
+    this.syncCachedUpdates(host.id, host.updates, res.firmware || null);
     host.lastSeen = new Date().toISOString();
     hosts[idx] = host;
     await db.saveHosts(hosts);
@@ -1641,6 +1798,7 @@ export class HostManager {
         const res = await checkHostUpdates(host);
         if (res.firmware) host.firmware = res.firmware;
         if (res.updates) host.updates = res.updates;
+        this.syncCachedUpdates(host.id, host.updates, res.firmware || null);
         host.lastSeen = new Date().toISOString();
         hosts[i] = host;
         results.push({
@@ -1783,6 +1941,7 @@ export class HostManager {
         if (hIdx !== -1) {
           if (res.updates) {
             freshHosts[hIdx].updates = res.updates;
+            this.syncCachedUpdates(host.id, res.updates);
           }
           freshHosts[hIdx].lastSeen = new Date().toISOString();
           await db.saveHosts(freshHosts);
@@ -1937,6 +2096,7 @@ export class HostManager {
         if (hIdx !== -1) {
           if (res.updates) {
             freshHosts[hIdx].updates = res.updates;
+            this.syncCachedUpdates(host.id, res.updates);
           }
           freshHosts[hIdx].lastSeen = new Date().toISOString();
           await db.saveHosts(freshHosts);
@@ -2004,6 +2164,7 @@ export class HostManager {
     const res = await performAttendedSysupgradeAction(host, { action });
     if (res.updates) {
       host.updates = res.updates;
+      this.syncCachedUpdates(host.id, res.updates);
     }
     host.lastSeen = new Date().toISOString();
     hosts[idx] = host;

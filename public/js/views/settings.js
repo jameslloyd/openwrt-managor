@@ -204,12 +204,26 @@ export function renderSettings(container) {
             </div>
           </div>
           <div class="form-group">
-            <label class="form-label" for="settings-poll-select">Telemetry Poll Interval</label>
+            <label class="form-label" for="settings-poll-select">Standard Poll Interval (Multi-Core)</label>
             <select class="form-select" id="settings-poll-select">
               <option value="5000" ${settings?.pollIntervalMs === 5000 ? 'selected' : ''}>5 seconds (High Frequency)</option>
               <option value="10000" ${!settings?.pollIntervalMs || settings?.pollIntervalMs === 10000 ? 'selected' : ''}>10 seconds (Standard)</option>
               <option value="30000" ${settings?.pollIntervalMs === 30000 ? 'selected' : ''}>30 seconds (Low Resource)</option>
             </select>
+            <span class="form-hint">Default dynamic polling rate for multi-core routers &amp; APs.</span>
+          </div>
+        </div>
+
+        <div class="form-row-2col" style="margin-top: 10px;">
+          <div class="form-group">
+            <label class="form-label" for="settings-single-core-poll-select">Single-Core Device Poll Interval (Managed Switches)</label>
+            <select class="form-select" id="settings-single-core-poll-select">
+              <option value="30000" ${settings?.singleCorePollIntervalMs === 30000 ? 'selected' : ''}>30 seconds (Moderate Relief)</option>
+              <option value="60000" ${!settings?.singleCorePollIntervalMs || settings?.singleCorePollIntervalMs === 60000 ? 'selected' : ''}>60 seconds (Recommended for Single-Core Switches)</option>
+              <option value="120000" ${settings?.singleCorePollIntervalMs === 120000 ? 'selected' : ''}>120 seconds (Ultra-Low CPU Impact)</option>
+              <option value="300000" ${settings?.singleCorePollIntervalMs === 300000 ? 'selected' : ''}>300 seconds (5 Minutes)</option>
+            </select>
+            <span class="form-hint">Automatically applied to devices detected with 1 CPU core (e.g. single-core managed switches). Manual Refresh still updates immediately.</span>
           </div>
         </div>
 
@@ -291,6 +305,10 @@ export function renderSettings(container) {
   // Save Settings
   container.querySelector('#settings-save-btn')?.addEventListener('click', async () => {
     const pollInterval = parseInt(container.querySelector('#settings-poll-select')?.value || '10000', 10);
+    const singleCorePollInterval = parseInt(
+      container.querySelector('#settings-single-core-poll-select')?.value || '60000',
+      10
+    );
     const keepDaily = Math.max(0, parseInt(container.querySelector('#settings-keep-daily')?.value || '7', 10) || 7);
     const keepWeekly = Math.max(0, parseInt(container.querySelector('#settings-keep-weekly')?.value || '4', 10) || 4);
     const keepMonthly = Math.max(0, parseInt(container.querySelector('#settings-keep-monthly')?.value || '6', 10) || 6);
@@ -302,6 +320,7 @@ export function renderSettings(container) {
     try {
       const updated = await api.updateSettings({
         pollIntervalMs: pollInterval,
+        singleCorePollIntervalMs: singleCorePollInterval,
         retention: {
           keepDaily,
           keepWeekly,

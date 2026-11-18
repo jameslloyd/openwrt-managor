@@ -83,6 +83,8 @@ export function buildAgentHostPayload(host, allClients = [], allBackups = []) {
     uptimeFormatted: formatUptimeHuman(host.uptimeSec || 0),
     metrics: {
       cpuUsagePct: host.cpuUsagePct ?? 0,
+      cpuCores: host.cpuCores ?? null,
+      pollIntervalMs: host.pollIntervalMs ?? null,
       memUsagePct: host.memUsagePct ?? 0,
       rxRateBps: host.rxRateBps ?? 0,
       txRateBps: host.txRateBps ?? 0,

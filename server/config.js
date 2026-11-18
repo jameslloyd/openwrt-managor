@@ -34,6 +34,7 @@ export const config = {
   backupDir: resolveDirectory(process.env.BACKUP_DIR, 'backups'),
   demoMode: false,
   pollIntervalMs: parseInt(process.env.POLL_INTERVAL_MS || '10000', 10),
+  singleCorePollIntervalMs: parseInt(process.env.SINGLE_CORE_POLL_INTERVAL_MS || '60000', 10),
   backupTimeoutMs: parseInt(process.env.BACKUP_TIMEOUT_MS || '30000', 10),
   logLevel: process.env.LOG_LEVEL || 'info',
   publicDir: path.resolve(rootDir, 'public'),

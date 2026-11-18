@@ -163,8 +163,8 @@ export function renderDashboard(container) {
 
   // Attach quick actions
   container.querySelector('#dash-quick-refresh')?.addEventListener('click', () => {
-    store.poll();
-    toast.info('Telemetry Updated', 'Fetched latest OpenWrt router metrics.');
+    store.forceRefresh();
+    toast.info('Full Refresh', 'Forcing full static & dynamic update from OpenWrt routers...');
   });
 
   container.querySelector('#dash-quick-backup-all')?.addEventListener('click', async () => {
@@ -172,7 +172,7 @@ export function renderDashboard(container) {
       toast.info('Backup Queued', 'Running concurrent backup for all OpenWrt hosts...');
       await api.runBackup('all');
       toast.success('Backup Completed', 'All hosts backed up successfully to /backups.');
-      store.poll();
+      store.poll(false, { refreshStatic: true });
     } catch (err) {
       toast.error('Backup Error', err.message);
     }
@@ -216,7 +216,7 @@ export function renderDashboard(container) {
         btn.disabled = true;
         await api.runBackup(hostId);
         toast.success('Backup Created', `Configuration archive saved for ${hostId}`);
-        store.poll();
+        store.poll(false, { refreshStatic: true });
       } catch (err) {
         toast.error('Backup Failed', err.message);
       } finally {
@@ -280,7 +280,7 @@ function renderHostCard(host) {
 
       <div class="node-progress-group">
         <div class="progress-label-row">
-          <span>CPU (${cpuPct}%)</span>
+          <span>CPU (${cpuPct}%${typeof host.cpuCores === 'number' && host.cpuCores > 0 ? ` • ${host.cpuCores}C` : ''}${host.cpuCores === 1 && host.pollIntervalMs ? ` @ ${Math.round(host.pollIntervalMs / 1000)}s` : ''})</span>
           <span>RAM (${memPct}%)</span>
         </div>
         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">

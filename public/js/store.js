@@ -43,6 +43,8 @@ class Store {
     this.fastUpgradeTimer = null;
     this.isPollingUpgrade = false;
     this.pollIntervalMs = 10000;
+    this.hasLoadedStaticResources = false;
+    this.lastStaticFetchTime = 0;
   }
 
   on(event, callback) {
@@ -145,24 +147,47 @@ class Store {
     this.emit('upgrade-progress', { upgradeJobs: this.state.upgradeJobs, hosts: this.state.hosts });
   }
 
-  async poll(force = false) {
+  async forceRefresh(hostId = 'all') {
+    return this.poll(true, { hostId });
+  }
+
+  async poll(force = false, options = {}) {
     if (this.state.isFetching && !force) return;
     this.state.isFetching = true;
     this.emit('fetch-start');
 
     try {
+      const nowMs = Date.now();
+      const shouldFetchStatic =
+        Boolean(force) ||
+        Boolean(options?.refreshStatic) ||
+        !this.hasLoadedStaticResources ||
+        this.state.activeView === 'backups' ||
+        this.state.activeView === 'settings' ||
+        nowMs - this.lastStaticFetchTime > 5 * 60 * 1000;
+
+      let refreshBundle = null;
+      if (force && options?.skipDeviceRefresh !== true) {
+        refreshBundle = await api.refreshHosts(options.hostId || 'all', true).catch(() => null);
+      }
+
       const [health, hosts, topology, clients, wifiChannels, wifiInterference, backups, schedulesRes, settings, jobsRes] = await Promise.all([
         api.getHealth().catch(() => null),
-        api.getHosts().catch(() => []),
-        api.getTopology().catch(() => ({ nodes: [], links: [] })),
-        api.getClients().catch(() => []),
-        api.getWifiChannels().catch(() => ({ bands: {} })),
-        api.getWifiInterference().catch(() => ({ summary: { healthScore: 100 }, warnings: [] })),
-        api.getBackups().catch(() => []),
-        api.getBackupSchedules().catch(() => ({ schedules: [] })),
-        api.getSettings().catch(() => null),
+        Array.isArray(refreshBundle?.hosts) ? Promise.resolve(refreshBundle.hosts) : api.getHosts().catch(() => []),
+        refreshBundle?.topology ? Promise.resolve(refreshBundle.topology) : api.getTopology().catch(() => ({ nodes: [], links: [] })),
+        Array.isArray(refreshBundle?.clients) ? Promise.resolve(refreshBundle.clients) : api.getClients().catch(() => []),
+        refreshBundle?.wifiChannels ? Promise.resolve(refreshBundle.wifiChannels) : api.getWifiChannels().catch(() => ({ bands: {} })),
+        refreshBundle?.wifiInterference ? Promise.resolve(refreshBundle.wifiInterference) : api.getWifiInterference().catch(() => ({ summary: { healthScore: 100 }, warnings: [] })),
+        shouldFetchStatic ? api.getBackups().catch(() => this.state.backups || []) : Promise.resolve(this.state.backups || []),
+        shouldFetchStatic ? api.getBackupSchedules().catch(() => ({ schedules: this.state.schedules || [] })) : Promise.resolve({ schedules: this.state.schedules || [] }),
+        shouldFetchStatic ? api.getSettings().catch(() => this.state.settings) : Promise.resolve(this.state.settings),
         api.getUpgradeJobs().catch(() => ({ jobs: [] }))
       ]);
+
+      if (shouldFetchStatic) {
+        this.hasLoadedStaticResources = true;
+        this.lastStaticFetchTime = nowMs;
+      }
       const schedules = Array.isArray(schedulesRes?.schedules)
         ? schedulesRes.schedules
         : Array.isArray(schedulesRes)

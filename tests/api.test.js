@@ -6,6 +6,7 @@ import { db } from '../server/storage/db.js';
 import { backupEngine } from '../server/services/backupEngine.js';
 import { hostManager } from '../server/services/hostManager.js';
 import {
+  buildTelemetrySshScript,
   parseSshTelemetryOutput,
   parseSwitchFdbSection,
   formatSwitchPortLabel,
@@ -1689,4 +1690,337 @@ test('Dumb Switch Detection: identifies switch ports seeing multiple hosts not o
 
   await hostManager.deleteHost('gw-dumb-test', true);
   await hostManager.deleteHost('sw-dumb-test', true);
+});
+
+test('Static Data Caching & Lightweight Dynamic Polling: caches static device data across polls and supports forced full refresh', async () => {
+  // 1. Verify buildTelemetrySshScript omits heavy static commands and sleep 1 in dynamic mode
+  const fullScript = buildTelemetrySshScript({ full: true, hasPrevCpuSample: false });
+  assert.ok(fullScript.includes('ubus call system board'), 'Full script must query board info');
+  assert.ok(fullScript.includes('sleep 1'), 'Initial full script without prev CPU sample must include sleep 1');
+  assert.ok(fullScript.includes('opkg list-upgradable'), 'Full script must check upgradable packages');
+  assert.ok(fullScript.includes('ethtool'), 'Full script must query ethtool capabilities');
+
+  const fullScriptWithPrevCpu = buildTelemetrySshScript({ full: true, hasPrevCpuSample: true });
+  assert.ok(!fullScriptWithPrevCpu.includes('sleep 1'), 'Full script with prev CPU sample must skip sleep 1');
+
+  const dynamicScript = buildTelemetrySshScript({ full: false, hasPrevCpuSample: true, hasWirelessRadios: true });
+  assert.ok(!dynamicScript.includes('ubus call system board'), 'Dynamic script must skip ubus system board');
+  assert.ok(!dynamicScript.includes('sleep 1'), 'Dynamic script must skip sleep 1');
+  assert.ok(!dynamicScript.includes('opkg list-upgradable'), 'Dynamic script must skip opkg list-upgradable');
+  assert.ok(!dynamicScript.includes('ethtool'), 'Dynamic script must skip ethtool');
+  assert.ok(!dynamicScript.includes('uci show'), 'Dynamic script must skip uci show');
+  assert.ok(!dynamicScript.includes('scan dump'), 'Dynamic script must skip iw scan dump');
+  assert.ok(!dynamicScript.includes('nslookup'), 'Dynamic script must skip nslookup loop');
+  assert.ok(dynamicScript.includes('===UPTIME==='), 'Dynamic script must include /proc/uptime');
+  assert.ok(dynamicScript.includes('===CPUSTAT2==='), 'Dynamic script must include single /proc/stat sample');
+  assert.ok(dynamicScript.includes('===STATIONS==='), 'Dynamic script for AP must include station dump');
+
+  const dynamicWiredSwitchScript = buildTelemetrySshScript({ full: false, hasPrevCpuSample: true, hasWirelessRadios: false });
+  assert.ok(!dynamicWiredSwitchScript.includes('===IWDEV==='), 'Dynamic script for wired switch with 0 radios must skip iw commands');
+
+  // 2. Verify parseSshTelemetryOutput caches static sections on full poll and merges them on subsequent dynamic polls
+  const hostCfg = { id: 'cache-test-gw', name: 'Cache Gateway', role: 'gateway' };
+  const fullStdout = [
+    '===BOARD===',
+    JSON.stringify({
+      hostname: 'OpenWrt-Gateway-Pro',
+      model: 'GL.iNet GL-MT6000',
+      release: { description: 'OpenWrt 23.05.3 r23809' },
+    }),
+    '===RELEASE===',
+    'DISTRIB_DESCRIPTION="OpenWrt 23.05.3 r23809"',
+    '===UPTIME===',
+    '1000.00 900.00',
+    '===MEMINFO===',
+    'MemTotal:       1000000 kB\nMemAvailable:    700000 kB',
+    '===CPUSTAT1===',
+    'cpu  1000 0 500 8500 0 0 0 0 0 0',
+    '===CPUSTAT2===',
+    'cpu  1100 0 550 9350 0 0 0 0 0 0',
+    '===MAC===',
+    '94:83:c4:aa:bb:01',
+    '===NETDEV===',
+    '  eth1: 1000000 100 0 0 0 0 0 0 500000 50 0 0 0 0 0 0',
+    '===WAN===',
+    JSON.stringify({
+      l3_device: 'eth1',
+      'ipv4-address': [{ address: '203.0.113.10', mask: 24 }],
+      route: [{ nexthop: '203.0.113.1' }],
+      'dns-server': ['1.1.1.1'],
+    }),
+    '===WIRELESS===',
+    JSON.stringify({
+      radio0: {
+        config: { band: '5g', channel: '36', htmode: 'HE80', txpower: 23 },
+        interfaces: [{ ifname: 'phy0-ap0', config: { ssid: 'HomeMesh-5G' } }],
+      },
+    }),
+    '===IWDEV===',
+    'phy#0\n\tInterface phy0-ap0\n\t\taddr 94:83:c4:aa:bb:02\n\t\tssid HomeMesh-5G\n\t\tchannel 36 (5180 MHz), width: 80 MHz, center1: 5210 MHz\n\t\ttxpower 23.00 dBm',
+    '===SCANDUMP===',
+    '---IFACE:phy0-ap0---\nBSS 11:22:33:44:55:66(on phy0-ap0)\n\tfreq: 5180\n\tsignal: -62.00 dBm\n\tSSID: NeighborNet',
+    '===UCI_DHCP===',
+    "dhcp.@host[0].mac='aa:bb:cc:dd:ee:10'\ndhcp.@host[0].ip='192.168.1.50'\ndhcp.@host[0].name='Static-NAS'",
+    '===NETDEV_STATUS===',
+    JSON.stringify({
+      lan1: {
+        up: true,
+        carrier: true,
+        speed: '1000F',
+        'link-supported': ['100baseT-F', '1000baseT-F', '2500baseT-F'],
+      },
+    }),
+    '===SWITCH_FDB===',
+    'HOSTIF|br-lan|94:83:c4:aa:bb:01|192.168.1.1',
+    'DEFROUTE|203.0.113.1|eth1|203.0.113.10',
+    "UCINET|network.@device[0].ports='lan1' 'lan2'",
+    'BRPORT|br-lan|lan1|0x1|1000|full|up|1|94:83:c4:aa:bb:01|3',
+    'FDB|aa:bb:cc:dd:ee:10|lan1|br-lan|1',
+    '===OPKG_UPGRADABLE===',
+    'curl - 8.4.0-1 - 8.5.0-1\ndnsmasq - 2.89-1 - 2.90-1',
+    '===ASU_STATUS===',
+    'INSTALLED=1\nCLI=owut',
+  ].join('\n');
+
+  const firstRes = parseSshTelemetryOutput(hostCfg, fullStdout, null, { isFullPoll: true });
+  assert.equal(firstRes.pollMode, 'full');
+  assert.ok(firstRes.sample.staticCache, 'Full poll must populate sample.staticCache');
+  assert.equal(firstRes.hostname, 'OpenWrt-Gateway-Pro');
+  assert.equal(firstRes.model, 'GL.iNet GL-MT6000');
+  assert.equal(firstRes.firmware, 'OpenWrt 23.05.3 r23809');
+  assert.equal(firstRes.updates.packagesCount, 2);
+  assert.equal(firstRes.neighbors.length, 1);
+  assert.equal(firstRes.switchPorts.find((p) => p.iface === 'lan1')?.maxSpeedMbps, 2500);
+  assert.equal(firstRes.switchPorts.length, 2, 'Both lan1 (active) and lan2 (from UCINET) should be present');
+
+  // Now simulate a lightweight dynamic poll 10 seconds later (ONLY dynamic sections, no BOARD, RELEASE, WIRELESS, UCI_DHCP, NETDEV_STATUS, UCINET, SCANDUMP, OPKG_UPGRADABLE, CPUSTAT1)
+  firstRes.sample.timestamp = Date.now() - 10000;
+  const dynamicStdout = [
+    '===UPTIME===',
+    '1010.00 908.00',
+    '===MEMINFO===',
+    'MemTotal:       1000000 kB\nMemAvailable:    600000 kB',
+    '===CPUSTAT2===',
+    // Delta from firstRes CPUSTAT2 (total=11000, idle=9350) -> new (total=12000, idle=9850) => dTotal=1000, dIdle=500 => 50% CPU
+    'cpu  1400 0 750 9850 0 0 0 0 0 0',
+    '===NETDEV===',
+    '  eth1: 2250000 200 0 0 0 0 0 0 1000000 100 0 0 0 0 0 0',
+    '===IWDEV===',
+    'phy#0\n\tInterface phy0-ap0\n\t\taddr 94:83:c4:aa:bb:02\n\t\tssid HomeMesh-5G\n\t\tchannel 36 (5180 MHz), width: 80 MHz, center1: 5210 MHz\n\t\ttxpower 23.00 dBm',
+    '===STATIONS===',
+    '---IFACE:phy0-ap0---\nStation dc:a6:32:11:22:33 (on phy0-ap0)\n\trx bytes:\t50000\n\ttx bytes:\t80000\n\tsignal:  \t-54 dBm\n\ttx bitrate:\t866.7 MBit/s\n\trx bitrate:\t780.0 MBit/s',
+    '===DHCP===',
+    `${Math.floor(Date.now() / 1000) + 7200} dc:a6:32:11:22:33 192.168.1.120 LivingRoom-Pi *`,
+    '===ARP===',
+    'IP address       HW type     Flags       HW address            Mask     Device\n192.168.1.50     0x1         0x2         aa:bb:cc:dd:ee:10     *        br-lan\n192.168.1.120    0x1         0x2         dc:a6:32:11:22:33     *        br-lan',
+    '===SWITCH_FDB===',
+    'BRPORT|br-lan|lan1|0x1|1000|full|up|1|94:83:c4:aa:bb:01|3',
+    'FDB|aa:bb:cc:dd:ee:10|lan1|br-lan|1',
+  ].join('\n');
+
+  const dynRes = parseSshTelemetryOutput(hostCfg, dynamicStdout, firstRes.sample, { isFullPoll: false });
+  assert.equal(dynRes.pollMode, 'dynamic');
+  // Verify dynamic metrics updated:
+  assert.equal(dynRes.uptimeSec, 1010);
+  assert.equal(dynRes.memUsagePct, 40);
+  assert.equal(dynRes.cpuUsagePct, 50, 'CPU usage should be computed from delta against prevSample.cpuStat without sleep 1');
+  assert.ok(dynRes.rxRateBps > 0, 'WAN throughput rxRateBps should be computed using cached wan l3_device (eth1)');
+  // Verify static metadata was preserved from cache:
+  assert.equal(dynRes.hostname, 'OpenWrt-Gateway-Pro');
+  assert.equal(dynRes.model, 'GL.iNet GL-MT6000');
+  assert.equal(dynRes.firmware, 'OpenWrt 23.05.3 r23809');
+  assert.equal(dynRes.mac, '94:83:c4:aa:bb:01');
+  assert.equal(dynRes.wan?.ip, '203.0.113.10');
+  assert.equal(dynRes.defaultRoute?.gatewayIp, '203.0.113.1');
+  assert.equal(dynRes.updates.packagesCount, 2, 'Cached package update count must be preserved');
+  assert.equal(dynRes.neighbors.length, 1, 'Cached neighbor scan dump must be preserved');
+  assert.equal(dynRes.switchPorts.length, 2, 'Cached UCINET unbridged ports must be preserved');
+  assert.equal(dynRes.switchPorts.find((p) => p.iface === 'lan1')?.maxSpeedMbps, 2500, 'Cached port hardware capability must be preserved');
+  // Verify both the static UCI DHCP reservation client (Static-NAS) and dynamic WiFi client (LivingRoom-Pi) are resolved:
+  assert.ok(dynRes.clients.some((c) => c.hostname === 'Static-NAS' && c.ip === '192.168.1.50'));
+  assert.ok(dynRes.clients.some((c) => c.hostname === 'LivingRoom-Pi' && c.ip === '192.168.1.120'));
+
+  // 3. Verify POST /api/hosts/refresh forces a full update and returns the refreshed fleet bundle
+  await hostManager.createHost({
+    id: 'cache-test-gw',
+    name: 'Cache Gateway',
+    ip: '192.168.99.1',
+    role: 'gateway',
+  });
+  const allDb = await db.getHosts();
+  hostManager.applyTelemetryToHost(
+    allDb.find((h) => h.id === 'cache-test-gw'),
+    dynRes
+  );
+  assert.ok(hostManager.prevSamples.get('cache-test-gw')?.staticCache, 'staticCache should be present before invalidation');
+  hostManager.invalidateStaticCache('cache-test-gw');
+  assert.equal(hostManager.prevSamples.get('cache-test-gw')?.staticCache, undefined, 'invalidateStaticCache should clear staticCache');
+  assert.ok(hostManager.prevSamples.get('cache-test-gw')?.cpuStat, 'invalidateStaticCache should preserve cpuStat delta counter');
+
+  const refreshRes = await fetch(`${baseUrl}/api/hosts/refresh`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ hostId: 'all', full: true }),
+  });
+  assert.equal(refreshRes.status, 200);
+  const refreshBody = await refreshRes.json();
+  assert.equal(refreshBody.refreshed, true);
+  assert.equal(refreshBody.mode, 'full');
+  assert.ok(Array.isArray(refreshBody.hosts));
+  assert.ok(refreshBody.topology);
+  assert.ok(Array.isArray(refreshBody.clients));
+
+  await hostManager.deleteHost('cache-test-gw', true);
+});
+
+test('Single-Core Device Adaptive Polling: detects single-core managed switches, minimizes sysfs subshells, and throttles background polling rate', async () => {
+  // 1. Verify buildTelemetrySshScript uses shell built-in `read -r` instead of `$(cat ...)` subshells in BRPORT/NICPORT loops
+  const dynamicSwitchScript = buildTelemetrySshScript({
+    full: false,
+    hasPrevCpuSample: true,
+    hasWirelessRadios: false,
+  });
+  assert.ok(
+    dynamicSwitchScript.includes("grep '^cpu' /proc/stat"),
+    'Dynamic script must query ^cpu lines from /proc/stat to detect CPU core count'
+  );
+  assert.ok(
+    dynamicSwitchScript.includes('read -r spd < "$d/speed"'),
+    'Dynamic script must use shell built-in read -r for sysfs port attributes to avoid subshell fork spikes'
+  );
+  assert.ok(
+    !dynamicSwitchScript.includes('$(cat "$d/speed"'),
+    'Dynamic script must not spawn $(cat "$d/speed") subshells per port'
+  );
+
+  // 2. Verify parseSshTelemetryOutput detects 1 CPU core vs 4 CPU cores from /proc/stat and caches cpuCores
+  const singleCoreSwitchOut = [
+    '===BOARD===',
+    JSON.stringify({ hostname: 'ZyXEL-Switch', model: 'ZyXEL GS1900-24' }),
+    '===UPTIME===',
+    '5000.00 4800.00',
+    '===CPUSTAT1===',
+    'cpu  500 0 200 4300 0 0 0 0 0 0',
+    '===CPUSTAT2===',
+    'cpu  520 0 210 4370 0 0 0 0 0 0\ncpu0 520 0 210 4370 0 0 0 0 0 0',
+  ].join('\n');
+
+  const quadCoreRouterOut = [
+    '===BOARD===',
+    JSON.stringify({ hostname: 'Main-Router', model: 'GL.iNet GL-MT6000' }),
+    '===UPTIME===',
+    '5000.00 18000.00',
+    '===CPUSTAT1===',
+    'cpu  1000 0 400 18600 0 0 0 0 0 0',
+    '===CPUSTAT2===',
+    [
+      'cpu  1040 0 420 18940 0 0 0 0 0 0',
+      'cpu0 260 0 105 4735 0 0 0 0 0 0',
+      'cpu1 260 0 105 4735 0 0 0 0 0 0',
+      'cpu2 260 0 105 4735 0 0 0 0 0 0',
+      'cpu3 260 0 105 4735 0 0 0 0 0 0',
+    ].join('\n'),
+  ].join('\n');
+
+  const parsedSingle = parseSshTelemetryOutput({ id: 'sw-1core' }, singleCoreSwitchOut);
+  assert.equal(parsedSingle.cpuCores, 1, 'Switch with only cpu0 in /proc/stat must be detected as 1 CPU core');
+  assert.equal(parsedSingle.sample.staticCache.cpuCores, 1);
+
+  const parsedQuad = parseSshTelemetryOutput({ id: 'gw-4core' }, quadCoreRouterOut);
+  assert.equal(parsedQuad.cpuCores, 4, 'Router with cpu0..cpu3 in /proc/stat must be detected as 4 CPU cores');
+  assert.equal(parsedQuad.sample.staticCache.cpuCores, 4);
+
+  // 3. Verify HostManager throttles background polling for single-core devices while polling multi-core devices at normal rate
+  await hostManager.createHost({
+    id: 'sw-1core',
+    name: 'Single-Core Switch',
+    ip: '192.168.88.2',
+    role: 'switch',
+  });
+  await hostManager.createHost({
+    id: 'gw-4core',
+    name: 'Quad-Core Gateway',
+    ip: '192.168.88.1',
+    role: 'gateway',
+  });
+
+  const baseTimeMs = Date.now();
+  parsedSingle.sample.timestamp = baseTimeMs;
+  parsedQuad.sample.timestamp = baseTimeMs;
+
+  const dbHosts = await db.getHosts();
+  const swHost = dbHosts.find((h) => h.id === 'sw-1core');
+  const gwHost = dbHosts.find((h) => h.id === 'gw-4core');
+  hostManager.applyTelemetryToHost(swHost, parsedSingle);
+  hostManager.applyTelemetryToHost(gwHost, parsedQuad);
+  await db.saveHosts(dbHosts);
+
+  assert.equal(swHost.cpuCores, 1);
+  assert.equal(swHost.pollIntervalMs, 60000, 'Single-core host should report 60s effective poll interval');
+  assert.equal(gwHost.cpuCores, 4);
+  assert.equal(
+    gwHost.pollIntervalMs,
+    hostManager.pollIntervalMs,
+    'Multi-core host should report standard pollIntervalMs'
+  );
+
+  // 10 seconds later (standard poll tick):
+  // - Quad-core gateway SHOULD be polled
+  // - Single-core switch MUST be skipped (throttled until 60s have elapsed)
+  assert.equal(
+    hostManager.shouldPollHost(gwHost, { forceFull: false, nowMs: baseTimeMs + 10000 }),
+    true,
+    'Multi-core host must be polled on 10s tick'
+  );
+  assert.equal(
+    hostManager.shouldPollHost(swHost, { forceFull: false, nowMs: baseTimeMs + 10000 }),
+    false,
+    'Single-core switch must be skipped on 10s tick (within 60s window)'
+  );
+  assert.equal(
+    hostManager.shouldPollHost(swHost, { forceFull: false, nowMs: baseTimeMs + 50000 }),
+    false,
+    'Single-core switch must still be skipped at 50s'
+  );
+  assert.equal(
+    hostManager.shouldPollHost(swHost, { forceFull: false, nowMs: baseTimeMs + 60000 }),
+    true,
+    'Single-core switch must be polled once 60s singleCorePollIntervalMs has elapsed'
+  );
+  // Forced full refresh (Refresh button) must ALWAYS poll the single-core switch immediately
+  assert.equal(
+    hostManager.shouldPollHost(swHost, { forceFull: true, nowMs: baseTimeMs + 5000 }),
+    true,
+    'Forced full refresh must bypass single-core throttle and poll immediately'
+  );
+
+  // 4. Verify PUT /api/settings can customize singleCorePollIntervalMs
+  const putSettingsRes = await fetch(`${baseUrl}/api/settings`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ pollIntervalMs: 10000, singleCorePollIntervalMs: 120000 }),
+  });
+  assert.equal(putSettingsRes.status, 200);
+  const updatedSettings = await putSettingsRes.json();
+  assert.equal(updatedSettings.singleCorePollIntervalMs, 120000);
+  assert.equal(hostManager.getSingleCorePollIntervalMs(), 120000);
+  assert.equal(
+    hostManager.shouldPollHost(swHost, { forceFull: false, nowMs: baseTimeMs + 90000 }),
+    false,
+    'With 120s single-core interval, single-core switch should be skipped at 90s'
+  );
+  assert.equal(
+    hostManager.shouldPollHost(swHost, { forceFull: false, nowMs: baseTimeMs + 120000 }),
+    true,
+    'With 120s single-core interval, single-core switch should be polled at 120s'
+  );
+
+  // Reset singleCorePollIntervalMs back to default 60000
+  await fetch(`${baseUrl}/api/settings`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ pollIntervalMs: 10000, singleCorePollIntervalMs: 60000 }),
+  });
+  await hostManager.deleteHost('sw-1core', true);
+  await hostManager.deleteHost('gw-4core', true);
 });

@@ -124,8 +124,8 @@ export async function handleApiRequest(req, res, pathname, searchParams) {
 
       // GET /api/agent/status | /api/v1/status | /api/v1/fleet/status
       if ((subPath === '/status' || subPath === '/fleet/status') && req.method === 'GET') {
-        if (searchParams.get('refresh') === 'true') {
-          await hostManager.pollAllHosts();
+        if (searchParams.get('refresh') === 'true' || searchParams.get('full') === 'true') {
+          await hostManager.pollAllHosts({ forceFull: true });
         }
         const statusPayload = await buildFleetAgentStatus();
         sendJson(res, 200, statusPayload);
@@ -134,8 +134,8 @@ export async function handleApiRequest(req, res, pathname, searchParams) {
 
       // GET /api/agent/hosts | /api/v1/hosts
       if (subPath === '/hosts' && req.method === 'GET') {
-        if (searchParams.get('refresh') === 'true') {
-          await hostManager.pollAllHosts();
+        if (searchParams.get('refresh') === 'true' || searchParams.get('full') === 'true') {
+          await hostManager.pollAllHosts({ forceFull: true });
         }
         const [hosts, clients, backups] = await Promise.all([
           hostManager.getAllHosts(),
@@ -182,11 +182,13 @@ export async function handleApiRequest(req, res, pathname, searchParams) {
       // POST /api/agent/hosts/:idOrName/poll | /api/v1/hosts/:idOrName/poll
       const agentHostPollMatch = subPath.match(/^\/hosts\/([^/]+)\/poll$/);
       if (agentHostPollMatch && req.method === 'POST') {
+        const body = await parseJsonBody(req).catch(() => ({}));
+        const forceFull = body?.full !== false && searchParams.get('full') !== 'false';
         const idOrName = decodeURIComponent(agentHostPollMatch[1]);
         if (idOrName.toLowerCase() === 'all') {
-          await hostManager.pollAllHosts();
+          await hostManager.pollAllHosts({ forceFull });
           const statusPayload = await buildFleetAgentStatus();
-          sendJson(res, 200, { polled: 'all', ...statusPayload });
+          sendJson(res, 200, { polled: 'all', mode: forceFull ? 'full' : 'dynamic', ...statusPayload });
           return true;
         }
         const resolved = await resolveHostByIdentifier(idOrName);
@@ -194,12 +196,13 @@ export async function handleApiRequest(req, res, pathname, searchParams) {
           sendError(res, 404, `OpenWrt host "${idOrName}" not found`, 'HOST_NOT_FOUND');
           return true;
         }
-        const freshHost = (await hostManager.pollSingleHost(resolved.id)) || resolved;
+        const freshHost = (await hostManager.pollSingleHost(resolved.id, { forceFull })) || resolved;
         const [clients, backups] = await Promise.all([clientEngine.getClients(), backupEngine.listBackups()]);
         const payload = buildAgentHostPayload(freshHost, clients, backups);
         sendJson(res, 200, {
           timestamp: new Date().toISOString(),
           polled: true,
+          mode: forceFull ? 'full' : 'dynamic',
           host: payload,
           clients: clients.filter((c) => c.connectedTo?.hostId === freshHost.id),
         });
@@ -215,8 +218,8 @@ export async function handleApiRequest(req, res, pathname, searchParams) {
           sendError(res, 404, `OpenWrt host "${idOrName}" not found`, 'HOST_NOT_FOUND');
           return true;
         }
-        if (searchParams.get('refresh') === 'true') {
-          resolved = (await hostManager.pollSingleHost(resolved.id)) || resolved;
+        if (searchParams.get('refresh') === 'true' || searchParams.get('full') === 'true') {
+          resolved = (await hostManager.pollSingleHost(resolved.id, { forceFull: true })) || resolved;
         }
         const [clients, backups] = await Promise.all([clientEngine.getClients(), backupEngine.listBackups()]);
         const hostPayload = buildAgentHostPayload(resolved, clients, backups);
@@ -365,6 +368,13 @@ export async function handleApiRequest(req, res, pathname, searchParams) {
         if (!settings.agentApi) {
           settings.agentApi = { enabled: true, requireApiKey: false, apiKey: '' };
         }
+        if (!settings.pollIntervalMs) {
+          settings.pollIntervalMs = hostManager.pollIntervalMs || config.pollIntervalMs || 10000;
+        }
+        if (!settings.singleCorePollIntervalMs) {
+          settings.singleCorePollIntervalMs =
+            hostManager.singleCorePollIntervalMs || config.singleCorePollIntervalMs || 60000;
+        }
         sendJson(res, 200, settings);
         return true;
       }
@@ -396,6 +406,15 @@ export async function handleApiRequest(req, res, pathname, searchParams) {
           alerts: { ...current.alerts, ...(body.alerts || {}) },
           agentApi: mergedAgentApi,
         };
+        if (typeof updated.pollIntervalMs === 'number' && updated.pollIntervalMs >= 1000) {
+          hostManager.pollIntervalMs = updated.pollIntervalMs;
+        }
+        if (typeof updated.singleCorePollIntervalMs === 'number' && updated.singleCorePollIntervalMs >= 1000) {
+          hostManager.singleCorePollIntervalMs = updated.singleCorePollIntervalMs;
+        }
+        if (hostManager.pollTimer) {
+          hostManager.startPolling(hostManager.pollIntervalMs, hostManager.singleCorePollIntervalMs);
+        }
         await db.saveSettings(updated);
 
         // Keep primary backup schedule retention in sync with settings
@@ -420,6 +439,53 @@ export async function handleApiRequest(req, res, pathname, searchParams) {
     // -------------------------------------------------------------
     // Hosts CRUD & Testing APIs
     // -------------------------------------------------------------
+    if (pathname === '/api/hosts/refresh' && req.method === 'POST') {
+      const body = await parseJsonBody(req).catch(() => ({}));
+      const targetHostId = body?.hostId || 'all';
+      const forceFull = body?.full !== false;
+      if (targetHostId !== 'all' && (typeof targetHostId !== 'string' || !/^[a-zA-Z0-9_-]+$/.test(targetHostId))) {
+        sendError(res, 400, 'Invalid hostId format', 'INVALID_HOST_ID');
+        return true;
+      }
+      if (targetHostId !== 'all') {
+        const refreshedHost = await hostManager.pollSingleHost(targetHostId, { forceFull });
+        if (!refreshedHost) {
+          sendError(res, 404, `Host ${targetHostId} not found`, 'HOST_NOT_FOUND');
+          return true;
+        }
+        sendJson(res, 200, {
+          refreshed: true,
+          mode: forceFull ? 'full' : 'dynamic',
+          timestamp: new Date().toISOString(),
+          hostId: targetHostId,
+          host: refreshedHost,
+        });
+        return true;
+      }
+
+      await hostManager.pollAllHosts({ forceFull });
+      const [hosts, topology, clients] = await Promise.all([
+        hostManager.getAllHosts(),
+        topologyEngine.getTopology(),
+        clientEngine.getClients(),
+      ]);
+      const bands = hostManager.getLiveWifiBands();
+      const wifiInterference = analyzeInterference(bands);
+
+      sendJson(res, 200, {
+        refreshed: true,
+        mode: forceFull ? 'full' : 'dynamic',
+        timestamp: new Date().toISOString(),
+        lastFullRefreshAt: hostManager.lastFullRefreshAt,
+        hosts,
+        topology,
+        clients,
+        wifiChannels: { bands },
+        wifiInterference,
+      });
+      return true;
+    }
+
     if (pathname === '/api/hosts/test' && req.method === 'POST') {
       const body = await parseJsonBody(req);
       const testResult = await hostManager.testHost(body);
@@ -428,6 +494,9 @@ export async function handleApiRequest(req, res, pathname, searchParams) {
     }
 
     if (pathname === '/api/hosts' && req.method === 'GET') {
+      if (searchParams.get('refresh') === 'true' || searchParams.get('full') === 'true') {
+        await hostManager.pollAllHosts({ forceFull: true });
+      }
       const hosts = await hostManager.getAllHosts();
       sendJson(res, 200, hosts);
       return true;
@@ -565,6 +634,26 @@ export async function handleApiRequest(req, res, pathname, searchParams) {
       const action = ['check', 'install', 'upgrade'].includes(body?.action) ? body.action : 'check';
       const asuRes = await hostManager.attendedSysupgradeForHost(hostId, { action });
       sendJson(res, 200, asuRes);
+      return true;
+    }
+
+    const hostRefreshMatch = pathname.match(/^\/api\/hosts\/([^/]+)\/refresh$/);
+    if (hostRefreshMatch && req.method === 'POST') {
+      const hostId = hostRefreshMatch[1];
+      const body = await parseJsonBody(req).catch(() => ({}));
+      const forceFull = body?.full !== false;
+      const refreshedHost = await hostManager.pollSingleHost(hostId, { forceFull });
+      if (!refreshedHost) {
+        sendError(res, 404, `Host ${hostId} not found`, 'HOST_NOT_FOUND');
+        return true;
+      }
+      sendJson(res, 200, {
+        refreshed: true,
+        mode: forceFull ? 'full' : 'dynamic',
+        timestamp: new Date().toISOString(),
+        hostId,
+        host: refreshedHost,
+      });
       return true;
     }
 

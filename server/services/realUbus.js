@@ -663,9 +663,13 @@ export function evaluateAttendedSysupgrade({
   };
 }
 
-function parseCpuLine(line) {
-  if (!line || !line.startsWith('cpu ')) return null;
-  const parts = line
+function parseCpuLine(text) {
+  if (!text) return null;
+  const cpuLine = String(text)
+    .split('\n')
+    .find((l) => l.startsWith('cpu '));
+  if (!cpuLine) return null;
+  const parts = cpuLine
     .trim()
     .split(/\s+/)
     .slice(1)
@@ -675,6 +679,28 @@ function parseCpuLine(line) {
   const idle = (parts[3] || 0) + (parts[4] || 0);
   const total = parts.reduce((acc, v) => acc + v, 0);
   return { idle, total };
+}
+
+function parseCpuCoreCount(...texts) {
+  for (const text of texts) {
+    if (!text) continue;
+    let cores = 0;
+    let explicitCores = null;
+    for (const rawLine of String(text).split('\n')) {
+      const line = rawLine.trim();
+      if (/^cpu\d+\b/.test(line)) {
+        cores++;
+      } else if (line.startsWith('CORES|')) {
+        const parsed = parseInt(line.slice(6), 10);
+        if (Number.isFinite(parsed) && parsed > 0) {
+          explicitCores = parsed;
+        }
+      }
+    }
+    if (explicitCores !== null) return explicitCores;
+    if (cores > 0) return cores;
+  }
+  return null;
 }
 
 function parseMeminfo(text, sysinfo = null) {
@@ -908,11 +934,76 @@ export async function scanHostWirelessNetworks(hostConfig) {
   return parseIwScanOutput(scanTxt, hostConfig);
 }
 
+export const DEFAULT_STATIC_CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
+
 /**
- * Collects full telemetry from a real OpenWrt host via SSH (or HTTP ubus fallback).
+ * Builds the OpenWrt SSH telemetry shell script.
+ * - When `full === true`: collects all static hardware/config/update metadata plus dynamic telemetry.
+ * - When `full === false`: collects only lightweight, fast-changing dynamic telemetry from /proc, /sys, /tmp, and live wireless/FDB state, avoiding heavy ubus/uci/opkg/ethtool/nslookup/scan calls.
+ * - When `hasPrevCpuSample === true`: skips `CPUSTAT1` and `sleep 1`, computing CPU delta against the previous poll's `/proc/stat` counter.
  */
-export async function pollRealHost(hostConfig, prevSample = null) {
-  const remoteScript = [
+export function buildTelemetrySshScript({
+  full = true,
+  hasPrevCpuSample = false,
+  hasWirelessRadios = true,
+} = {}) {
+  const cpuCommands = hasPrevCpuSample
+    ? [
+        'echo "===CPUSTAT2==="',
+        "grep '^cpu' /proc/stat 2>/dev/null",
+      ]
+    : [
+        'echo "===CPUSTAT1==="',
+        "grep '^cpu ' /proc/stat 2>/dev/null",
+        'sleep 1',
+        'echo "===CPUSTAT2==="',
+        "grep '^cpu' /proc/stat 2>/dev/null",
+      ];
+
+  if (!full) {
+    const dynamicCmds = [
+      'export PATH="/usr/sbin:/usr/bin:/sbin:/bin:$PATH"',
+      'echo "===UPTIME==="',
+      'cat /proc/uptime 2>/dev/null',
+      'echo "===MEMINFO==="',
+      'cat /proc/meminfo 2>/dev/null',
+      ...cpuCommands,
+      'echo "===NETDEV==="',
+      'cat /proc/net/dev 2>/dev/null',
+    ];
+
+    if (hasWirelessRadios !== false) {
+      dynamicCmds.push(
+        'echo "===IWDEV==="',
+        'iw_out=$(iw dev 2>/dev/null); echo "$iw_out"',
+        'IW_IFS=$(echo "$iw_out" | awk \'$1=="Interface"{print $2}\')',
+        'echo "===SURVEY==="',
+        'for iface in $IW_IFS; do echo "---IFACE:$iface---"; iw dev "$iface" survey dump 2>/dev/null | awk \'/Survey data from/{if(inuse)exit; next} /\\[in use\\]/{inuse=1; print; next} inuse{print}\'; done',
+        'echo "===STATIONS==="',
+        'for iface in $IW_IFS; do echo "---IFACE:$iface---"; iw dev "$iface" station dump 2>/dev/null; done'
+      );
+    }
+
+    dynamicCmds.push(
+      'echo "===DHCP==="',
+      'cat /tmp/dhcp.leases 2>/dev/null',
+      'echo "===ARP==="',
+      'cat /proc/net/arp 2>/dev/null; echo "---IPNEIGH---"; ip -4 neigh show 2>/dev/null',
+      'echo "===SWITCH_FDB==="',
+      'ip link show 2>/dev/null | awk -F": " \'/^[0-9]+:/ && (/LOWER_UP/ || /state UP/) && !/NO-CARRIER/{sub(/@.*/,"",$2); print "LINKUP|" $2}\'',
+      'for p in /sys/class/net/*/brif/*; do [ -e "$p" ] || continue; br=${p%/brif/*}; br=${br##*/}; ifn=${p##*/}; d="/sys/class/net/$ifn"; pno=""; spd=""; dup=""; oper=""; car=""; addr=""; bst=""; read -r pno < "$p/port_no" 2>/dev/null; read -r spd < "$d/speed" 2>/dev/null; read -r dup < "$d/duplex" 2>/dev/null; read -r oper < "$d/operstate" 2>/dev/null; read -r car < "$d/carrier" 2>/dev/null; read -r addr < "$d/address" 2>/dev/null; read -r bst < "$p/state" 2>/dev/null; echo "BRPORT|$br|$ifn|$pno|$spd|$dup|$oper|$car|$addr|$bst"; done',
+      'for d in /sys/class/net/*; do [ -e "$d" ] || continue; ifn=${d##*/}; [ "$ifn" = "lo" ] && continue; [ -e "$d/brport/bridge" ] && continue; [ -d "$d/bridge" ] || [ -d "$d/brif" ] || [ -d "$d/wireless" ] || [ -d "$d/phy80211" ] && continue; case "$ifn" in br-*|br[0-9]*|switch|switch.*|*.*|wlan*|phy*|ra*|rax*|ath*|wds*|mesh*|mon*|wg*|tun*|tap*|docker*|veth*|sit*|gre*|ip*|ifb*|teql*|erspan*|pppoe*|ppp*|bat*|tailscale*|zt*|miireg*|dummy*|bond*) continue ;; esac; m=""; spd=""; dup=""; oper=""; car=""; read -r m < "$d/address" 2>/dev/null; read -r spd < "$d/speed" 2>/dev/null; read -r dup < "$d/duplex" 2>/dev/null; read -r oper < "$d/operstate" 2>/dev/null; read -r car < "$d/carrier" 2>/dev/null; echo "NICPORT|$ifn|$m|$spd|$dup|$oper|$car|||"; done',
+      'command -v bridge >/dev/null 2>&1 && bridge fdb show 2>/dev/null | awk \'!(/permanent/ && /master/ && !/self/){m=tolower($1);d="";b="";v="";for(i=2;i<=NF;i++){if($i=="dev")d=$(i+1);if($i=="master")b=$(i+1);if($i=="vlan")v=$(i+1)}if(m~/^([0-9a-f]{2}:){5}[0-9a-f]{2}$/&&d!="")print "FDB|"m"|"d"|"b"|"v}\'',
+      'for b in /sys/class/net/*/brif; do [ -d "$b" ] || continue; br=${b%/brif}; br=${br##*/}; brctl showmacs "$br" 2>/dev/null | awk -v br="$br" \'NR>1&&$3=="no"{print "BRMAC|"br"|"$1"|"tolower($2)}\'; done',
+      'command -v hexdump >/dev/null 2>&1 && for b in /sys/class/net/*/brforward; do [ -e "$b" ] || continue; br=${b%/brforward}; br=${br##*/}; hexdump -v -e \'6/1 "%02x:" " " 1/1 "%u " 1/1 "%u " 4/1 "%02x" " " 1/1 "%u" 3/1 " %02x" "\\n"\' "$b" 2>/dev/null | awk -v br="$br" \'$3==0&&$2>0{sub(/:$/,"",$1);p=$2+($5*256);print "BRMAC|"br"|"p"|"tolower($1)}\'; done',
+      'command -v swconfig >/dev/null 2>&1 && for sw in $(swconfig list 2>/dev/null | awk \'{print $2}\' | tr -d ":"); do swconfig dev "$sw" show 2>/dev/null | awk -v sw="$sw" \'/^[ \t]*Port [0-9]+:/{sub(/:/,"",$2);cp=$2} /link:/{p=cp;st="down";spd="";dup="";for(i=1;i<=NF;i++){if($i~/^port:/){v=substr($i,6);p=(v!=""?v:$(i+1))}if($i~/^link:/){v=substr($i,6);st=(v!=""?v:$(i+1))}if($i~/^speed:/){v=substr($i,7);spd=(v!=""?v:$(i+1))}if($i~/duplex/)dup=$i}if(p!="")print "SWPORT|"sw"|"p"|"st"|"spd"|"dup}\'; done',
+      'true'
+    );
+
+    return dynamicCmds.join('; ');
+  }
+
+  return [
     'export PATH="/usr/sbin:/usr/bin:/sbin:/bin:$PATH"',
     'echo "===BOARD==="',
     'ubus call system board 2>/dev/null',
@@ -928,11 +1019,7 @@ export async function pollRealHost(hostConfig, prevSample = null) {
     'cat /proc/meminfo 2>/dev/null',
     'echo "===ASU_STATUS==="',
     ASU_STATUS_SCRIPT,
-    'echo "===CPUSTAT1==="',
-    "grep '^cpu ' /proc/stat 2>/dev/null",
-    'sleep 1',
-    'echo "===CPUSTAT2==="',
-    "grep '^cpu ' /proc/stat 2>/dev/null",
+    ...cpuCommands,
     'echo "===MAC==="',
     'cat /sys/class/net/br-lan/address /sys/class/net/eth0/address 2>/dev/null | head -n 1',
     'echo "===NETDEV==="',
@@ -942,8 +1029,8 @@ export async function pollRealHost(hostConfig, prevSample = null) {
     'echo "===WIRELESS==="',
     'ubus call network.wireless status 2>/dev/null',
     'echo "===IWDEV==="',
-    'iw dev 2>/dev/null',
-    'IW_IFS=$(iw dev 2>/dev/null | awk \'$1=="Interface"{print $2}\')',
+    'iw_out=$(iw dev 2>/dev/null); echo "$iw_out"',
+    'IW_IFS=$(echo "$iw_out" | awk \'$1=="Interface"{print $2}\')',
     'echo "===SURVEY==="',
     'for iface in $IW_IFS; do echo "---IFACE:$iface---"; iw dev "$iface" survey dump 2>/dev/null | awk \'/Survey data from/{if(inuse)exit; next} /\\[in use\\]/{inuse=1; print; next} inuse{print}\'; done',
     'echo "===SCANDUMP==="',
@@ -967,8 +1054,8 @@ export async function pollRealHost(hostConfig, prevSample = null) {
     'echo "===SWITCH_FDB==="',
     'ip link show 2>/dev/null | awk -F": " \'/^[0-9]+:/ && (/LOWER_UP/ || /state UP/) && !/NO-CARRIER/{sub(/@.*/,"",$2); print "LINKUP|" $2}\'',
     'ip -4 addr show 2>/dev/null | awk \'/^[0-9]+:/{sub(/:/,"",$2);sub(/@.*/,"",$2);cur=$2} /inet /{split($2,a,"/");if(cur!=""&&a[1]!="")print "IFADDR|"cur"|"a[1]}\'',
-    'for p in /sys/class/net/*/brif/*; do [ -e "$p" ] || continue; br=${p%/brif/*}; br=${br##*/}; ifn=${p##*/}; d="/sys/class/net/$ifn"; echo "BRPORT|$br|$ifn|$(cat "$p/port_no" 2>/dev/null)|$(cat "$d/speed" 2>/dev/null)|$(cat "$d/duplex" 2>/dev/null)|$(cat "$d/operstate" 2>/dev/null)|$(cat "$d/carrier" 2>/dev/null)|$(cat "$d/address" 2>/dev/null)|$(cat "$p/state" 2>/dev/null)"; done',
-    'has_eth=$(command -v ethtool 2>/dev/null); for d in /sys/class/net/*; do [ -e "$d" ] || continue; ifn=${d##*/}; [ "$ifn" = "lo" ] && continue; m=$(cat "$d/address" 2>/dev/null); [ -n "$m" ] && echo "HOSTIF|$ifn|$m|"; [ -d "$d/bridge" ] || [ -d "$d/brif" ] || [ -d "$d/wireless" ] || [ -d "$d/phy80211" ] && continue; case "$ifn" in br-*|br[0-9]*|switch|switch.*|*.*|wlan*|phy*|ra*|rax*|ath*|wds*|mesh*|mon*|wg*|tun*|tap*|docker*|veth*|sit*|gre*|ip*|ifb*|teql*|erspan*|pppoe*|ppp*|bat*|tailscale*|zt*|miireg*|dummy*|bond*) continue ;; esac; br=""; [ -e "$d/brport/bridge" ] && br=$(readlink "$d/brport/bridge" 2>/dev/null) && br=${br##*/}; bst=$(cat "$d/brport/state" 2>/dev/null); bpno=$(cat "$d/brport/port_no" 2>/dev/null); spd=$(cat "$d/speed" 2>/dev/null); dup=$(cat "$d/duplex" 2>/dev/null); oper=$(cat "$d/operstate" 2>/dev/null); car=$(cat "$d/carrier" 2>/dev/null); echo "NICPORT|$ifn|$m|$spd|$dup|$oper|$car|$br|$bst|$bpno"; if [ -n "$has_eth" ] && { [ "$car" = "1" ] || [ "$oper" = "up" ] || [ "$bst" = "3" ] || [ "$bst" = "2" ]; }; then ethtool "$ifn" 2>/dev/null | awk -v i="$ifn" \'{for(k=1;k<=NF;k++)if($k~/^[0-9]+base/){s=$k+0;if(s>m)m=s}} /Speed:/{c=$2+0} /Link detected:/{l=($3=="yes"?1:0)} END{if(m||c||l==1)print "PORTCAP|"i"|"m"|"c"|"l}\'; fi; done',
+    'for p in /sys/class/net/*/brif/*; do [ -e "$p" ] || continue; br=${p%/brif/*}; br=${br##*/}; ifn=${p##*/}; d="/sys/class/net/$ifn"; pno=""; spd=""; dup=""; oper=""; car=""; addr=""; bst=""; read -r pno < "$p/port_no" 2>/dev/null; read -r spd < "$d/speed" 2>/dev/null; read -r dup < "$d/duplex" 2>/dev/null; read -r oper < "$d/operstate" 2>/dev/null; read -r car < "$d/carrier" 2>/dev/null; read -r addr < "$d/address" 2>/dev/null; read -r bst < "$p/state" 2>/dev/null; echo "BRPORT|$br|$ifn|$pno|$spd|$dup|$oper|$car|$addr|$bst"; done',
+    'has_eth=$(command -v ethtool 2>/dev/null); for d in /sys/class/net/*; do [ -e "$d" ] || continue; ifn=${d##*/}; [ "$ifn" = "lo" ] && continue; m=""; read -r m < "$d/address" 2>/dev/null; [ -n "$m" ] && echo "HOSTIF|$ifn|$m|"; [ -d "$d/bridge" ] || [ -d "$d/brif" ] || [ -d "$d/wireless" ] || [ -d "$d/phy80211" ] && continue; case "$ifn" in br-*|br[0-9]*|switch|switch.*|*.*|wlan*|phy*|ra*|rax*|ath*|wds*|mesh*|mon*|wg*|tun*|tap*|docker*|veth*|sit*|gre*|ip*|ifb*|teql*|erspan*|pppoe*|ppp*|bat*|tailscale*|zt*|miireg*|dummy*|bond*) continue ;; esac; br=""; [ -e "$d/brport/bridge" ] && br=$(readlink "$d/brport/bridge" 2>/dev/null) && br=${br##*/}; bst=""; bpno=""; spd=""; dup=""; oper=""; car=""; read -r bst < "$d/brport/state" 2>/dev/null; read -r bpno < "$d/brport/port_no" 2>/dev/null; read -r spd < "$d/speed" 2>/dev/null; read -r dup < "$d/duplex" 2>/dev/null; read -r oper < "$d/operstate" 2>/dev/null; read -r car < "$d/carrier" 2>/dev/null; echo "NICPORT|$ifn|$m|$spd|$dup|$oper|$car|$br|$bst|$bpno"; if [ -n "$has_eth" ] && { [ "$car" = "1" ] || [ "$oper" = "up" ] || [ "$bst" = "3" ] || [ "$bst" = "2" ]; }; then ethtool "$ifn" 2>/dev/null | awk -v i="$ifn" \'{for(k=1;k<=NF;k++)if($k~/^[0-9]+base/){s=$k+0;if(s>m)m=s}} /Speed:/{c=$2+0} /Link detected:/{l=($3=="yes"?1:0)} END{if(m||c||l==1)print "PORTCAP|"i"|"m"|"c"|"l}\'; fi; done',
     'uci show network 2>/dev/null | grep -E "\\.(ports|device|ifname)=" | sed "s/^/UCINET|/"',
     'command -v jsonfilter >/dev/null 2>&1 && [ -f /etc/board.json ] && jsonfilter -i /etc/board.json -e "@.network.*.ports[*]" -e "@.network.*.device" 2>/dev/null | sed "s/^/BOARDPORT|/"',
     'ip -4 route show default 2>/dev/null | awk \'/default/{for(i=1;i<=NF;i++){if($i=="via")g=$(i+1);if($i=="dev")d=$(i+1);if($i=="src")s=$(i+1)}print "DEFROUTE|"g"|"d"|"s;exit}\'',
@@ -984,14 +1071,39 @@ export async function pollRealHost(hostConfig, prevSample = null) {
     'if [ ! -f /tmp/.openwrt_mgr_asu_cache ]; then ( ( if command -v auc >/dev/null 2>&1; then auc -n 2>&1; elif command -v owut >/dev/null 2>&1; then owut check 2>&1; fi; echo "---VERSIONS_JSON---"; uclient-fetch -T 4 -qO- https://downloads.openwrt.org/.versions.json 2>/dev/null || wget -T 4 -qO- https://downloads.openwrt.org/.versions.json 2>/dev/null || true ) > /tmp/.openwrt_mgr_asu_cache.tmp 2>/dev/null; mv /tmp/.openwrt_mgr_asu_cache.tmp /tmp/.openwrt_mgr_asu_cache 2>/dev/null ) </dev/null >/dev/null 2>&1 & fi; cat /tmp/.openwrt_mgr_asu_cache 2>/dev/null || true',
     'true',
   ].join('; ');
+}
+
+/**
+ * Collects telemetry from a real OpenWrt host via SSH (or HTTP ubus fallback).
+ * Uses lightweight dynamic polling when a valid `prevSample.staticCache` exists, or full polling when `options.forceFull` is true or cache has expired.
+ */
+export async function pollRealHost(hostConfig, prevSample = null, options = {}) {
+  const forceFull = Boolean(options?.forceFull || options?.full);
+  const staticTtlMs =
+    typeof options?.staticTtlMs === 'number' && options.staticTtlMs > 0
+      ? options.staticTtlMs
+      : DEFAULT_STATIC_CACHE_TTL_MS;
+  const cachedStatic = prevSample?.staticCache || null;
+  const cacheAgeMs = cachedStatic?.timestamp ? Date.now() - cachedStatic.timestamp : Infinity;
+  const isFullPoll = forceFull || !cachedStatic || cacheAgeMs >= staticTtlMs;
+  const hasPrevCpuSample = Boolean(prevSample?.cpuStat && prevSample.cpuStat.total > 0);
+  const hasWirelessRadios = cachedStatic ? cachedStatic.hasWirelessRadios !== false : true;
+
+  const remoteScript = buildTelemetrySshScript({
+    full: isFullPoll,
+    hasPrevCpuSample,
+    hasWirelessRadios,
+  });
 
   try {
-    const { stdout } = await execSshCommand(hostConfig, remoteScript, { timeoutMs: 18000 });
-    return parseSshTelemetryOutput(hostConfig, stdout, prevSample);
+    const { stdout } = await execSshCommand(hostConfig, remoteScript, {
+      timeoutMs: isFullPoll ? 18000 : 10000,
+    });
+    return parseSshTelemetryOutput(hostConfig, stdout, prevSample, { isFullPoll });
   } catch (sshErr) {
     // If the SSH command exited non-zero because a sub-command failed, but stdout still contains telemetry sections, parse it as online
     if (sshErr && typeof sshErr.stdout === 'string' && /===(?:BOARD|UPTIME|SYSINFO|RELEASE)===/i.test(sshErr.stdout)) {
-      return parseSshTelemetryOutput(hostConfig, sshErr.stdout, prevSample);
+      return parseSshTelemetryOutput(hostConfig, sshErr.stdout, prevSample, { isFullPoll });
     }
     // If protocol is ubus_http or ubus_https, try HTTP ubus RPC
     if (hostConfig.protocol === 'ubus_http' || hostConfig.protocol === 'ubus_https') {
@@ -999,14 +1111,15 @@ export async function pollRealHost(hostConfig, prevSample = null) {
         const client = new OpenWrtUbusClient(hostConfig);
         await client.login();
         const [boardRes, infoRes, netDevRes] = await Promise.all([
-          client.getBoardInfo().catch(() => null),
+          isFullPoll || !cachedStatic?.board ? client.getBoardInfo().catch(() => null) : Promise.resolve([0, cachedStatic.board]),
           client.getSystemInfo().catch(() => null),
           client.call('network.device', 'status', {}).catch(() => null),
         ]);
-        const board = boardRes && boardRes[1] ? boardRes[1] : null;
+        const board = (boardRes && boardRes[1] ? boardRes[1] : null) || cachedStatic?.board || null;
         const sysinfo = infoRes && infoRes[1] ? infoRes[1] : null;
         const netDevMap = netDevRes && netDevRes[1] && typeof netDevRes[1] === 'object' ? netDevRes[1] : {};
         if (board || sysinfo) {
+          const nowMs = Date.now();
           const uptimeSec = sysinfo?.uptime ? Math.floor(sysinfo.uptime) : hostConfig.uptimeSec || 0;
           const memUsagePct = parseMeminfo('', sysinfo) ?? hostConfig.memUsagePct ?? 0;
           const load1 = sysinfo?.load?.[0] ? Math.min(100, Math.round((sysinfo.load[0] / 655.36) * 10) / 10) : 0;
@@ -1033,8 +1146,13 @@ export async function pollRealHost(hostConfig, prevSample = null) {
             }
           }
           const { switchPorts, hostInterfaces, allHostMacs } = parseSwitchFdbSection(synthLines.join('\n'));
+          const staticCache = isFullPoll || !cachedStatic
+            ? { timestamp: nowMs, board, hasWirelessRadios: false }
+            : cachedStatic;
           return {
             online: true,
+            pollMode: isFullPoll ? 'full' : 'dynamic',
+            staticCacheUpdatedAt: new Date(staticCache.timestamp).toISOString(),
             hostname: board?.hostname || hostConfig.hostname,
             model: board?.model || board?.system || hostConfig.model,
             firmware: board?.release?.description || hostConfig.firmware,
@@ -1050,7 +1168,7 @@ export async function pollRealHost(hostConfig, prevSample = null) {
             radios: [],
             switchPorts: switchPorts || [],
             clients: [],
-            sample: { timestamp: Date.now() },
+            sample: { timestamp: nowMs, staticCache },
           };
         }
       } catch {
@@ -1077,8 +1195,8 @@ export async function pollRealHost(hostConfig, prevSample = null) {
         'ubus call network.device status 2>/dev/null',
         'echo "===SWITCH_FDB==="',
         'ip link show 2>/dev/null | awk -F": " \'/^[0-9]+:/ && (/LOWER_UP/ || /state UP/) && !/NO-CARRIER/{sub(/@.*/,"",$2); print "LINKUP|" $2}\'',
-        'for p in /sys/class/net/*/brif/*; do [ -e "$p" ] || continue; br=${p%/brif/*}; br=${br##*/}; ifn=${p##*/}; d="/sys/class/net/$ifn"; echo "BRPORT|$br|$ifn|$(cat "$p/port_no" 2>/dev/null)|$(cat "$d/speed" 2>/dev/null)|$(cat "$d/duplex" 2>/dev/null)|$(cat "$d/operstate" 2>/dev/null)|$(cat "$d/carrier" 2>/dev/null)|$(cat "$d/address" 2>/dev/null)|$(cat "$p/state" 2>/dev/null)"; done',
-        'for d in /sys/class/net/*; do [ -e "$d" ] || continue; ifn=${d##*/}; [ "$ifn" = "lo" ] && continue; m=$(cat "$d/address" 2>/dev/null); [ -n "$m" ] && echo "HOSTIF|$ifn|$m|"; [ -d "$d/bridge" ] || [ -d "$d/brif" ] || [ -d "$d/wireless" ] || [ -d "$d/phy80211" ] && continue; case "$ifn" in br-*|br[0-9]*|switch|switch.*|*.*|wlan*|phy*|ra*|rax*|ath*|wds*|mesh*|mon*|wg*|tun*|tap*|docker*|veth*|sit*|gre*|ip*|ifb*|teql*|erspan*|pppoe*|ppp*|bat*|tailscale*|zt*|miireg*|dummy*|bond*) continue ;; esac; br=""; [ -e "$d/brport/bridge" ] && br=$(readlink "$d/brport/bridge" 2>/dev/null) && br=${br##*/}; echo "NICPORT|$ifn|$m|$(cat "$d/speed" 2>/dev/null)|$(cat "$d/duplex" 2>/dev/null)|$(cat "$d/operstate" 2>/dev/null)|$(cat "$d/carrier" 2>/dev/null)|$br|$(cat "$d/brport/state" 2>/dev/null)|$(cat "$d/brport/port_no" 2>/dev/null)"; done',
+        'for p in /sys/class/net/*/brif/*; do [ -e "$p" ] || continue; br=${p%/brif/*}; br=${br##*/}; ifn=${p##*/}; d="/sys/class/net/$ifn"; pno=""; spd=""; dup=""; oper=""; car=""; addr=""; bst=""; read -r pno < "$p/port_no" 2>/dev/null; read -r spd < "$d/speed" 2>/dev/null; read -r dup < "$d/duplex" 2>/dev/null; read -r oper < "$d/operstate" 2>/dev/null; read -r car < "$d/carrier" 2>/dev/null; read -r addr < "$d/address" 2>/dev/null; read -r bst < "$p/state" 2>/dev/null; echo "BRPORT|$br|$ifn|$pno|$spd|$dup|$oper|$car|$addr|$bst"; done',
+        'for d in /sys/class/net/*; do [ -e "$d" ] || continue; ifn=${d##*/}; [ "$ifn" = "lo" ] && continue; m=""; read -r m < "$d/address" 2>/dev/null; [ -n "$m" ] && echo "HOSTIF|$ifn|$m|"; [ -e "$d/brport/bridge" ] && continue; [ -d "$d/bridge" ] || [ -d "$d/brif" ] || [ -d "$d/wireless" ] || [ -d "$d/phy80211" ] && continue; case "$ifn" in br-*|br[0-9]*|switch|switch.*|*.*|wlan*|phy*|ra*|rax*|ath*|wds*|mesh*|mon*|wg*|tun*|tap*|docker*|veth*|sit*|gre*|ip*|ifb*|teql*|erspan*|pppoe*|ppp*|bat*|tailscale*|zt*|miireg*|dummy*|bond*) continue ;; esac; spd=""; dup=""; oper=""; car=""; read -r spd < "$d/speed" 2>/dev/null; read -r dup < "$d/duplex" 2>/dev/null; read -r oper < "$d/operstate" 2>/dev/null; read -r car < "$d/carrier" 2>/dev/null; echo "NICPORT|$ifn|$m|$spd|$dup|$oper|$car|||"; done',
         'uci show network 2>/dev/null | grep -E "\\.(ports|device|ifname)=" | sed "s/^/UCINET|/"',
         'command -v jsonfilter >/dev/null 2>&1 && [ -f /etc/board.json ] && jsonfilter -i /etc/board.json -e "@.network.*.ports[*]" -e "@.network.*.device" 2>/dev/null | sed "s/^/BOARDPORT|/"',
         'command -v bridge >/dev/null 2>&1 && bridge fdb show 2>/dev/null | awk \'!(/permanent/ && /master/ && !/self/){m=tolower($1);d="";b="";v="";for(i=2;i<=NF;i++){if($i=="dev")d=$(i+1);if($i=="master")b=$(i+1);if($i=="vlan")v=$(i+1)}if(m~/^([0-9a-f]{2}:){5}[0-9a-f]{2}$/&&d!="")print "FDB|"m"|"d"|"b"|"v}\'',
@@ -1807,7 +1925,32 @@ export function parseSwitchFdbSection(switchFdbTxt, iwInterfaces = new Map(), op
   };
 }
 
-export function parseSshTelemetryOutput(hostConfig, stdout, prevSample = null) {
+function extractStaticSwitchFdbLines(switchFdbTxt) {
+  const staticLines = [];
+  for (const rawLine of String(switchFdbTxt || '').split('\n')) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    if (
+      line.startsWith('IFADDR|') ||
+      line.startsWith('HOSTIF|') ||
+      line.startsWith('UCINET|') ||
+      line.startsWith('BOARDPORT|') ||
+      line.startsWith('DEFROUTE|')
+    ) {
+      staticLines.push(line);
+    } else if (line.startsWith('PORTCAP|')) {
+      const parts = line.split('|');
+      const ifn = parts[1] || '';
+      const maxSpd = parts[2] || '';
+      if (ifn && maxSpd) {
+        staticLines.push(`PORTCAP|${ifn}|${maxSpd}|||`);
+      }
+    }
+  }
+  return staticLines.join('\n');
+}
+
+export function parseSshTelemetryOutput(hostConfig, stdout, prevSample = null, options = {}) {
   const sections = {};
   let currentKey = null;
   for (const line of String(stdout || '').split('\n')) {
@@ -1820,6 +1963,7 @@ export function parseSshTelemetryOutput(hostConfig, stdout, prevSample = null) {
     }
   }
 
+  const hasSection = (k) => Object.prototype.hasOwnProperty.call(sections, k);
   const getSectionText = (k) => (sections[k] || []).join('\n').trim();
   const getSectionJson = (k) => {
     const txt = getSectionText(k);
@@ -1831,33 +1975,48 @@ export function parseSshTelemetryOutput(hostConfig, stdout, prevSample = null) {
     }
   };
 
-  const board = getSectionJson('BOARD');
-  const sysinfo = getSectionJson('SYSINFO');
-  const releaseTxt = getSectionText('RELEASE');
-  const modelTxt = getSectionText('MODEL');
+  const cachedStatic = prevSample?.staticCache || null;
+  const hasStaticSectionsInStdout =
+    hasSection('BOARD') ||
+    hasSection('RELEASE') ||
+    hasSection('WIRELESS') ||
+    hasSection('NETDEV_STATUS') ||
+    hasSection('OPKG_UPGRADABLE') ||
+    hasSection('ASU_STATUS');
+  const isFullPoll =
+    options?.isFullPoll !== undefined ? Boolean(options.isFullPoll) : Boolean(hasStaticSectionsInStdout || !cachedStatic);
+
+  const board = hasSection('BOARD') ? getSectionJson('BOARD') : (cachedStatic?.board ?? null);
+  const sysinfo = hasSection('SYSINFO') ? getSectionJson('SYSINFO') : (cachedStatic?.sysinfo ?? null);
+  const releaseTxt = hasSection('RELEASE') ? getSectionText('RELEASE') : (cachedStatic?.releaseTxt ?? '');
+  const modelTxt = hasSection('MODEL') ? getSectionText('MODEL') : (cachedStatic?.modelTxt ?? '');
   const uptimeTxt = getSectionText('UPTIME');
   const meminfoTxt = getSectionText('MEMINFO');
   const cpu1Txt = getSectionText('CPUSTAT1');
   const cpu2Txt = getSectionText('CPUSTAT2');
-  const macTxt = getSectionText('MAC');
+  const macTxt = hasSection('MAC') ? getSectionText('MAC') : (cachedStatic?.macTxt ?? '');
   const netdevTxt = getSectionText('NETDEV');
-  const wanJson = getSectionJson('WAN');
-  const wirelessJson = getSectionJson('WIRELESS');
-  const iwdevTxt = getSectionText('IWDEV');
+  const wanJson = hasSection('WAN') ? getSectionJson('WAN') : (cachedStatic?.wanJson ?? null);
+  const wirelessJson = hasSection('WIRELESS') ? getSectionJson('WIRELESS') : (cachedStatic?.wirelessJson ?? null);
+  const iwdevTxt = hasSection('IWDEV') ? getSectionText('IWDEV') : (cachedStatic?.iwdevTxt ?? '');
   const surveyTxt = getSectionText('SURVEY');
-  const scanDumpTxt = getSectionText('SCANDUMP');
+  const scanDumpTxt = hasSection('SCANDUMP') ? getSectionText('SCANDUMP') : (cachedStatic?.scanDumpTxt ?? '');
   const stationsTxt = getSectionText('STATIONS');
   const dhcpTxt = getSectionText('DHCP');
-  const uciDhcpTxt = getSectionText('UCI_DHCP');
-  const ubusDhcpJson = getSectionJson('UBUS_DHCP');
-  const ethersTxt = getSectionText('ETHERS');
+  const uciDhcpTxt = hasSection('UCI_DHCP') ? getSectionText('UCI_DHCP') : (cachedStatic?.uciDhcpTxt ?? '');
+  const ubusDhcpJson = hasSection('UBUS_DHCP') ? getSectionJson('UBUS_DHCP') : (cachedStatic?.ubusDhcpJson ?? null);
+  const ethersTxt = hasSection('ETHERS') ? getSectionText('ETHERS') : (cachedStatic?.ethersTxt ?? '');
   const arpTxt = getSectionText('ARP');
-  const netDevStatusJson = getSectionJson('NETDEV_STATUS');
+  const netDevStatusJson = hasSection('NETDEV_STATUS')
+    ? getSectionJson('NETDEV_STATUS')
+    : (cachedStatic?.netDevStatusJson ?? null);
   const switchFdbTxt = getSectionText('SWITCH_FDB');
-  const rdnsTxt = getSectionText('RDNS');
-  const opkgUpgradableTxt = getSectionText('OPKG_UPGRADABLE');
-  const asuStatusTxt = getSectionText('ASU_STATUS');
-  const asuCheckTxt = getSectionText('ASU_CHECK');
+  const rdnsTxt = hasSection('RDNS') ? getSectionText('RDNS') : (cachedStatic?.rdnsTxt ?? '');
+  const opkgUpgradableTxt = hasSection('OPKG_UPGRADABLE')
+    ? getSectionText('OPKG_UPGRADABLE')
+    : (cachedStatic?.opkgUpgradableTxt ?? '');
+  const asuStatusTxt = hasSection('ASU_STATUS') ? getSectionText('ASU_STATUS') : (cachedStatic?.asuStatusTxt ?? '');
+  const asuCheckTxt = hasSection('ASU_CHECK') ? getSectionText('ASU_CHECK') : (cachedStatic?.asuCheckTxt ?? '');
 
   // 1. Identity, Model & Firmware
   let hostname = board?.hostname || hostConfig.hostname || hostConfig.name;
@@ -1887,9 +2046,13 @@ export function parseSshTelemetryOutput(hostConfig, stdout, prevSample = null) {
   // 3. Memory Usage (%)
   const memUsagePct = parseMeminfo(meminfoTxt, sysinfo) ?? 0;
 
-  // 4. CPU Usage (%) from /proc/stat delta
+  // 4. CPU Usage (%) and CPU Core Count from /proc/stat
   const stat1 = parseCpuLine(cpu1Txt);
   const stat2 = parseCpuLine(cpu2Txt);
+  const detectedCpuCores =
+    parseCpuCoreCount(cpu2Txt, cpu1Txt) ??
+    cachedStatic?.cpuCores ??
+    (typeof hostConfig?.cpuCores === 'number' && hostConfig.cpuCores > 0 ? hostConfig.cpuCores : null);
   let cpuUsagePct = 0;
   if (stat1 && stat2 && stat2.total > stat1.total) {
     const dTotal = stat2.total - stat1.total;
@@ -2293,7 +2456,15 @@ export function parseSshTelemetryOutput(hostConfig, stdout, prevSample = null) {
   flushStation();
 
   // 9b. Parse physical switch ports & bridge FDB (`===SWITCH_FDB===` + `===NETDEV_STATUS===`)
+  const freshSwitchStaticTxt = extractStaticSwitchFdbLines(switchFdbTxt);
+  const switchStaticTxt = freshSwitchStaticTxt || cachedStatic?.switchStaticTxt || '';
   let mergedSwitchFdbTxt = switchFdbTxt;
+  if (!freshSwitchStaticTxt && switchStaticTxt) {
+    mergedSwitchFdbTxt = mergedSwitchFdbTxt
+      ? `${switchStaticTxt}\n${mergedSwitchFdbTxt}`
+      : switchStaticTxt;
+  }
+  const hasFreshNetDevStatus = hasSection('NETDEV_STATUS');
   if (netDevStatusJson && typeof netDevStatusJson === 'object') {
     const portCapLines = [];
     for (const [ifn, info] of Object.entries(netDevStatusJson)) {
@@ -2317,20 +2488,24 @@ export function parseSshTelemetryOutput(hostConfig, stdout, prevSample = null) {
           if (spd > maxSpd) maxSpd = spd;
         }
       }
-      const curMatch = String(info.speed || '').match(/^(\d+)/);
-      const curSpdNum = curMatch ? parseInt(curMatch[1], 10) : 0;
-      const curSpd = curSpdNum > 0 ? curSpdNum : '';
-      const hasLinkPartner =
-        Array.isArray(info['link-partner-advertising']) && info['link-partner-advertising'].length > 0;
-      const carr =
-        info.carrier === true || hasLinkPartner
-          ? '1'
-          : info.carrier === false
-            ? '0'
-            : '';
-      const up = info.up === true ? '1' : info.up === false ? '0' : '';
-      if (maxSpd > 0 || curSpd || carr !== '' || up !== '') {
-        portCapLines.push(`PORTCAP|${ifn}|${maxSpd || ''}|${curSpd}|${carr}|${up}`);
+      if (hasFreshNetDevStatus) {
+        const curMatch = String(info.speed || '').match(/^(\d+)/);
+        const curSpdNum = curMatch ? parseInt(curMatch[1], 10) : 0;
+        const curSpd = curSpdNum > 0 ? curSpdNum : '';
+        const hasLinkPartner =
+          Array.isArray(info['link-partner-advertising']) && info['link-partner-advertising'].length > 0;
+        const carr =
+          info.carrier === true || hasLinkPartner
+            ? '1'
+            : info.carrier === false
+              ? '0'
+              : '';
+        const up = info.up === true ? '1' : info.up === false ? '0' : '';
+        if (maxSpd > 0 || curSpd || carr !== '' || up !== '') {
+          portCapLines.push(`PORTCAP|${ifn}|${maxSpd || ''}|${curSpd}|${carr}|${up}`);
+        }
+      } else if (maxSpd > 0) {
+        portCapLines.push(`PORTCAP|${ifn}|${maxSpd}|||`);
       }
     }
     if (portCapLines.length > 0) {
@@ -2549,36 +2724,79 @@ export function parseSshTelemetryOutput(hostConfig, stdout, prevSample = null) {
   );
 
   // 13. Parse available package updates (`opkg list-upgradable`) & Attended Sysupgrade firmware advisory
-  const upgradablePackages = parseOpkgUpgradable(opkgUpgradableTxt);
-  const attendedSysupgrade = evaluateAttendedSysupgrade({
-    board,
-    firmware,
-    releaseTxt,
-    asuStatusTxt,
-    asuCheckTxt,
-  });
-  const updates = {
-    packagesCount: upgradablePackages.length,
-    packages: upgradablePackages,
-    firmwareUpdateAvailable: attendedSysupgrade.firmwareUpdateAvailable,
-    availableFirmwareVersion: attendedSysupgrade.availableVersion,
-    attendedSysupgrade,
-    lastChecked: new Date().toISOString(),
-  };
+  const hasUpdateSectionsInStdout =
+    hasSection('OPKG_UPGRADABLE') || hasSection('ASU_STATUS') || hasSection('ASU_CHECK');
+  let updates;
+  let updatesLastChecked;
+  if (!hasUpdateSectionsInStdout && cachedStatic?.updates) {
+    updates = cachedStatic.updates;
+    updatesLastChecked = cachedStatic.updatesLastChecked || cachedStatic.updates.lastChecked || new Date(nowMs).toISOString();
+  } else {
+    const upgradablePackages = parseOpkgUpgradable(opkgUpgradableTxt);
+    const attendedSysupgrade = evaluateAttendedSysupgrade({
+      board,
+      firmware,
+      releaseTxt,
+      asuStatusTxt,
+      asuCheckTxt,
+    });
+    updatesLastChecked =
+      hasUpdateSectionsInStdout || !cachedStatic?.updatesLastChecked
+        ? new Date(nowMs).toISOString()
+        : cachedStatic.updatesLastChecked;
+    updates = {
+      packagesCount: upgradablePackages.length,
+      packages: upgradablePackages,
+      firmwareUpdateAvailable: attendedSysupgrade.firmwareUpdateAvailable,
+      availableFirmwareVersion: attendedSysupgrade.availableVersion,
+      attendedSysupgrade,
+      lastChecked: updatesLastChecked,
+    };
+  }
 
   const clientBytes = {};
   for (const c of clients) {
     clientBytes[c.mac] = { rxBytes: c.rxBytesTotal || 0, txBytes: c.txBytesTotal || 0 };
   }
 
+  const staticCacheTimestamp = isFullPoll ? nowMs : (cachedStatic?.timestamp || nowMs);
+  const nextStaticCache = {
+    timestamp: staticCacheTimestamp,
+    board,
+    sysinfo,
+    releaseTxt,
+    modelTxt,
+    macTxt,
+    wanJson,
+    wirelessJson,
+    iwdevTxt,
+    scanDumpTxt,
+    uciDhcpTxt,
+    ubusDhcpJson,
+    ethersTxt,
+    netDevStatusJson,
+    switchStaticTxt,
+    rdnsTxt,
+    opkgUpgradableTxt,
+    asuStatusTxt,
+    asuCheckTxt,
+    updates,
+    updatesLastChecked,
+    hasWirelessRadios: radios.length > 0,
+    cpuCores: detectedCpuCores,
+  };
+
   return {
     online: true,
+    pollMode: isFullPoll ? 'full' : 'dynamic',
+    staticCacheUpdatedAt: new Date(staticCacheTimestamp).toISOString(),
     hostname,
     model,
     vendor: lookupVendor(mac, model),
     firmware,
     uptimeSec,
     cpuUsagePct,
+    cpuCores: detectedCpuCores,
     memUsagePct,
     mac,
     allMacs,
@@ -2598,10 +2816,11 @@ export function parseSshTelemetryOutput(hostConfig, stdout, prevSample = null) {
     fdbMap: Object.fromEntries(fdbByMac),
     sample: {
       timestamp: nowMs,
-      cpuStat: stat2 || stat1,
+      cpuStat: stat2 || stat1 || prevSample?.cpuStat || null,
       netCounters,
       clientBytes,
       radioSurvey: radioSurveyCounters,
+      staticCache: nextStaticCache,
     },
   };
 }
